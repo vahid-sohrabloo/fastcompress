@@ -11,7 +11,7 @@ Writes `bench/results/<date>-<label>.md` with columns
 
 - Corpus: each Silesia file whole, plus `silesia.tar` with 1M and 4M independent blocks. `-f` overrides it; `FILE:BLOCK` benchmarks FILE in independent BLOCK-byte blocks.
 - Every cell is the median of `-n` (default 3) runs, C and Go interleaved, each pinned with `taskset -c $CPU` (default 2, a P-core on the i9-13900H).
-- Every level is ported; the `n/a (not ported)` row compare.sh still has for a gobench failure that says "not ported" no longer occurs.
+- Every level is ported. compare.sh still writes an `n/a (not ported)` row when gobench fails with a "not ported" message, but that failure no longer occurs.
 - A row whose C and Go ratios differ gets `MISMATCH`: output must be byte-identical, so equal ratios are the check.
 - Runtime: `-i` (default 5) is the seconds `zstd -b` spends on *each* of its compression and decompression loops; `-g` (default 2) is the minimum seconds of Go timed passes. Level 1 on the full corpus takes about 11 minutes with the defaults; lower `-i`/`-n` for quick checks.
 
