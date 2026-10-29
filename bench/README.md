@@ -4,12 +4,12 @@ Setup: `ref/fetch.sh` builds `ref/zstd/programs/zstd` and fetches the Silesia co
 
 ## compare.sh
 
-    bench/compare.sh [-l "1 3 7 11"] [-f "FILE..."] [-i SECS] [-g SECS] [-n RUNS] -label NAME
+    bench/compare.sh [-l "1 3 7 11"] [-f "FILE[:BLOCK]..."] [-i SECS] [-g SECS] [-n RUNS] -label NAME
 
 Writes `bench/results/<date>-<label>.md` with columns
 `file | level | block | C MB/s | Go MB/s | % of C | C ratio | Go ratio`, plus a geometric mean of "% of C".
 
-- Corpus: each Silesia file whole, plus `silesia.tar` with 1M and 4M independent blocks. `-f` overrides it.
+- Corpus: each Silesia file whole, plus `silesia.tar` with 1M and 4M independent blocks. `-f` overrides it; `FILE:BLOCK` benchmarks FILE in independent BLOCK-byte blocks.
 - Every cell is the median of `-n` (default 3) runs, C and Go interleaved, each pinned with `taskset -c $CPU` (default 2, a P-core on the i9-13900H).
 - Levels the port does not have yet are written as `n/a (not ported)`.
 - A row whose C and Go ratios differ gets `MISMATCH`: output must be byte-identical, so equal ratios are the check.
@@ -33,4 +33,4 @@ Mirrors the above: one `Encoder` (pooling its cctx), one `EncodeAll` per indepen
 
     go test ./zstd -run xxx -bench 'EncodeAll/xml/1' -cpuprofile cpu.prof
 
-`BenchmarkEncodeAll/<file>/<level>` skips missing corpus files and levels not ported.
+`BenchmarkEncodeAll/<file>/<level>` skips missing corpus files.

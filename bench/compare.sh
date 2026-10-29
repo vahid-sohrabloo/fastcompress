@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compare gobench (this port) against `zstd -b<level>` from C zstd v1.5.7.
 #
-#   bench/compare.sh [-l "1 3 7 11"] [-f "FILE..."] [-i SECS] [-g SECS] [-n RUNS] -label NAME
+#   bench/compare.sh [-l "1 3 7 11"] [-f "FILE[:BLOCK]..."] [-i SECS] [-g SECS] [-n RUNS] -label NAME
 #
 # Writes bench/results/<date>-<label>.md. Each row: taskset -c $CPU, RUNS
 # (default 3) interleaved C/Go runs, median speed reported. A level that is not
@@ -39,7 +39,7 @@ go build -o "$BIN/gobench" ./bench/cmd/gobench
 # "file:block" entries; block 0 = whole file.
 SPECS=()
 if [ -n "$FILES" ]; then
-  for f in $FILES; do SPECS+=("$f:0"); done
+  for f in $FILES; do case "$f" in *:*) SPECS+=("$f") ;; *) SPECS+=("$f:0") ;; esac; done
 else
   for f in bench/corpus/silesia/*; do [ -f "$f" ] && SPECS+=("$f:0"); done
   if [ -f bench/corpus/silesia.tar ]; then
@@ -81,7 +81,10 @@ mkdir -p bench/results
 PCTS=()
 for spec in "${SPECS[@]}"; do
   f=${spec%:*}; blk=${spec##*:}
-  bname=$(basename "$f"); [ "$blk" = 0 ] && blabel=whole || blabel=$((blk / 1048576))M
+  bname=$(basename "$f"); blabel=whole
+  if [ "$blk" != 0 ]; then
+    if [ $((blk % 1048576)) = 0 ]; then blabel=$((blk / 1048576))M; else blabel=$((blk / 1024))K; fi
+  fi
   for lvl in $LEVELS; do
     echo "== $bname L$lvl block=$blabel" >&2
     if ! probe=$(go_bench "$lvl" "$blk" "$f" 2>&1); then
