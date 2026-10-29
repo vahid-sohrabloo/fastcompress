@@ -86,4 +86,3 @@ func encodeSequences(dst []byte, ctML, ctOF, ctLL fse.CTable, seqs []seqDef,
 	}
 	return streamSize, nil
 }
-

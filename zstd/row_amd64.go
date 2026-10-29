@@ -80,3 +80,77 @@ func rowSearch(ms *matchState, ip, iLimit int, relRow, tag, rowLog, nbAttempts, 
 	}
 	return ml, best
 }
+
+// rowFindBestMatchAsm is rowFindBestMatch (noDict) for the block set up in
+// p: the table update with the hash cache (skipping long matches' middles),
+// the search and the insertion of ip, prefetching as C does. It returns
+// the match length (below 4: none) and offBase (offBaseNotFound if none),
+// or ml = -1 if a row entry pointed at or after ip (impossible).
+//
+// Preconditions (checked by rowAsmSetup and rowFindBestMatchAsmCall): the
+// tables hold every row; 0 < ip < iLimit <= len(b) and ip+16 <= len(b)
+// (the hash cache reads 8 bytes at ip+8); lowestValid >= baseIdx;
+// *nextToUpdate <= ip+baseIdx.
+//
+//go:noescape
+func rowFindBestMatchAsm(p *rowAsmParams, ip, iLimit int, lazySkipping bool) (ml int, offBase uint32)
+
+// rowUpdateAsmHelper is rowFindBestMatchAsm's register-convention update
+// loop (never called from Go).
+func rowUpdateAsmHelper()
+
+// rowAsmSetup prepares ms.rowAsm for compressBlockLazyGeneric's row
+// searches over a block ending at iend (a position in ms.window.base).
+func rowAsmSetup(ms *matchState, mls, rowLog uint32, iend int) {
+	p := &ms.rowAsm
+	p.ok = false
+	b := ms.window.base
+	rows := 1 << (ms.rowHashLog + rowLog)
+	if !useRowAsm || rowLog < 4 || rowLog > 6 || len(ms.hashTable) < rows || len(ms.tagTable) < rows ||
+		iend > len(b) || len(b) == 0 || ms.window.lowLimit < ms.window.baseIdx {
+		return
+	}
+	m := mls & 15
+	cParams := &ms.cParams
+	*p = rowAsmParams{
+		hashTable:    &ms.hashTable[0],
+		tagTable:     &ms.tagTable[0],
+		b:            &b[0],
+		cache:        &ms.hashCache,
+		nextToUpdate: &ms.nextToUpdate,
+		entropy:      &ms.hashSaltEntropy,
+		shift:        uint64(saltedHashShift[m]),
+		hShift:       uint64(64 - (ms.rowHashLog + rowHashTagBits)),
+		prime:        saltedHashPrime[m],
+		saltAdj:      ms.hashSalt << saltedHashSaltShift[m],
+		baseIdx:      ms.window.baseIdx,
+		rowLog:       rowLog,
+		rowMask:      1<<rowLog - 1,
+		nbAttempts:   1 << min(cParams.searchLog, rowLog),
+		lowestValid:  ms.window.lowLimit,
+		maxDistance:  1 << cParams.windowLog,
+		ok:           true,
+		bLen:         iend,
+	}
+	if ms.loadedDictEnd != 0 {
+		p.isDictionary = 1
+	}
+	if rowLog >= 5 {
+		p.pfHash2 = 64
+	}
+	if rowLog == 6 {
+		p.pfTag2 = 32
+	}
+}
+
+func rowFindBestMatchAsmCall(ms *matchState, ip, iLimit int) (int, uint32) {
+	p := &ms.rowAsm
+	if ip <= 0 || ip >= iLimit || iLimit > p.bLen || ip+16 > p.bLen || ms.nextToUpdate > uint32(ip)+p.baseIdx {
+		return rowFindBestMatch(ms, ip, iLimit, min(max(ms.cParams.minMatch, 4), 6), p.rowLog)
+	}
+	ml, offBase := rowFindBestMatchAsm(p, ip, iLimit, ms.lazySkipping)
+	if ml < 0 {
+		panic("zstd: row table holds an index at or after the current position")
+	}
+	return ml, offBase
+}

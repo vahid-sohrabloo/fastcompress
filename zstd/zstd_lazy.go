@@ -629,6 +629,9 @@ func hcFindBestMatch(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
 // and rowLog as arguments.
 func searchMax(ms *matchState, ip, iLimit int, mls, rowLog uint32, method searchMethod) (int, uint32) {
 	if method == searchRowHash {
+		if ms.rowAsm.ok {
+			return rowFindBestMatchAsmCall(ms, ip, iLimit)
+		}
 		return rowFindBestMatch(ms, ip, iLimit, mls, rowLog)
 	}
 	if method == searchBinaryTree {
@@ -719,6 +722,7 @@ func compressBlockLazyGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32,
 
 	if method == searchRowHash {
 		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+		rowAsmSetup(ms, mls, rowLog, iend)
 	}
 
 	// Match Loop
@@ -1401,6 +1405,7 @@ func compressBlockLazyExtDictGeneric(ms *matchState, ss *seqStore, rep *[repNum]
 	}
 	if method == searchRowHash {
 		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+		rowAsmSetup(ms, mls, rowLog, iend)
 	}
 
 	// Match Loop
@@ -2148,6 +2153,7 @@ func compressBlockLazyDictMatchStateGeneric(ms *matchState, ss *seqStore, rep *[
 
 	if method == searchRowHash {
 		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+		rowAsmSetup(ms, mls, rowLog, iend)
 	}
 
 	// Match Loop

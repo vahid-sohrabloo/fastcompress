@@ -97,3 +97,31 @@ func rowSearchGeneric(ms *matchState, ip, iLimit int, relRow, tag, rowLog, nbAtt
 	}
 	return ml, best
 }
+
+// rowAsmParams holds what the amd64 rowFindBestMatchAsm reads for one
+// block; ok is false when it is not set up (always, without assembly).
+// The layout is fixed: row_amd64.s reads the fields by offset (checked by
+// TestRowAsmParamsLayout).
+type rowAsmParams struct {
+	hashTable    *uint32                   // 0
+	tagTable     *byte                     // 8
+	b            *byte                     // 16
+	cache        *[rowHashCacheSize]uint32 // 24
+	nextToUpdate *uint32                   // 32
+	entropy      *uint32                   // 40
+	shift        uint64                    // 48: hash = ((le64 << shift) * prime ^ saltAdj) >> hShift
+	hShift       uint64                    // 56
+	prime        uint64                    // 64
+	saltAdj      uint64                    // 72
+	baseIdx      uint32                    // 80
+	rowLog       uint32                    // 84
+	rowMask      uint32                    // 88
+	nbAttempts   uint32                    // 92
+	lowestValid  uint32                    // 96
+	maxDistance  uint32                    // 100
+	isDictionary uint32                    // 104
+	ok           bool                      // 108
+	bLen         int                       // 112: positions up to bLen-16 may be searched
+	pfHash2      uint64                    // 120: 64 if a hash row spans a second cache line (rowLog >= 5), else 0
+	pfTag2       uint64                    // 128: 32 if a tag row spans a second line (rowLog == 6), else 0
+}
