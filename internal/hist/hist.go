@@ -2,8 +2,6 @@
 // Meta Platforms, Inc. and affiliates; BSD/GPLv2 dual license).
 package hist
 
-import "encoding/binary"
-
 // MaxSymbolTooSmall is returned by Count (as C returns
 // ERROR(maxSymbolValue_tooSmall)) when src holds a symbol above *maxSymbol.
 // count and *maxSymbol are left untouched in that case.
@@ -48,33 +46,11 @@ func countParallel(count *[256]uint32, maxSymbol *uint32, src []byte, check bool
 		return 0
 	}
 	var ws [4 * 256]uint32
+	countStripes(&ws, src)
 	c1 := (*[256]uint32)(ws[0:256])
 	c2 := (*[256]uint32)(ws[256:512])
 	c3 := (*[256]uint32)(ws[512:768])
 	c4 := (*[256]uint32)(ws[768:1024])
-
-	// by stripes of 16 bytes. C reads 4 bytes before checking the size; the
-	// loop cannot run for n < 20, so that case is skipped here.
-	ip := 0
-	if n >= 20 {
-		cached := binary.LittleEndian.Uint32(src)
-		ip = 4
-		for ip < n-15 {
-			for range 4 {
-				c := cached
-				cached = binary.LittleEndian.Uint32(src[ip:])
-				ip += 4
-				c1[byte(c)]++
-				c2[byte(c>>8)]++
-				c3[byte(c>>16)]++
-				c4[c>>24]++
-			}
-		}
-		ip -= 4
-	}
-	for ; ip < n; ip++ {
-		c1[src[ip]]++
-	}
 
 	var maxCount uint32
 	for s := range c1 {
