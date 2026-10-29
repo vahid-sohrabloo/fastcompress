@@ -524,6 +524,12 @@ func (s *CState) InitCState(ct CTable) {
 	s.stateLog = tableLog
 }
 
+// Value returns the state value, for an assembly encoding loop.
+func (s *CState) Value() uint32 { return s.value }
+
+// SetValue sets the state value an assembly loop returned.
+func (s *CState) SetValue(v uint32) { s.value = v }
+
 func stateAt(t []uint32, i uint32) uint32 { return t[i>>1] >> ((i & 1) * 16) & 0xFFFF }
 
 // InitCState2 is InitCState but the first symbol to include (the last to be

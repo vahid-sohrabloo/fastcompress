@@ -75,6 +75,21 @@ func (c *CStream) FlushBits() {
 	c.bitContainer >>= uint(nbBytes) * 8
 }
 
+// Raw returns the writer's state for an assembly encoding loop: the bit
+// container, its bit count, and the write offset and its clamp (byte
+// offsets into Buf()).
+func (c *CStream) Raw() (container uint64, bitPos uint, ptr, endPtr int) {
+	return c.bitContainer, c.bitPos, c.ptr, c.endPtr
+}
+
+// SetRaw restores the state an assembly loop returned (see Raw).
+func (c *CStream) SetRaw(container uint64, bitPos uint, ptr int) {
+	c.bitContainer, c.bitPos, c.ptr = container, bitPos, ptr
+}
+
+// Buf returns the destination buffer passed to Init.
+func (c *CStream) Buf() []byte { return c.buf }
+
 // Close appends the end mark, flushes and returns the stream size in bytes,
 // or 0 if it did not fit. C: bitstream.h:BIT_closeCStream
 func (c *CStream) Close() int {
