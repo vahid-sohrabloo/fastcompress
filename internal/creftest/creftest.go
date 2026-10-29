@@ -208,8 +208,8 @@ func itoa(n int) string {
 // Inputs returns the deterministic input corpus for C-vs-Go comparisons: the
 // synthetic set (sizes 0, 1, 16KiB±1, 128KiB±1, 256KiB±1, window-size±1,
 // all-zero, single repeated byte, random, periods 2..8, text, and the
-// entropy edge cases litrle, litlong and nbseqlong) plus the C
-// repo's README/format spec (internal/creftest/testdata). Unless
+// entropy edge cases litrle, litlong and nbseqlong, and the step4-* inputs)
+// plus the C repo's README/format spec (internal/creftest/testdata). Unless
 // testing.Short() it also includes inputs > 1 MiB and bench/corpus/silesia/*
 // when present.
 func Inputs(t testing.TB) map[string][]byte {

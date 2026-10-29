@@ -73,26 +73,10 @@ func sortedInputs(t *testing.T) ([]string, map[string][]byte) {
 	return names, inputs
 }
 
-// crefPreSplits reports whether C's ZSTD_compress2 cut any block of src
-// shorter than the 128 KiB maximum before the last one, i.e. whether its
-// pre-block-splitter (ZSTD_optimalBlockSize, ported in a later task) changed
-// the block boundaries.
-func crefPreSplits(t *testing.T, src []byte, c compress2Case) bool {
-	blocks := parseCrefSeqs(t, creftest.Run(t, src, c.crefArgs("seqs")...))
-	for _, b := range blocks[:len(blocks)-1] {
-		if b.src != 128<<10 {
-			return true
-		}
-	}
-	return false
-}
-
 // TestCompress2Cref requires cctx.compress2 to produce exactly the frame of
 // C's ZSTD_compress2 at level 1, with and without checksum and with window
-// logs 10 and 17, for every input that fits one 128 KiB block. Multi-block
-// inputs are byte-compared too when C did not pre-split them (the splitter
-// arrives in a later task); otherwise they must round-trip through C's
-// decoder.
+// logs 10 and 17, for every input, including multi-block ones that C
+// pre-splits (inputs over 128 KiB).
 func TestCompress2Cref(t *testing.T) {
 	names, inputs := sortedInputs(t)
 	for _, c := range level1Cases() {
@@ -112,16 +96,6 @@ func TestCompress2Cref(t *testing.T) {
 				}
 				if string(again[:6]) != "prefix" || !bytes.Equal(again[6:], got) {
 					t.Fatalf("reused context produced a different frame")
-				}
-				// Pre-splitting needs full 128 KiB blocks: window logs below
-				// 17 shrink blockSizeMax (C: ZSTD_optimalBlockSize).
-				canSplit := len(src) > 128<<10 && (c.windowLog == 0 || c.windowLog >= 17)
-				if canSplit && crefPreSplits(t, src, c) {
-					if !bytes.Equal(creftest.DecodeC(t, got), src) {
-						t.Fatal("round trip through C decoder differs from input")
-					}
-					t.Logf("C pre-split this input: round trip only")
-					return
 				}
 				want := creftest.Run(t, src, c.crefArgs("compress")...)
 				if !bytes.Equal(got, want) {
@@ -267,7 +241,8 @@ func TestCompress2IndexResetTables(t *testing.T) {
 }
 
 // TestCompress2ReuseMultiBlock is TestCompress2Reuse for inputs larger
-// than one block, at window log 10 (1 KiB blocks, never pre-split by C).
+// than one block, at window log 10 (1 KiB blocks, never pre-split by C) and
+// at the default window log (pre-split blocks).
 func TestCompress2ReuseMultiBlock(t *testing.T) {
 	names, inputs := sortedInputs(t)
 	cc := newCCtx()
@@ -277,6 +252,9 @@ func TestCompress2ReuseMultiBlock(t *testing.T) {
 			continue
 		}
 		c := compress2Case{level: 1, checksum: i%2 == 1, windowLog: 10}
+		if i%3 == 0 {
+			c.windowLog = 0 // default window log: C pre-splits full blocks
+		}
 		cc.setLevel(c.level)
 		cc.setChecksum(c.checksum)
 		if err := cc.setWindowLog(c.windowLog); err != nil {

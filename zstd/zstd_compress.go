@@ -575,7 +575,8 @@ type cctx struct {
 	cBlocks    [2]compressedBlockState
 	seqStore   seqStore
 
-	tmpWorkspace []byte // C: tmpWorkspace, used for entropy
+	tmpWorkspace []byte   // C: tmpWorkspace, used for entropy
+	splitStats   *fpStats // pre-block-splitter workspace (C: tmpWorkspace too)
 	bmi2         bool
 }
 
@@ -994,15 +995,16 @@ func noCompressBlock(dst, src []byte, lastBlock uint32) (int, error) {
 	return blockHeaderSize + len(src), nil
 }
 
-// optimalBlockSize returns the size of the next block.
-// C: zstd_compress.c:ZSTD_optimalBlockSize — its pre-block splitter
-// (ZSTD_splitBlock) is ported in Task 9; until then, where C would call it
-// this returns a full block, so frames whose later full blocks C splits
-// differ from C.
-func optimalBlockSize(srcSize, blockSizeMax int, splitLevel int, savings int64) int {
+// splitLevels is the pre-split level per compression strategy, from fast to
+// btultra2 (indexed by strategy; entry 0 is unused). C: zstd_compress.c:ZSTD_optimalBlockSize
+var splitLevels = [...]int{0, 0, 1, 2, 2, 3, 3, 4, 4, 4}
+
+// optimalBlockSize returns the size of the next block; src is the remaining
+// input. C: zstd_compress.c:ZSTD_optimalBlockSize
+func (c *cctx) optimalBlockSize(src []byte, blockSizeMax int, splitLevel int, strat strategy, savings int64) int {
 	// note: conservatively only split full blocks (128 KB) currently.
-	if srcSize < 128<<10 || blockSizeMax < 128<<10 {
-		return min(srcSize, blockSizeMax)
+	if len(src) < 128<<10 || blockSizeMax < 128<<10 {
+		return min(len(src), blockSizeMax)
 	}
 	// do not split incompressible data though: require verified savings to
 	// allow pre-splitting. Note: as a consequence, the first full block is
@@ -1010,10 +1012,19 @@ func optimalBlockSize(srcSize, blockSizeMax int, splitLevel int, savings int64) 
 	if savings < 3 {
 		return 128 << 10
 	}
+	// apply splitLevel, or use the default value (which depends on strat).
 	if splitLevel == 1 {
 		return 128 << 10
 	}
-	return 128 << 10 // C: ZSTD_splitBlock(src, blockSizeMax, level, ...)
+	if splitLevel == 0 {
+		splitLevel = splitLevels[strat]
+	} else {
+		splitLevel -= 2
+	}
+	if c.splitStats == nil { // C: cctx->tmpWorkspace
+		c.splitStats = new(fpStats)
+	}
+	return splitBlock(src, blockSizeMax, splitLevel, c.splitStats)
 }
 
 // compressFrameChunk compresses src into one or more blocks, consuming all
@@ -1037,7 +1048,7 @@ func (c *cctx) compressFrameChunk(dst, src []byte, lastFrameChunk bool) (int, er
 
 	for remaining > 0 {
 		ms := &c.blockState.matchState
-		blockSize := optimalBlockSize(remaining, blockSizeMax, c.appliedParams.preBlockSplitterLevel, savings)
+		blockSize := c.optimalBlockSize(src[ip:], blockSizeMax, c.appliedParams.preBlockSplitterLevel, c.appliedParams.cParams.strategy, savings)
 		var lastBlock uint32
 		if lastFrameChunk && blockSize == remaining {
 			lastBlock = 1

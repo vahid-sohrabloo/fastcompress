@@ -95,6 +95,11 @@
  *   type=0 pos=0", and "lits=". type is the block's final form (raw =
  *   uncompressed, rle, or compressed) and src the bytes it covers.
  *
+ * presplit -level N    N in 0..4 (the ZSTD_splitBlock level, NOT a compression
+ *   level; -level is reused as the option name). Calls ZSTD_splitBlock on the
+ *   first 128 KiB of stdin (input must be at least 128 KiB, else exit 1).
+ *   Output: the returned split position as a decimal line, e.g. "65536\n".
+ *
  * OUTPUT BUFFER CONTRACT: every ZSTD_compressStream2 call in cref (compress
  * -pledged 0, and stream) uses an output buffer of exactly
  * ZSTD_CStreamOutSize() bytes which is drained into the result after each
@@ -119,6 +124,7 @@
 #include "huf.h"
 #include "hist.h"
 #include "zstd_compress_internal.h"
+#include "zstd_preSplit.h"
 
 extern void (*ZSTD_crefHook)(const SeqStore_t*, size_t, int); /* seqdump.patch */
 
@@ -181,7 +187,7 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-chunks"))     o->chunks = v;
         else if (!strcmp(a, "-flush-after")) o->flushAfter = v;
         else if (!strcmp(a, "-frame-out"))  o->frameOut = v;
-        else { fprintf(stderr, "cref: unknown option %s\n", a); exit(2); }
+    else { fprintf(stderr, "cref: unknown option %s\n", a); exit(2); }
     }
 }
 
@@ -380,6 +386,13 @@ static int cmdSeqs(const Opts* o, const unsigned char* src, size_t n) {
     return 0;
 }
 
+static int cmdPresplit(const Opts* o, const unsigned char* src, size_t n) {
+    static U64 wksp[ZSTD_SLIPBLOCK_WORKSPACESIZE / 8 + 1];
+    if (n < (128 << 10) || o->level < 0 || o->level > 4) die("presplit: need >= 128 KiB input and -level 0..4");
+    printf("%zu\n", ZSTD_splitBlock(src, 128 << 10, o->level, wksp, sizeof(wksp)));
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: cref <mode> [options] < in > out\n"); return 2; }
     const char* m = argv[1];
@@ -396,6 +409,7 @@ int main(int argc, char** argv) {
     else if (!strcmp(m, "huf1x"))    rc = cmdHuf(&o, src, n, 1);
     else if (!strcmp(m, "huf4x"))    rc = cmdHuf(&o, src, n, 4);
     else if (!strcmp(m, "seqs"))     rc = cmdSeqs(&o, src, n);
+    else if (!strcmp(m, "presplit")) rc = cmdPresplit(&o, src, n);
     else { fprintf(stderr, "cref: unknown mode %s\n", m); return 2; }
     if (fflush(stdout)) die("write error");
     return rc;
