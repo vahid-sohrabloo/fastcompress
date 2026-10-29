@@ -1,0 +1,118 @@
+// Package hist ports lib/compress/hist.c from libzstd v1.5.7 (Copyright (c)
+// Meta Platforms, Inc. and affiliates; BSD/GPLv2 dual license).
+package hist
+
+import "encoding/binary"
+
+// MaxSymbolTooSmall is returned by Count (as C returns
+// ERROR(maxSymbolValue_tooSmall)) when src holds a symbol above *maxSymbol.
+// count and *maxSymbol are left untouched in that case.
+const MaxSymbolTooSmall = ^uint32(0)
+
+// CountSimple counts bytes with a single table. It zeroes count[0..*maxSymbol],
+// sets *maxSymbol to the largest symbol present and returns the largest count.
+// src must not contain symbols above *maxSymbol.
+// C: hist.c:HIST_count_simple
+func CountSimple(count *[256]uint32, maxSymbol *uint32, src []byte) uint32 {
+	maxSymbolValue := *maxSymbol
+	clear(count[:maxSymbolValue+1])
+	if len(src) == 0 {
+		*maxSymbol = 0
+		return 0
+	}
+	for _, b := range src {
+		count[b]++
+	}
+	for count[maxSymbolValue] == 0 {
+		maxSymbolValue--
+	}
+	*maxSymbol = maxSymbolValue
+	var largest uint32
+	for s := uint32(0); s <= maxSymbolValue; s++ {
+		if count[s] > largest {
+			largest = count[s]
+		}
+	}
+	return largest
+}
+
+// countParallel counts into 4 tables, recombined at the end.
+// C: hist.c:HIST_count_parallel_wksp. The workspace is a local array (4 KiB,
+// stack-allocated) instead of a caller-provided buffer.
+func countParallel(count *[256]uint32, maxSymbol *uint32, src []byte, check bool) uint32 {
+	n := len(src)
+	countSize := int(*maxSymbol) + 1
+	if n == 0 {
+		clear(count[:countSize])
+		*maxSymbol = 0
+		return 0
+	}
+	var ws [4 * 256]uint32
+	c1 := (*[256]uint32)(ws[0:256])
+	c2 := (*[256]uint32)(ws[256:512])
+	c3 := (*[256]uint32)(ws[512:768])
+	c4 := (*[256]uint32)(ws[768:1024])
+
+	// by stripes of 16 bytes. C reads 4 bytes before checking the size; the
+	// loop cannot run for n < 20, so that case is skipped here.
+	ip := 0
+	if n >= 20 {
+		cached := binary.LittleEndian.Uint32(src)
+		ip = 4
+		for ip < n-15 {
+			for range 4 {
+				c := cached
+				cached = binary.LittleEndian.Uint32(src[ip:])
+				ip += 4
+				c1[byte(c)]++
+				c2[byte(c>>8)]++
+				c3[byte(c>>16)]++
+				c4[c>>24]++
+			}
+		}
+		ip -= 4
+	}
+	for ; ip < n; ip++ {
+		c1[src[ip]]++
+	}
+
+	var maxCount uint32
+	for s := range c1 {
+		c1[s] += c2[s] + c3[s] + c4[s]
+		if c1[s] > maxCount {
+			maxCount = c1[s]
+		}
+	}
+
+	maxSymbolValue := uint32(255)
+	for c1[maxSymbolValue] == 0 {
+		maxSymbolValue--
+	}
+	if check && maxSymbolValue > *maxSymbol {
+		return MaxSymbolTooSmall
+	}
+	*maxSymbol = maxSymbolValue
+	copy(count[:countSize], c1[:countSize])
+	return maxCount
+}
+
+// CountFast is Count without the symbol-range check; it uses the simple
+// counter for inputs under 1500 bytes. C: hist.c:HIST_countFast_wksp
+func CountFast(count *[256]uint32, maxSymbol *uint32, src []byte) uint32 {
+	if len(src) < 1500 { // heuristic threshold
+		return CountSimple(count, maxSymbol, src)
+	}
+	return countParallel(count, maxSymbol, src, false)
+}
+
+// Count builds the histogram of src. On return *maxSymbol is the largest
+// symbol present and the result is the largest count, or MaxSymbolTooSmall if
+// *maxSymbol < 255 on entry and src holds a larger symbol.
+// C: hist.c:HIST_count_wksp
+func Count(count *[256]uint32, maxSymbol *uint32, src []byte) uint32 {
+	if *maxSymbol < 255 {
+		return countParallel(count, maxSymbol, src, true)
+	}
+	*maxSymbol = 255
+	return CountFast(count, maxSymbol, src)
+}
