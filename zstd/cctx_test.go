@@ -55,9 +55,11 @@ func (c compress2Case) newCCtx(t *testing.T) *cctx {
 
 func level1Cases() []compress2Case {
 	var cases []compress2Case
-	for _, wl := range []uint32{0, 10, 17} {
-		for _, cs := range []bool{false, true} {
-			cases = append(cases, compress2Case{level: 1, checksum: cs, windowLog: wl})
+	for _, lvl := range []int{1, 3} {
+		for _, wl := range []uint32{0, 10, 17} {
+			for _, cs := range []bool{false, true} {
+				cases = append(cases, compress2Case{level: lvl, checksum: cs, windowLog: wl})
+			}
 		}
 	}
 	return cases
@@ -221,22 +223,25 @@ func TestCompress2IndexResetTables(t *testing.T) {
 	_, inputs := sortedInputs(t)
 	big := inputs["text16KiB"] // level 1: hashLog 15
 	small := inputs["text16KiB"][:1024]
-	c := compress2Case{level: 1}
-	cc := c.newCCtx(t)
-	if _, err := cc.compress2(nil, big); err != nil {
-		t.Fatal(err)
-	}
-	// Force ZSTD_indexTooCloseToMax: the next frame restarts the indices.
-	cc.blockState.matchState.window.nextSrc = currentMax
-	if _, err := cc.compress2(nil, small); err != nil { // hashLog 11
-		t.Fatal(err)
-	}
-	got, err := cc.compress2(nil, big)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := creftest.Run(t, big, c.crefArgs("compress")...); !bytes.Equal(got, want) {
-		t.Fatalf("frame after index reset differs from C (Go %d bytes, C %d bytes)%s", len(got), len(want), firstDiff(got, want))
+	// Level 3 (dfast) owns two tables (hash and chain), both resized.
+	for _, lvl := range []int{1, 3} {
+		c := compress2Case{level: lvl}
+		cc := c.newCCtx(t)
+		if _, err := cc.compress2(nil, big); err != nil {
+			t.Fatal(err)
+		}
+		// Force ZSTD_indexTooCloseToMax: the next frame restarts the indices.
+		cc.blockState.matchState.window.nextSrc = currentMax
+		if _, err := cc.compress2(nil, small); err != nil { // hashLog 11
+			t.Fatal(err)
+		}
+		got, err := cc.compress2(nil, big)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := creftest.Run(t, big, c.crefArgs("compress")...); !bytes.Equal(got, want) {
+			t.Fatalf("%s: frame after index reset differs from C (Go %d bytes, C %d bytes)%s", c, len(got), len(want), firstDiff(got, want))
+		}
 	}
 }
 
@@ -251,7 +256,7 @@ func TestCompress2ReuseMultiBlock(t *testing.T) {
 		if len(src) <= 128<<10 {
 			continue
 		}
-		c := compress2Case{level: 1, checksum: i%2 == 1, windowLog: 10}
+		c := compress2Case{level: 1 + 2*(i/2%2), checksum: i%2 == 1, windowLog: 10}
 		if i%3 == 0 {
 			c.windowLog = 0 // default window log: C pre-splits full blocks
 		}

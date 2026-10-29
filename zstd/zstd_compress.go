@@ -862,8 +862,13 @@ type blockCompressor func(ms *matchState, ss *seqStore, rep *[repNum]uint32, src
 // strategies this port does not have yet.
 // C: zstd_compress.c:ZSTD_selectBlockCompressor
 func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) blockCompressor {
-	if mode == noDict && strat == zstdFast {
-		return compressBlockFast
+	if mode == noDict {
+		switch strat {
+		case zstdFast:
+			return compressBlockFast
+		case zstdDfast:
+			return compressBlockDoubleFast
+		}
 	}
 	return nil
 }

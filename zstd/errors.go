@@ -9,6 +9,6 @@ var (
 )
 
 // errStrategyNotPorted is EncodeAll's panic value for a level whose C
-// strategy is not ported yet (every level except SpeedFastest until the
-// dfast/greedy/lazy ports land). EncodeAll has no error result.
-var errStrategyNotPorted = errors.New("zstd: compression level not ported yet (only SpeedFastest is available)")
+// strategy is not ported yet (levels 7 and 11 until the
+// greedy/lazy ports land). EncodeAll has no error result.
+var errStrategyNotPorted = errors.New("zstd: compression level not ported yet (only SpeedFastest and SpeedDefault are available)")

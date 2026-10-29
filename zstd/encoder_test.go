@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +25,13 @@ func newTestEncoder(t testing.TB, opts ...EOption) *Encoder {
 // content checksum on (klauspost's default) plus extra cref options.
 func crefLevel1(t testing.TB, in []byte, extra ...string) []byte {
 	t.Helper()
-	args := append([]string{"compress", "-level", "1", "-checksum", "1", "-pledged", "1"}, extra...)
+	return crefLevel(t, 1, in, extra...)
+}
+
+// crefLevel is crefLevel1 for any C level.
+func crefLevel(t testing.TB, level int, in []byte, extra ...string) []byte {
+	t.Helper()
+	args := append([]string{"compress", "-level", strconv.Itoa(level), "-checksum", "1", "-pledged", "1"}, extra...)
 	return creftest.Run(t, in, args...)
 }
 
@@ -33,13 +40,18 @@ func crefLevel1(t testing.TB, in []byte, extra ...string) []byte {
 // input. WithZeroFrames makes the empty input produce C's empty frame.
 func TestEncodeAllCref(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	e := newTestEncoder(t, WithEncoderLevel(SpeedFastest), WithZeroFrames(true))
-	for _, name := range names {
-		in := inputs[name]
-		want := crefLevel1(t, in)
-		got := e.EncodeAll(in, nil)
-		if !bytes.Equal(got, want) {
-			t.Errorf("%s: EncodeAll differs from cref (got %d bytes, want %d)", name, len(got), len(want))
+	for _, lv := range []struct {
+		l EncoderLevel
+		c int
+	}{{SpeedFastest, 1}, {SpeedDefault, 3}} {
+		e := newTestEncoder(t, WithEncoderLevel(lv.l), WithZeroFrames(true))
+		for _, name := range names {
+			in := inputs[name]
+			want := crefLevel(t, lv.c, in)
+			got := e.EncodeAll(in, nil)
+			if !bytes.Equal(got, want) {
+				t.Errorf("L%d/%s: EncodeAll differs from cref (got %d bytes, want %d)", lv.c, name, len(got), len(want))
+			}
 		}
 	}
 }
@@ -109,25 +121,30 @@ func TestEncodeAllOptionsCref(t *testing.T) {
 // all inputs; every output must equal cref's. Run it under -race.
 func TestEncodeAllConcurrent(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	want := make(map[string][]byte, len(names))
-	for _, name := range names {
-		want[name] = crefLevel1(t, inputs[name])
-	}
-	e := newTestEncoder(t, WithEncoderLevel(SpeedFastest), WithZeroFrames(true))
-	var wg sync.WaitGroup
-	for g := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range names {
-				name := names[(i+g)%len(names)]
-				if got := e.EncodeAll(inputs[name], nil); !bytes.Equal(got, want[name]) {
-					t.Errorf("goroutine %d, %s: differs from cref", g, name)
+	for _, lv := range []struct {
+		l EncoderLevel
+		c int
+	}{{SpeedFastest, 1}, {SpeedDefault, 3}} {
+		want := make(map[string][]byte, len(names))
+		for _, name := range names {
+			want[name] = crefLevel(t, lv.c, inputs[name])
+		}
+		e := newTestEncoder(t, WithEncoderLevel(lv.l), WithZeroFrames(true))
+		var wg sync.WaitGroup
+		for g := range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range names {
+					name := names[(i+g)%len(names)]
+					if got := e.EncodeAll(inputs[name], nil); !bytes.Equal(got, want[name]) {
+						t.Errorf("L%d goroutine %d, %s: differs from cref", lv.c, g, name)
+					}
 				}
-			}
-		}()
+			}()
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 }
 
 // TestEncodeAllPadding: the output is C's frame followed by one skippable
@@ -183,9 +200,9 @@ func TestMaxEncodedSize(t *testing.T) {
 
 // TestEncodeAllNotPorted: levels whose strategies are not ported yet panic
 // with errStrategyNotPorted (EncodeAll has no error result). Removed once
-// Tasks 12-16 port dfast/greedy/lazy.
+// Tasks 13-16 port greedy/lazy.
 func TestEncodeAllNotPorted(t *testing.T) {
-	for _, l := range []EncoderLevel{SpeedDefault, SpeedBetterCompression, SpeedBestCompression} {
+	for _, l := range []EncoderLevel{SpeedBetterCompression, SpeedBestCompression} {
 		t.Run(l.String(), func(t *testing.T) {
 			e := newTestEncoder(t, WithEncoderLevel(l))
 			defer func() {
