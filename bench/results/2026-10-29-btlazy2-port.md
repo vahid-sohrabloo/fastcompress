@@ -27,4 +27,4 @@
 
 Geometric mean of % of C over 18 rows: **75.5%**
 
-Inputs: the first 192 KiB (196608 bytes; level 11 table "<= 256 KiB", btlazy2 wlog 18) or 100 KiB (102400 bytes; table "<= 128 KiB", btlazy2 wlog 17) of each Silesia file, made with `head -c`, since compare.sh has no per-file block option and `silesia.tar` is absent. Run as `bench/compare.sh -l 11 -f "<chunks>" -i 2 -g 1 -n 3 -label btlazy2-port` (taskset -c 2, -T1).
+Inputs: the first 192 KiB (196608 bytes; level 11 table "<= 256 KiB", btlazy2 wlog 18) or 100 KiB (102400 bytes; table "<= 128 KiB", btlazy2 wlog 17) of each Silesia file, made with `head -c`. compare.sh's default `silesia.tar` rows (1 MiB / 4 MiB blocks) are not a btlazy2 measurement: blocks over 256 KiB use the default level 11 table row (clevels.h:39, row-based lazy2), so btlazy2 is measured here with chunks of 256 KiB or less. Run as `bench/compare.sh -l 11 -f "<chunks>" -i 2 -g 1 -n 3 -label btlazy2-port` (taskset -c 2, -T1).

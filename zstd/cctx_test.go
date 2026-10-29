@@ -213,10 +213,11 @@ func TestCompress2Cref(t *testing.T) {
 }
 
 // TestCompress2Reuse compresses every single-block input with ONE context,
-// alternating parameters (each input once at levels 1/3 and once at level
-// 7/11 where ported), and requires each frame to equal C's from ONE reused
-// C context: index continuation, uncleared tables and the row match
-// finder's per-reset hash salt must all behave as in C.
+// alternating parameters (each input once at levels 1/3 and once with a
+// rowCases, hcCases or btCases parameter set, levels 5 to 13, where
+// ported), and requires each frame to equal C's from ONE reused C context:
+// index continuation, uncleared tables, the row match finder's per-reset
+// hash salt and the binary tree's stale entries must all behave as in C.
 func TestCompress2Reuse(t *testing.T) {
 	names, inputs := sortedInputs(t)
 	cases, rc := level1Cases(), slices.Concat(rowCases(), hcCases(), btCases())

@@ -696,10 +696,14 @@ func dictTooBig(loadedDictSize int) bool { return loadedDictSize > chunkSizeMax 
 // at lowLimit = windowStartIndex, so where C clamps the continued btLow is
 // below lowLimit; every candidate is above windowLow >= lowLimit, so both
 // sides see "within the tree" (and unsortLimit = max(btLow, windowLow) is
-// windowLow on both). Otherwise btLow shifts uniformly with the indices. A
-// binary-tree entry is read only for a candidate above windowLow, i.e. a
-// position inserted in this frame (updateDUBT writes both of its entries),
-// so stale entries, including stale unsorted marks, are never read; stale
+// windowLow on both). Otherwise btLow shifts uniformly with the indices.
+// The load-bearing invariant: every binary-tree read is guarded by
+// `matchIndex > unsortLimit` (dubtFindBestMatch's unsorted walk and its
+// nullify step) or `matchIndex > windowLow` (insertDUBT1 and the
+// longest-match walk), and both limits are >= lowLimit. So an entry is read
+// only for a position inserted in this frame (updateDUBT writes both of its
+// entries), and stale entries, including stale unsorted marks, are never
+// read; stale
 // values reached through hashTable are below lowLimit and rejected like C's
 // zeros. Overflow correction may then trigger at other blocks than in C;
 // it is output-neutral too: it keeps the low cycleLog (= btLog) bits of
