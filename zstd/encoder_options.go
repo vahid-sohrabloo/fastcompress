@@ -1,0 +1,305 @@
+package zstd
+
+import (
+	"fmt"
+	"math/bits"
+	"runtime"
+	"strings"
+)
+
+const (
+	// MinWindowSize is the minimum Window Size, which is 1 KB.
+	MinWindowSize = 1 << 10
+
+	// MaxWindowSize is the maximum encoder window size
+	// and the default decoder maximum window size.
+	MaxWindowSize = 1 << 29
+)
+
+// EOption is an option for creating a encoder.
+//
+// Mapping to C libzstd v1.5.7 (EncodeAll is ZSTD_compress2 with
+// pledgedSrcSize = len(src) and these parameters):
+//
+//	WithEncoderLevel             ZSTD_c_compressionLevel 1/3/7/11
+//	WithEncoderCRC               ZSTD_c_checksumFlag (default on)
+//	WithWindowSize               ZSTD_c_windowLog = log2(n)
+//	WithNoEntropyCompression     ZSTD_c_literalCompressionMode = ZSTD_ps_disable
+//	WithAllLitEntropyCompression ZSTD_c_literalCompressionMode = ZSTD_ps_enable
+//	                             (false: ZSTD_ps_auto, the level's default)
+//	WithEncoderConcurrency       none; encoding is single-threaded (nbWorkers=0)
+//	WithLowerEncoderMem          none; accepted, no effect on output
+//	WithSingleSegment            none; the frame header follows C's automatic
+//	                             choice (single segment iff window >= len(src))
+//	WithZeroFrames               none; decides whether empty input emits C's
+//	                             empty frame or nothing
+//	WithEncoderPadding           none; a skippable frame after C's frame
+type EOption func(*encoderOptions) error
+
+// encoderOptions holds the options an Encoder was created with.
+type encoderOptions struct {
+	level         EncoderLevel
+	crc           bool
+	windowLog     uint32 // 0 = level default
+	concurrent    int    // stored only: encoding is single-threaded
+	zeroFrames    bool
+	pad           int // 0 or 1 = no padding
+	noEntropy     bool
+	allLitEntropy bool
+}
+
+func (o *encoderOptions) setDefault() {
+	*o = encoderOptions{
+		level:      SpeedDefault,
+		crc:        true,
+		concurrent: runtime.GOMAXPROCS(0),
+	}
+}
+
+// literalCompressionMode resolves WithNoEntropyCompression (which wins) and
+// WithAllLitEntropyCompression to C's ZSTD_c_literalCompressionMode.
+func (o *encoderOptions) literalCompressionMode() paramSwitch {
+	switch {
+	case o.noEntropy:
+		return psDisable
+	case o.allLitEntropy:
+		return psEnable
+	}
+	return psAuto
+}
+
+// WithEncoderCRC will add CRC value to output.
+// Output will be 4 bytes larger.
+// Can be changed with ResetWithOptions.
+//
+// C: ZSTD_c_checksumFlag. The default is on.
+func WithEncoderCRC(b bool) EOption {
+	return func(o *encoderOptions) error { o.crc = b; return nil }
+}
+
+// WithEncoderConcurrency will set the concurrency,
+// meaning the maximum number of encoders to run concurrently.
+// The value supplied must be at least 0.
+// When a value of 0 is provided GOMAXPROCS will be used.
+// For streams, setting a value of 1 will disable async compression.
+// By default this will be set to GOMAXPROCS.
+// Cannot be changed with ResetWithOptions.
+//
+// The value is stored but encoding is always single-threaded (C:
+// ZSTD_c_nbWorkers = 0), so it never changes the output.
+func WithEncoderConcurrency(n int) EOption {
+	return func(o *encoderOptions) error {
+		if n < 0 {
+			return fmt.Errorf("zstd: concurrency must be at least 0, got %d", n)
+		}
+		if n == 0 {
+			n = runtime.GOMAXPROCS(0)
+		}
+		o.concurrent = n
+		return nil
+	}
+}
+
+// WithWindowSize will set the maximum allowed back-reference distance.
+// The value must be a power of two between MinWindowSize and MaxWindowSize.
+// A larger value will enable better compression but allocate more memory and,
+// for above-default values, take considerably longer.
+// The default value is determined by the compression level and max 8MB.
+// Cannot be changed with ResetWithOptions.
+//
+// C: ZSTD_c_windowLog = log2(n). Like C, the window is still reduced to fit
+// a smaller input.
+func WithWindowSize(n int) EOption {
+	return func(o *encoderOptions) error {
+		switch {
+		case n < MinWindowSize:
+			return fmt.Errorf("zstd: window size must be at least %d, got %d", MinWindowSize, n)
+		case n > MaxWindowSize:
+			return fmt.Errorf("zstd: window size must be at most %d, got %d", MaxWindowSize, n)
+		case n&(n-1) != 0:
+			return fmt.Errorf("zstd: window size must be a power of two, got %d", n)
+		}
+		o.windowLog = uint32(bits.Len(uint(n)) - 1)
+		return nil
+	}
+}
+
+// WithEncoderPadding will add padding to all output so the size will be a multiple of n.
+// This can be used to obfuscate the exact output size or make blocks of a certain size.
+// The contents will be a skippable frame, so it will be invisible by the decoder.
+// n must be > 0 and <= 1GB, 1<<30 bytes.
+// The padded area will be filled with data from crypto/rand.Reader.
+// If `EncodeAll` is used with data already in the destination, the total size will be multiple of this.
+// Can be changed with ResetWithOptions.
+//
+// C: no equivalent; the skippable frame (RFC 8878 section 3.1.2) follows
+// C's frame.
+func WithEncoderPadding(n int) EOption {
+	return func(o *encoderOptions) error {
+		if n <= 0 {
+			return fmt.Errorf("zstd: padding must be at least 1, got %d", n)
+		}
+		if n > 1<<30 {
+			return fmt.Errorf("zstd: padding must be at most 1GB (1<<30 bytes), got %d", n)
+		}
+		o.pad = n
+		return nil
+	}
+}
+
+// EncoderLevel predefines encoder compression levels.
+// Only use the constants made available, since the actual mapping
+// of these values are very likely to change and your compression could change
+// unpredictably when upgrading the library.
+type EncoderLevel int
+
+const (
+	speedNotSet EncoderLevel = iota
+
+	// SpeedFastest will choose the fastest reasonable compression.
+	// This is roughly equivalent to the fastest Zstandard mode.
+	// C level 1.
+	SpeedFastest
+
+	// SpeedDefault is the default "pretty fast" compression option.
+	// This is roughly equivalent to the default Zstandard mode (level 3).
+	// C level 3.
+	SpeedDefault
+
+	// SpeedBetterCompression will yield better compression than the default.
+	// C level 7.
+	SpeedBetterCompression
+
+	// SpeedBestCompression will choose the best available compression option.
+	// C level 11.
+	SpeedBestCompression
+)
+
+// zstdLevels maps an EncoderLevel to its C compression level.
+var zstdLevels = [...]int{
+	SpeedFastest:           1,
+	SpeedDefault:           3,
+	SpeedBetterCompression: 7,
+	SpeedBestCompression:   11,
+}
+
+// EncoderLevelFromString will convert a string representation of an encoding level back
+// to a compression level. The compare is not case sensitive.
+// If the string wasn't recognized, (false, SpeedDefault) will be returned.
+func EncoderLevelFromString(s string) (bool, EncoderLevel) {
+	for l := SpeedFastest; l <= SpeedBestCompression; l++ {
+		if strings.EqualFold(s, l.String()) {
+			return true, l
+		}
+	}
+	return false, SpeedDefault
+}
+
+// EncoderLevelFromZstd will return an encoder level that closest matches the compression
+// ratio of a specific zstd compression level.
+// Many input values will provide the same compression level.
+//
+// A level maps to the highest EncoderLevel whose C level (1, 3, 7, 11) does
+// not exceed it; levels below 1 map to SpeedFastest.
+func EncoderLevelFromZstd(level int) EncoderLevel {
+	l := SpeedFastest
+	for l < SpeedBestCompression && level >= zstdLevels[l+1] {
+		l++
+	}
+	return l
+}
+
+// String provides a string representation of the compression level.
+func (e EncoderLevel) String() string {
+	switch e {
+	case SpeedFastest:
+		return "fastest"
+	case SpeedDefault:
+		return "default"
+	case SpeedBetterCompression:
+		return "better"
+	case SpeedBestCompression:
+		return "best"
+	default:
+		return "invalid"
+	}
+}
+
+// WithEncoderLevel specifies a predefined compression level.
+// Cannot be changed with ResetWithOptions.
+//
+// C: ZSTD_c_compressionLevel, mapped SpeedFastest=1, SpeedDefault=3,
+// SpeedBetterCompression=7, SpeedBestCompression=11.
+func WithEncoderLevel(l EncoderLevel) EOption {
+	return func(o *encoderOptions) error {
+		if l < SpeedFastest || l > SpeedBestCompression {
+			return fmt.Errorf("zstd: unknown encoder level %d", int(l))
+		}
+		o.level = l
+		return nil
+	}
+}
+
+// WithZeroFrames will encode 0 length input as full frames.
+// This can be needed for compatibility with zstandard usage,
+// but is not needed for this package.
+// Can be changed with ResetWithOptions.
+//
+// C: no equivalent; the frame emitted for empty input is C's.
+func WithZeroFrames(b bool) EOption {
+	return func(o *encoderOptions) error { o.zeroFrames = b; return nil }
+}
+
+// WithAllLitEntropyCompression will apply entropy compression if no matches are found.
+// Disabling this will skip incompressible data faster, but in cases with no matches but
+// skewed character distribution compression is lost.
+// Default value depends on the compression level selected.
+// Can be changed with ResetWithOptions.
+//
+// C: true is ZSTD_c_literalCompressionMode = ZSTD_ps_enable; false restores
+// ZSTD_ps_auto (the level's default). WithNoEntropyCompression(true) wins.
+func WithAllLitEntropyCompression(b bool) EOption {
+	return func(o *encoderOptions) error { o.allLitEntropy = b; return nil }
+}
+
+// WithNoEntropyCompression will always skip entropy compression of literals.
+// This can be useful if content has matches, but unlikely to benefit from entropy
+// compression. Usually the slight speed improvement is not worth enabling this.
+// Can be changed with ResetWithOptions.
+//
+// C: ZSTD_c_literalCompressionMode = ZSTD_ps_disable (sequences are still
+// entropy coded, as in C).
+func WithNoEntropyCompression(b bool) EOption {
+	return func(o *encoderOptions) error { o.noEntropy = b; return nil }
+}
+
+// WithSingleSegment will set the "single segment" flag when EncodeAll is used.
+// If this flag is set, data must be regenerated within a single continuous memory segment.
+// In this case, Window_Descriptor byte is skipped, but Frame_Content_Size is necessarily present.
+// As a consequence, the decoder must allocate a memory segment of size equal or larger than size of your content.
+// In order to preserve the decoder from unreasonable memory requirements,
+// a decoder is allowed to reject a compressed frame which requests a memory size beyond decoder's authorized range.
+// For broader compatibility, decoders are recommended to support memory sizes of at least 8 MB.
+// This is only a recommendation, each decoder is free to support higher or lower limits, depending on local limitations.
+// If this is not specified, block encodes will automatically choose this based on the input size and the window size.
+// This setting has no effect on streamed encodes.
+// Can be changed with ResetWithOptions.
+//
+// C has no parameter for it: ZSTD_compress2 sets the flag exactly when the
+// window covers the whole input. The option is accepted and ignored: the
+// frame header always follows C's automatic choice, so output stays
+// byte-identical to C.
+func WithSingleSegment(b bool) EOption {
+	return func(o *encoderOptions) error { return nil }
+}
+
+// WithLowerEncoderMem will trade in some memory cases trade less memory usage for
+// slower encoding speed.
+// This will not change the window size which is the primary function for reducing
+// memory usage. See WithWindowSize.
+// Cannot be changed with ResetWithOptions.
+//
+// C: no equivalent. Accepted and ignored; it would not change output.
+func WithLowerEncoderMem(b bool) EOption {
+	return func(o *encoderOptions) error { return nil }
+}

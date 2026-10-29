@@ -12,6 +12,8 @@
  *   -window-log W   ZSTD_c_windowLog (default 0 = level default)
  *   -dict FILE      dictionary file (ZSTD_dct_auto unless -raw-dict 1)
  *   -raw-dict 0|1   1: load the dictionary as ZSTD_dct_rawContent
+ *   -lit-mode M     ZSTD_c_literalCompressionMode: 0 auto (default),
+ *                   1 ZSTD_ps_enable, 2 ZSTD_ps_disable
  *
  * MODES
  *
@@ -134,7 +136,7 @@ static void dieZ(const char* what, size_t rc) {
 }
 
 typedef struct {
-    int level, checksum, pledged, windowLog, rawDict, tablelog, flags;
+    int level, checksum, pledged, windowLog, rawDict, tablelog, flags, litMode;
     const char* dictFile;
     unsigned long long seed;
     const char* chunks;
@@ -181,6 +183,7 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-window-log")) o->windowLog = atoi(v);
         else if (!strcmp(a, "-dict"))       o->dictFile = v;
         else if (!strcmp(a, "-raw-dict"))   o->rawDict = atoi(v);
+        else if (!strcmp(a, "-lit-mode"))   o->litMode = atoi(v);
         else if (!strcmp(a, "-tablelog"))   o->tablelog = atoi(v);
         else if (!strcmp(a, "-flags"))      o->flags = atoi(v);
         else if (!strcmp(a, "-seed"))       o->seed = strtoull(v, NULL, 0);
@@ -202,6 +205,10 @@ static ZSTD_CCtx* newCCtx(const Opts* o) {
     if (o->windowLog) {
         r = ZSTD_CCtx_setParameter(c, ZSTD_c_windowLog, o->windowLog);
         if (ZSTD_isError(r)) dieZ("set windowLog", r);
+    }
+    if (o->litMode) {
+        r = ZSTD_CCtx_setParameter(c, ZSTD_c_literalCompressionMode, o->litMode);
+        if (ZSTD_isError(r)) dieZ("set literalCompressionMode", r);
     }
     if (o->dictFile) {
         FILE* f = fopen(o->dictFile, "rb");
