@@ -267,7 +267,7 @@ Function shares are flat % of the level's merged profile unless noted.
 | 27da9cc perf(row) | L7 Go wrappers ~20% (`rowFindBestMatch` 5%, `rowSearch` 3%, `rowUpdateCached` 3%, `hashPtrSalted` 3%, ...) and no row prefetch for searched positions | `rowSearchAsm` 47%, `rowUpdateCachedAsm` 16% ; x-ray L11 17.6 | `rowFindBestMatchAsm` 59%, helper 18%, wrappers 2%; x-ray L11 31.3 |
 | 5fbcc0e perf(dubt) | L11 -B128K `dubtFindBestMatch` 34%, `insertDUBT1` 26%, `count` 21% | 20.0 MB/s | `insertDUBT1Asm` 34%, `dubtSearchAsm` 25%; 23.0 MB/s |
 | 8d8eedb perf(huf) | x-ray L1 `compress1XAsm` 39% (serial container chain) | 672 MB/s, 39% | `compress1XAsmBMI2` 37.6%; 734 MB/s (dickens L1 share 6.8% -> 4.9%) |
-| (next) perf(sequences) BMI2 | `encodeSequencesAsm` 14% of dickens L1 (C's ZSTD_encodeSequences_bmi2 is 12% of a faster run: ~50% more time per byte in Go); CL-shift juggling in every BIT_addBits/FSE_encodeSymbol | dickens L1 282.9 (13.7%), L3 174.7 (14.5%); xml L1 634.2 (13.9%), L3 477.5 (12.1%) | dickens L1 296.9 (9.4%), L3 188.2 (9.3%); xml L1 674.8 (11.1%), L3 495.8 (6.7%) |
+| 376f9c1 perf(sequences) BMI2 | `encodeSequencesAsm` 14% of dickens L1 (C's ZSTD_encodeSequences_bmi2 is 12% of a faster run: ~50% more time per byte in Go); CL-shift juggling in every BIT_addBits/FSE_encodeSymbol | dickens L1 282.9 (13.7%), L3 174.7 (14.5%); xml L1 634.2 (13.9%), L3 477.5 (12.1%) | dickens L1 296.9 (9.4%), L3 188.2 (9.3%); xml L1 674.8 (11.1%), L3 495.8 (6.7%) |
 
 ## C side (gprof, as perf is unavailable)
 
