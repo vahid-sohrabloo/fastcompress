@@ -494,6 +494,24 @@ func matchStateDictMode(ms *matchState) dictMode {
 	return noDict
 }
 
+// getLowestMatchIndex returns the lowest allowed match index. It may either
+// be in a dictionary or in the prefix. C: ZSTD_getLowestMatchIndex
+func getLowestMatchIndex(ms *matchState, curr uint32, windowLog uint32) uint32 {
+	maxDistance := uint32(1) << windowLog
+	lowestValid := ms.window.lowLimit
+	withinWindow := lowestValid
+	if curr-lowestValid > maxDistance {
+		withinWindow = curr - maxDistance
+	}
+	isDictionary := ms.loadedDictEnd != 0
+	// When using a dictionary the entire dictionary is valid if a single
+	// byte of the dictionary is within the window.
+	if isDictionary {
+		return lowestValid
+	}
+	return withinWindow
+}
+
 // getLowestPrefixIndex returns the lowest allowed match index in the prefix.
 // C: ZSTD_getLowestPrefixIndex
 func getLowestPrefixIndex(ms *matchState, curr uint32, windowLog uint32) uint32 {

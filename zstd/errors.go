@@ -9,7 +9,6 @@ var (
 )
 
 // errStrategyNotPorted is EncodeAll's panic value for an input whose C
-// strategy is not ported yet: SpeedBetterCompression for inputs of 16 KiB or
-// less (hash-chain lazy2) and SpeedBestCompression for inputs of 256 KiB or
-// less (btlazy2, btopt), until Tasks 14-16. EncodeAll has no error result.
+// strategy is not ported yet: SpeedBestCompression for inputs of 16 KiB or
+// less (btopt), until Task 16. EncodeAll has no error result.
 var errStrategyNotPorted = errors.New("zstd: compression strategy for this level and input size not ported yet")

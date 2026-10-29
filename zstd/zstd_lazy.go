@@ -1,8 +1,8 @@
 // Port of libzstd v1.5.7 lib/compress/zstd_lazy.c (Copyright (c) Meta
-// Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the hash-chain
-// and row-based match finders and the lazy parser
-// (ZSTD_compressBlock_lazy_generic) with searchMethod search_hashChain or
-// search_rowHash and dictMode ZSTD_noDict.
+// Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the binary-tree,
+// hash-chain and row-based match finders and the lazy parser
+// (ZSTD_compressBlock_lazy_generic) with searchMethod search_binaryTree,
+// search_hashChain or search_rowHash and dictMode ZSTD_noDict.
 
 package zstd
 
@@ -326,13 +326,255 @@ func rowFindBestMatch(ms *matchState, ip, iLimit int, mls, rowLog uint32) (int, 
 	return ml, offBase
 }
 
+/*-*************************************
+*  Binary Tree search
+***************************************/
+
+// The binary-tree match finder (btlazy2) keeps, in ms.chainTable, two
+// entries per position of the last 1<<(chainLog-1) positions: the indices of
+// its smaller and larger subtrees. Positions are first inserted unsorted,
+// like a hash chain (next candidate, dubtUnsortedMark), and sorted into the
+// tree lazily when a search reaches them ("DUBT": Delayed Update Binary
+// Tree).
+//
+// Only dictMode ZSTD_noDict is ported, so every candidate lies in the
+// prefix (base): C's extDict branches (dictBase, ZSTD_count_2segments) and
+// ZSTD_DUBT_findBetterDictMatch are omitted.
+
+// updateDUBT inserts the positions from ms.nextToUpdate up to ip (excluded)
+// into the binary tree as unsorted candidates.
+// C: zstd_lazy.c:ZSTD_updateDUBT — no iend parameter: C uses it only in an
+// assert.
+func updateDUBT(ms *matchState, ip int, mls uint32) {
+	hashTable := ms.hashTable
+	hashLog := ms.cParams.hashLog
+
+	bt := ms.chainTable
+	btLog := ms.cParams.chainLog - 1
+	btMask := uint32(1)<<btLog - 1
+
+	b := ms.window.base
+	baseIdx := ms.window.baseIdx
+	target := uint32(ip) + baseIdx
+	idx := ms.nextToUpdate
+
+	for ; idx < target; idx++ {
+		h := hashPtr(b, int(idx-baseIdx), hashLog, mls) // assumption : ip + 8 <= iend
+		matchIndex := hashTable[h]
+
+		nextCandidate := 2 * (idx & btMask) // C: nextCandidatePtr; sortMarkPtr is the next entry
+
+		hashTable[h] = idx             // Update Hash Table
+		bt[nextCandidate] = matchIndex // update BT like a chain
+		bt[nextCandidate+1] = dubtUnsortedMark
+	}
+	ms.nextToUpdate = target
+}
+
+// insertDUBT1 sorts one already inserted but unsorted position curr into
+// the tree. inputEnd is the end of the input. Assumption: curr >= btLow ==
+// (curr - btMask). Doesn't fail.
+// C: zstd_lazy.c:ZSTD_insertDUBT1 with dictMode ZSTD_noDict (curr and its
+// candidates are always in the prefix, so ip is base + curr, iend is
+// inputEnd and every match is read from base).
+func insertDUBT1(ms *matchState, curr uint32, inputEnd int, nbCompares, btLow uint32) {
+	bt := ms.chainTable
+	btLog := ms.cParams.chainLog - 1
+	btMask := uint32(1)<<btLog - 1
+	var commonLengthSmaller, commonLengthLarger int
+	b := ms.window.base
+	baseIdx := ms.window.baseIdx
+	ip := int(curr - baseIdx)
+	iend := inputEnd
+	smallerPtr := &bt[2*(curr&btMask)]
+	largerPtr := &bt[2*(curr&btMask)+1]
+	// this candidate is unsorted : next sorted candidate is reached through
+	// *smallerPtr, while *largerPtr contains previous unsorted candidate
+	// (which is already saved and can be overwritten)
+	matchIndex := *smallerPtr
+	var dummy32 uint32 // to be nullified at the end
+	windowValid := ms.window.lowLimit
+	maxDistance := uint32(1) << ms.cParams.windowLog
+	windowLow := windowValid
+	if curr-windowValid > maxDistance {
+		windowLow = curr - maxDistance
+	}
+
+	for ; nbCompares > 0 && matchIndex > windowLow; nbCompares-- {
+		nextPtr := bt[2*(matchIndex&btMask):][:2]
+		matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes
+		// note : all candidates are now supposed sorted, but it's still
+		// possible to have nextPtr[1] == dubtUnsortedMark when a real index
+		// has the same value as dubtUnsortedMark
+		match := int(matchIndex - baseIdx)
+		matchLength += count(b, ip+matchLength, match+matchLength, iend)
+
+		if ip+matchLength == iend { // equal : no way to know if inf or sup
+			break // drop , to guarantee consistency ; miss a bit of compression, but other solutions can corrupt tree
+		}
+
+		if b[match+matchLength] < b[ip+matchLength] { // necessarily within buffer
+			// match is smaller than current
+			*smallerPtr = matchIndex          // update smaller idx
+			commonLengthSmaller = matchLength // all smaller will now have at least this guaranteed common length
+			if matchIndex <= btLow {          // beyond tree size, stop searching
+				smallerPtr = &dummy32
+				break
+			}
+			smallerPtr = &nextPtr[1] // new "candidate" => larger than match, which was smaller than target
+			matchIndex = nextPtr[1]  // new matchIndex, larger than previous and closer to current
+		} else {
+			// match is larger than current
+			*largerPtr = matchIndex
+			commonLengthLarger = matchLength
+			if matchIndex <= btLow { // beyond tree size, stop searching
+				largerPtr = &dummy32
+				break
+			}
+			largerPtr = &nextPtr[0]
+			matchIndex = nextPtr[0]
+		}
+	}
+
+	*largerPtr = 0
+	*smallerPtr = 0
+}
+
+// dubtFindBestMatch sorts the unsorted candidates of ip's hash, then
+// searches the tree for the longest match at ip, inserting ip into it. It
+// returns the match length (0 if none) and its offBase (offBaseNotFound if
+// none). iend is the end of the input.
+// C: zstd_lazy.c:ZSTD_DUBT_findBestMatch with dictMode ZSTD_noDict; *offBasePtr
+// starts at offBaseNotFound, the value every C caller passes.
+func dubtFindBestMatch(ms *matchState, ip, iend int, mls uint32) (int, uint32) {
+	cParams := &ms.cParams
+	hashTable := ms.hashTable
+	hashLog := cParams.hashLog
+	b := ms.window.base
+	h := hashPtr(b, ip, hashLog, mls)
+	matchIndex := hashTable[h]
+
+	baseIdx := ms.window.baseIdx
+	curr := uint32(ip) + baseIdx
+	windowLow := getLowestMatchIndex(ms, curr, cParams.windowLog)
+
+	bt := ms.chainTable
+	btLog := cParams.chainLog - 1
+	btMask := uint32(1)<<btLog - 1
+	var btLow uint32
+	if btMask < curr {
+		btLow = curr - btMask
+	}
+	unsortLimit := max(btLow, windowLow)
+
+	nextCandidate := 2 * (matchIndex & btMask) // C: nextCandidate; unsortedMark is the next entry
+	nbCompares := uint32(1) << cParams.searchLog
+	nbCandidates := nbCompares
+	var previousCandidate uint32
+	offBase := uint32(offBaseNotFound)
+
+	// reach end of unsorted candidates list
+	for matchIndex > unsortLimit && bt[nextCandidate+1] == dubtUnsortedMark && nbCandidates > 1 {
+		bt[nextCandidate+1] = previousCandidate // the unsortedMark becomes a reversed chain, to move up back to original position
+		previousCandidate = matchIndex
+		matchIndex = bt[nextCandidate]
+		nextCandidate = 2 * (matchIndex & btMask)
+		nbCandidates--
+	}
+
+	// nullify last candidate if it's still unsorted
+	// simplification, detrimental to compression ratio, beneficial for speed
+	if matchIndex > unsortLimit && bt[nextCandidate+1] == dubtUnsortedMark {
+		bt[nextCandidate] = 0
+		bt[nextCandidate+1] = 0
+	}
+
+	// batch sort stacked candidates
+	matchIndex = previousCandidate
+	for matchIndex != 0 { // will end on matchIndex == 0
+		nextCandidateIdx := bt[2*(matchIndex&btMask)+1]
+		insertDUBT1(ms, matchIndex, iend, nbCandidates, unsortLimit)
+		matchIndex = nextCandidateIdx
+		nbCandidates++
+	}
+
+	// find longest match
+	var commonLengthSmaller, commonLengthLarger int
+	smallerPtr := &bt[2*(curr&btMask)]
+	largerPtr := &bt[2*(curr&btMask)+1]
+	matchEndIdx := curr + 8 + 1
+	var dummy32 uint32 // to be nullified at the end
+	bestLength := 0
+
+	matchIndex = hashTable[h]
+	hashTable[h] = curr // Update Hash Table
+
+	for ; nbCompares > 0 && matchIndex > windowLow; nbCompares-- {
+		nextPtr := bt[2*(matchIndex&btMask):][:2]
+		matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes
+		match := int(matchIndex - baseIdx)
+		matchLength += count(b, ip+matchLength, match+matchLength, iend)
+
+		if matchLength > bestLength {
+			if uint32(matchLength) > matchEndIdx-matchIndex {
+				matchEndIdx = matchIndex + uint32(matchLength)
+			}
+			if 4*(matchLength-bestLength) > int(highbit32(curr-matchIndex+1))-int(highbit32(offBase)) {
+				bestLength, offBase = matchLength, offsetToOffBase(curr-matchIndex)
+			}
+			if ip+matchLength == iend { // equal : no way to know if inf or sup
+				break // drop, to guarantee consistency (miss a little bit of compression)
+			}
+		}
+
+		if b[match+matchLength] < b[ip+matchLength] {
+			// match is smaller than current
+			*smallerPtr = matchIndex          // update smaller idx
+			commonLengthSmaller = matchLength // all smaller will now have at least this guaranteed common length
+			if matchIndex <= btLow {          // beyond tree size, stop the search
+				smallerPtr = &dummy32
+				break
+			}
+			smallerPtr = &nextPtr[1] // new "smaller" => larger of match
+			matchIndex = nextPtr[1]  // new matchIndex larger than previous (closer to current)
+		} else {
+			// match is larger than current
+			*largerPtr = matchIndex
+			commonLengthLarger = matchLength
+			if matchIndex <= btLow { // beyond tree size, stop the search
+				largerPtr = &dummy32
+				break
+			}
+			largerPtr = &nextPtr[0]
+			matchIndex = nextPtr[0]
+		}
+	}
+
+	*largerPtr = 0
+	*smallerPtr = 0
+
+	ms.nextToUpdate = matchEndIdx - 8 // skip repetitive patterns
+	return bestLength, offBase
+}
+
+// btFindBestMatch is the tree updater, providing the best match at ip.
+// C: zstd_lazy.c:ZSTD_BtFindBestMatch with dictMode ZSTD_noDict.
+func btFindBestMatch(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
+	if uint32(ip)+ms.window.baseIdx < ms.nextToUpdate {
+		return 0, offBaseNotFound // skipped area
+	}
+	updateDUBT(ms, ip, mls)
+	return dubtFindBestMatch(ms, ip, iLimit, mls)
+}
+
 // searchMethod selects the match finder of the lazy parser.
-// C: zstd_lazy.c:searchMethod_e (search_binaryTree is not ported yet)
+// C: zstd_lazy.c:searchMethod_e
 type searchMethod uint8
 
 const (
-	searchHashChain searchMethod = 0 // C: search_hashChain
-	searchRowHash   searchMethod = 2 // C: search_rowHash
+	searchHashChain  searchMethod = 0 // C: search_hashChain
+	searchBinaryTree searchMethod = 1 // C: search_binaryTree
+	searchRowHash    searchMethod = 2 // C: search_rowHash
 )
 
 // insertAndFindFirstIndexInternal inserts the positions from ms.nextToUpdate
@@ -433,6 +675,9 @@ func searchMax(ms *matchState, ip, iLimit int, mls, rowLog uint32, method search
 	if method == searchRowHash {
 		return rowFindBestMatch(ms, ip, iLimit, mls, rowLog)
 	}
+	if method == searchBinaryTree {
+		return btFindBestMatch(ms, ip, iLimit, mls)
+	}
 	return hcFindBestMatch(ms, ip, iLimit, mls)
 }
 
@@ -464,6 +709,11 @@ func compressBlockLazyRow(ms *matchState, ss *seqStore, rep *[repNum]uint32, src
 // compressBlockLazy2Row. C: zstd_lazy.c:ZSTD_compressBlock_lazy2_row
 func compressBlockLazy2Row(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
 	return compressBlockLazyGeneric(ms, ss, rep, src, srcIdx, searchRowHash, 2)
+}
+
+// compressBlockBtlazy2. C: zstd_lazy.c:ZSTD_compressBlock_btlazy2
+func compressBlockBtlazy2(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyGeneric(ms, ss, rep, src, srcIdx, searchBinaryTree, 2)
 }
 
 // compressBlockLazyGeneric is the lazy parser: at each position it takes

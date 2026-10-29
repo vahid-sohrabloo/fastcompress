@@ -690,6 +690,22 @@ func dictTooBig(loadedDictSize int) bool { return loadedDictSize > chunkSizeMax 
 // reasons. That cannot change output: restarting or continuing shifts every
 // index of the new frame uniformly, all window arithmetic is relative, and
 // old table entries stay below lowLimit either way.
+//
+// The binary tree (btlazy2) also compares indices with btLow = curr -
+// btMask, clamped to 0 when curr <= btMask. C's restarted indices start
+// at lowLimit = windowStartIndex, so where C clamps the continued btLow is
+// below lowLimit; every candidate is above windowLow >= lowLimit, so both
+// sides see "within the tree" (and unsortLimit = max(btLow, windowLow) is
+// windowLow on both). Otherwise btLow shifts uniformly with the indices. A
+// binary-tree entry is read only for a candidate above windowLow, i.e. a
+// position inserted in this frame (updateDUBT writes both of its entries),
+// so stale entries, including stale unsorted marks, are never read; stale
+// values reached through hashTable are below lowLimit and rejected like C's
+// zeros. Overflow correction may then trigger at other blocks than in C;
+// it is output-neutral too: it keeps the low cycleLog (= btLog) bits of
+// every index, every index within the window, and the unsorted marks
+// (reduceTable's preserveMark), as TestCompress2OverflowCorrectionBtlazy2
+// checks.
 func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, loadedDictSize int) {
 	c.isFirstBlock = true
 	c.appliedParams = *params
@@ -898,6 +914,8 @@ func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) b
 			return compressBlockLazy
 		case zstdLazy2:
 			return compressBlockLazy2
+		case zstdBtlazy2:
+			return compressBlockBtlazy2
 		}
 	}
 	return nil

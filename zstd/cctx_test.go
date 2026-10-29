@@ -81,16 +81,23 @@ func hcCases() []compress2Case {
 	return []compress2Case{{5, false, 14}, {6, true, 12}, {7, false, 14}, {9, true, 10}, {7, true, 0}}
 }
 
+// btCases use the binary tree (btlazy2) beyond level 11's 16 KiB to 256
+// KiB: level 10 at 16 KiB or less (searchLog 9), level 12 at 256 KiB or
+// less (searchLog 7) and level 13 above 256 KiB (minMatch 5, multi-block).
+func btCases() []compress2Case {
+	return []compress2Case{{10, false, 0}, {12, true, 0}, {13, false, 17}}
+}
+
 // ported reports whether this port has the match finder that compress2
-// selects with c for an input of n bytes: fast, dfast, and greedy/lazy/lazy2
-// (row-based or hash chain). Other inputs make compress2 return
+// selects with c for an input of n bytes: fast, dfast, greedy/lazy/lazy2
+// (row-based or hash chain) and btlazy2. Other inputs make compress2 return
 // errStrategyUnsupported (unless they are too small to search at all).
 func (c compress2Case) ported(n int) bool {
 	var p cctxParams
 	cctxParamsInit(&p, c.level)
 	p.cParams.windowLog = c.windowLog
 	cp := getCParamsFromCCtxParams(&p, uint64(n), 0, cpmNoAttachDict)
-	return cp.strategy <= zstdLazy2
+	return cp.strategy <= zstdBtlazy2
 }
 
 // seqStep is one compress2 call on a reused context.
@@ -167,12 +174,12 @@ func sortedInputs(t *testing.T) ([]string, map[string][]byte) {
 
 // TestCompress2Cref requires cctx.compress2 to produce exactly the frame of
 // C's ZSTD_compress2 at levels 1 and 3, with and without checksum and with
-// window logs 10 and 17, and at levels 7 and 11 (rowCases) wherever their
-// strategy is ported, for every input, including multi-block ones that C
-// pre-splits (inputs over 128 KiB).
+// window logs 10 and 17, and at levels 5 to 13 (rowCases, hcCases,
+// btCases) wherever their strategy is ported, for every input, including
+// multi-block ones that C pre-splits (inputs over 128 KiB).
 func TestCompress2Cref(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	for _, c := range slices.Concat(level1Cases(), rowCases(), hcCases()) {
+	for _, c := range slices.Concat(level1Cases(), rowCases(), hcCases(), btCases()) {
 		for _, name := range names {
 			src := inputs[name]
 			t.Run(c.String()+"/"+name, func(t *testing.T) {
@@ -212,7 +219,7 @@ func TestCompress2Cref(t *testing.T) {
 // finder's per-reset hash salt must all behave as in C.
 func TestCompress2Reuse(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	cases, rc := level1Cases(), slices.Concat(rowCases(), hcCases())
+	cases, rc := level1Cases(), slices.Concat(rowCases(), hcCases(), btCases())
 	var steps []seqStep
 	for i, name := range names {
 		src := inputs[name]
@@ -322,6 +329,9 @@ func TestCompress2IndexResetTables(t *testing.T) {
 		// Level 7 (row lazy, hashLog 19), then row lazy2 with hashLog 16:
 		// hash and tag tables are resized.
 		{7, inputs["text256KiB"], inputs["text16KiB+1"]},
+		// Level 11 btlazy2 (hashLog 19, chainLog 18), then btlazy2 with
+		// hashLog and chainLog 15: hash and binary-tree tables are resized.
+		{11, inputs["text256KiB"], inputs["text16KiB+1"]},
 	} {
 		c := compress2Case{level: tc.level}
 		want := crefSeq(t, []seqStep{{"big", c, tc.big}, {"small", c, tc.small}, {"big", c, tc.big}})
@@ -346,8 +356,9 @@ func TestCompress2IndexResetTables(t *testing.T) {
 
 // TestCompress2ReuseMultiBlock is TestCompress2Reuse for inputs larger
 // than one block: levels 1/3 at window log 10 (1 KiB blocks, never
-// pre-split by C) or the default window log (pre-split blocks), and levels
-// 7/11 at the default window log or 15, all through one context.
+// pre-split by C) or the default window log (pre-split blocks), levels
+// 7/11 at the default window log or 15, and level 13 (btlazy2) at window
+// log 17 or 18, all through one context.
 func TestCompress2ReuseMultiBlock(t *testing.T) {
 	names, inputs := sortedInputs(t)
 	var steps []seqStep
@@ -368,6 +379,53 @@ func TestCompress2ReuseMultiBlock(t *testing.T) {
 		if r.ported(len(src)) {
 			steps = append(steps, seqStep{name, r, src})
 		}
+		// btlazy2 over several blocks (level 13 above 256 KiB, windowLog
+		// 17 or 18).
+		if bt := (compress2Case{level: 13, checksum: i%2 == 1, windowLog: 17 + uint32(i%2)}); bt.ported(len(src)) {
+			steps = append(steps, seqStep{name, bt, src})
+		}
 	}
 	runSeq(t, steps)
+}
+
+// TestCompress2OverflowCorrectionBtlazy2 starts a btlazy2 frame (level 11,
+// 128 KiB blocks) just below currentMax, so overflow correction
+// (ZSTD_reduceIndex with ZSTD_reduceTable_btlazy2) runs between blocks while
+// the binary tree holds unsorted marks. Correction keeps the low cycleLog
+// (= btLog) bits of every index and every in-window entry, so the frame must
+// equal C's fresh-context frame, where no correction happens. Rescaling the
+// unsorted mark like an index (preserveMark false) changes the frame.
+func TestCompress2OverflowCorrectionBtlazy2(t *testing.T) {
+	_, inputs := sortedInputs(t)
+	for _, name := range []string{"text256KiB", "zstd-format.md", "text128KiB+1"} {
+		src := inputs[name]
+		c := compress2Case{level: 11}
+		if getCParams(11, uint64(len(src)), 0).strategy != zstdBtlazy2 {
+			t.Fatalf("%s: level 11 is not btlazy2", name)
+		}
+		cc := c.newCCtx(t)
+		cc.reset()
+		cc.pledgedSrcSizePlusOne = uint64(len(src)) + 1
+		if err := cc.initCompressStream2(); err != nil {
+			t.Fatal(err)
+		}
+		// Continue the indices from just below currentMax (odd low bits),
+		// as a long-reused context would: C's ZSTD_window_clear state.
+		ms := &cc.blockState.matchState
+		start := uint32(currentMax - len(src)/2 - 12345)
+		ms.window.nextSrc, ms.window.lowLimit, ms.window.dictLimit = start, start, start
+		ms.nextToUpdate = start
+		out := make([]byte, compressBound(len(src)))
+		n, err := cc.compressEnd(out, src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ms.window.nbOverflowCorrections == 0 {
+			t.Fatalf("%s: no overflow correction happened", name)
+		}
+		want := creftest.Run(t, src, c.crefArgs("compress")...)
+		if got := out[:n]; !bytes.Equal(got, want) {
+			t.Fatalf("%s: frame after overflow correction differs from C (Go %d bytes, C %d bytes)%s", name, len(got), len(want), firstDiff(got, want))
+		}
+	}
 }

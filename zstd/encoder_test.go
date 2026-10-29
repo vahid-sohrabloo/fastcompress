@@ -217,15 +217,13 @@ func TestMaxEncodedSize(t *testing.T) {
 
 // TestEncodeAllNotPorted: inputs whose strategy is not ported yet panic
 // with errStrategyNotPorted (EncodeAll has no error result): level 11 at 16
-// KiB to 256 KiB (btlazy2) and at 16 KiB or less (btopt). Removed once Tasks
-// 15-16 port them.
+// KiB or less (btopt). Removed once Task 16 ports it.
 func TestEncodeAllNotPorted(t *testing.T) {
 	in := creftest.Inputs(t)["text128KiB"]
 	for _, tc := range []struct {
 		l  EncoderLevel
 		in []byte
 	}{
-		{SpeedBestCompression, in},
 		{SpeedBestCompression, in[:1000]},
 	} {
 		t.Run(tc.l.String()+"/"+strconv.Itoa(len(tc.in)), func(t *testing.T) {
