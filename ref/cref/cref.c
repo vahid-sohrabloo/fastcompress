@@ -53,7 +53,20 @@
  *   chunk index k (0-based) listed in -flush-after, loops ZSTD_e_flush (empty
  *   input) until it returns 0; finally loops ZSTD_e_end until 0.
  *   -pledged 1 calls ZSTD_CCtx_setPledgedSrcSize(total input length) first.
+ *   -pledged-size N calls ZSTD_CCtx_setPledgedSrcSize(N) first instead (N may
+ *   differ from the input length: C then fails with srcSize_wrong, cref exits
+ *   1 and prints the error name on stderr).
  *   Output: the zstd frame (raw bytes).
+ *
+ * stream-pipe [common opts] -chunk-size N [-flush-every K] [-pledged-size N]
+ *   Like stream, but never holds the input or the output in memory: it reads
+ *   stdin N bytes at a time (each read is one ZSTD_e_continue chunk; the last
+ *   one may be shorter; an empty input feeds no chunk), loops ZSTD_e_flush
+ *   after every K-th chunk (K >= 1; absent: never), then loops ZSTD_e_end,
+ *   writing the output to stdout after every ZSTD_compressStream2 call. The
+ *   content size is unknown unless -pledged-size is given. For inputs of any
+ *   length (e.g. the multi-GB overflow test) and chunk lists too long for
+ *   argv (1-byte chunks).
  *
  * xxh64 [-seed S]      S decimal or 0x-hex. Output: 16 lowercase hex digits + "\n".
  *
@@ -163,6 +176,8 @@ typedef struct {
     const char* flushAfter;
     const char* frameOut;
     const char *sizes, *levels, *checksums, *windowLogs, *saltOut;
+    long long pledgedSize; /* -1: not given */
+    size_t chunkSize, flushEvery;
 } Opts;
 
 static void* readAll(FILE* f, size_t* n) {
@@ -188,7 +203,7 @@ static void writeAll(const void* p, size_t n) {
 
 static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
     memset(o, 0, sizeof(*o));
-    o->level = 3; o->pledged = defaultPledged;
+    o->level = 3; o->pledged = defaultPledged; o->pledgedSize = -1;
     for (int i = 2; i < argc; i++) {
         const char* a = argv[i];
         const char* v = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -216,6 +231,9 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-checksums"))  o->checksums = v;
         else if (!strcmp(a, "-window-logs")) o->windowLogs = v;
         else if (!strcmp(a, "-salt-out"))   o->saltOut = v;
+        else if (!strcmp(a, "-pledged-size")) o->pledgedSize = strtoll(v, NULL, 10);
+        else if (!strcmp(a, "-chunk-size")) o->chunkSize = (size_t)strtoull(v, NULL, 10);
+        else if (!strcmp(a, "-flush-every")) o->flushEvery = (size_t)strtoull(v, NULL, 10);
     else { fprintf(stderr, "cref: unknown option %s\n", a); exit(2); }
     }
 }
@@ -305,8 +323,8 @@ static int inList(const char* list, size_t idx) {
 static int cmdStream(const Opts* o, const unsigned char* src, size_t n) {
     if (!o->chunks) die("stream needs -chunks");
     ZSTD_CCtx* c = newCCtx(o);
-    if (o->pledged) {
-        size_t r = ZSTD_CCtx_setPledgedSrcSize(c, n);
+    if (o->pledged || o->pledgedSize >= 0) {
+        size_t r = ZSTD_CCtx_setPledgedSrcSize(c, o->pledgedSize >= 0 ? (unsigned long long)o->pledgedSize : n);
         if (ZSTD_isError(r)) dieZ("setPledgedSrcSize", r);
     }
     unsigned char* out = NULL; size_t olen = 0, ocap = 0;
@@ -324,6 +342,43 @@ static int cmdStream(const Opts* o, const unsigned char* src, size_t n) {
     if (pos != n) die("chunks do not cover input length");
     feed(c, ZSTD_e_end, src + pos, 0, &out, &olen, &ocap);
     writeAll(out, olen);
+    return 0;
+}
+
+/* feedOut is feed() writing each call's output straight to stdout. */
+static void feedOut(ZSTD_CCtx* c, ZSTD_EndDirective op, const void* in, size_t n) {
+    static unsigned char* buf;
+    const size_t bsz = ZSTD_CStreamOutSize();
+    ZSTD_inBuffer ib = { in, n, 0 };
+    if (!buf && !(buf = malloc(bsz))) die("oom");
+    for (;;) {
+        ZSTD_outBuffer ob = { buf, bsz, 0 };
+        size_t r = ZSTD_compressStream2(c, &ob, &ib, op);
+        if (ZSTD_isError(r)) dieZ("ZSTD_compressStream2", r);
+        writeAll(buf, ob.pos);
+        if (op == ZSTD_e_continue) { if (ib.pos == ib.size) break; }
+        else if (r == 0) break;
+    }
+}
+
+static int cmdStreamPipe(const Opts* o) {
+    if (!o->chunkSize) die("stream-pipe needs -chunk-size");
+    ZSTD_CCtx* c = newCCtx(o);
+    if (o->pledgedSize >= 0) {
+        size_t r = ZSTD_CCtx_setPledgedSrcSize(c, (unsigned long long)o->pledgedSize);
+        if (ZSTD_isError(r)) dieZ("setPledgedSrcSize", r);
+    }
+    unsigned char* chunk = malloc(o->chunkSize);
+    if (!chunk) die("oom");
+    for (size_t idx = 1;; idx++) {
+        size_t r = fread(chunk, 1, o->chunkSize, stdin);
+        if (r == 0) break;
+        feedOut(c, ZSTD_e_continue, chunk, r);
+        if (o->flushEvery && idx % o->flushEvery == 0) feedOut(c, ZSTD_e_flush, chunk, 0);
+        if (r < o->chunkSize) break;
+    }
+    if (ferror(stdin)) die("read error");
+    feedOut(c, ZSTD_e_end, chunk, 0);
     return 0;
 }
 
@@ -495,6 +550,11 @@ int main(int argc, char** argv) {
     size_t n;
     int rc;
     parseOpts(argc, argv, &o, !strcmp(m, "stream") ? 0 : 1);
+    if (!strcmp(m, "stream-pipe")) {
+        rc = cmdStreamPipe(&o);
+        if (fflush(stdout)) die("write error");
+        return rc;
+    }
     unsigned char* src = readAll(stdin, &n);
     if (!strcmp(m, "compress"))      rc = cmdCompress(&o, src, n);
     else if (!strcmp(m, "stream"))   rc = cmdStream(&o, src, n);

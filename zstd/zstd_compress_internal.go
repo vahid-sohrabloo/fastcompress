@@ -410,6 +410,16 @@ func arrayEnd(b []byte) *byte {
 // below likewise only applies to slices of one array (two arrays never
 // overlap, and w.dictBase keeps its array alive, so its memory cannot be
 // reused for src).
+//
+// Streaming (compressStreamGeneric) always passes slices of the context's
+// own inBuff, cut with full capacity, so contiguity and overlap are decided
+// exactly as C's pointers decide them, including when inBuff wraps within
+// a frame (the new block overwrites the start of the old prefix, now the
+// extDict). Only compress2 passes caller slices, which may be cut with a
+// 3-index slice expression and then look non-contiguous where C's pointers
+// are contiguous; compress2 makes one update per frame, right after the
+// window was cleared, where either outcome leaves an empty extDict, so the
+// output is the same.
 func windowUpdate(w *window, src []byte, forceNonContiguous bool) bool {
 	if len(src) == 0 {
 		return true
@@ -455,6 +465,12 @@ func windowUpdate(w *window, src []byte, forceNonContiguous bool) bool {
 	}
 	return contiguous
 }
+
+// extDictHook, when set (by tests), is called each time an extDict block
+// compressor runs its extDict search, with the compressor's name: "fast",
+// "dfast", "greedy-hc", "greedy-row", "lazy-hc", "lazy-row", "lazy2-hc",
+// "lazy2-row", "btlazy2" or "btopt". C has no equivalent.
+var extDictHook func(name string)
 
 // dictMode. C: zstd_compress_internal.h:ZSTD_dictMode_e
 type dictMode int
@@ -658,6 +674,47 @@ func count(b []byte, ip, match, iEnd int) int {
 		match++
 	}
 	return ip - start
+}
+
+// count2 is count with ip in a and match in m: the length of the common
+// prefix of a[ip:] and m[match:], stopping at iEnd (a position in a); m
+// must hold iEnd - ip bytes from match.
+func count2(a []byte, ip int, m []byte, match, iEnd int) int {
+	start := ip
+	for ip+8 <= iEnd {
+		diff := binary.LittleEndian.Uint64(m[match:]) ^ binary.LittleEndian.Uint64(a[ip:])
+		if diff != 0 {
+			return ip - start + bits.TrailingZeros64(diff)>>3
+		}
+		ip += 8
+		match += 8
+	}
+	for ip < iEnd && m[match] == a[ip] {
+		ip++
+		match++
+	}
+	return ip - start
+}
+
+// count2Segments counts the match length with ip in b (the prefix
+// segment) and match in m, its own segment ending at mEnd: on reaching
+// mEnd, the match continues at iStart, the start of the prefix in b.
+// C: zstd_compress_internal.h:ZSTD_count_2segments
+func count2Segments(b []byte, ip int, m []byte, match, iEnd, mEnd, iStart int) int {
+	vEnd := min(ip+(mEnd-match), iEnd)
+	matchLength := count2(b, ip, m, match, vEnd)
+	if match+matchLength != mEnd {
+		return matchLength
+	}
+	return matchLength + count(b, ip+matchLength, iStart, iEnd)
+}
+
+// indexOverlapCheck reports whether a repcode at repIndex can be read
+// without straddling prefixLowestIndex: it is false for the 3 indices just
+// below it and for prefixLowestIndex itself.
+// C: zstd_compress_internal.h:ZSTD_index_overlap_check
+func indexOverlapCheck(prefixLowestIndex, repIndex uint32) bool {
+	return (prefixLowestIndex-1)-repIndex >= 3
 }
 
 // Hash primes. C: zstd_compress_internal.h

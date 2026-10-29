@@ -3,6 +3,7 @@ package zstd
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"sync"
 )
@@ -13,15 +14,44 @@ import (
 // tasks via the EncodeAll function.
 // Smaller encodes are encouraged to use the EncodeAll function.
 // Use NewWriter to create a new instance.
+//
+// The streaming Writer (Write, ReadFrom, Flush, Close) drives C's
+// ZSTD_compressStream2 on one compression context: Write is
+// ZSTD_e_continue, Flush is ZSTD_e_flush and Close is ZSTD_e_end, each
+// repeated, as C's documentation prescribes, with an output buffer of
+// ZSTD_CStreamOutSize() bytes that is written to the io.Writer after every
+// call. The output is therefore C's for the same calls (C's bytes do not
+// depend on how input is split between ZSTD_e_continue calls; flushes,
+// and where Close falls, do matter). A Write of no bytes makes no call; a
+// stream with nothing written produces no output unless WithZeroFrames is
+// set. An Encoder must not be used for streaming from several goroutines
+// at once, nor be reset while EncodeAll calls are running.
 type Encoder struct {
 	o     encoderOptions
 	cctxs sync.Pool // *cctx configured from o; one per concurrent EncodeAll
+	s     encStream
 }
+
+// encStream is the state of the streaming Writer.
+type encStream struct {
+	c        *cctx     // C's ZSTD_CStream; created on first use
+	w        io.Writer // destination; nil until NewWriter/Reset gives one
+	out      []byte    // output buffer, ZSTD_CStreamOutSize() bytes
+	readBuf  []byte    // ReadFrom's input buffer
+	err      error     // sticky error, cleared by Reset
+	started  bool      // a frame is open: data was written since Reset
+	closed   bool      // Close succeeded; cleared by Reset
+	pledged  int64     // content size from ResetContentSize; < 0 unknown
+	nWritten int64     // bytes written to w since Reset, for padding
+}
+
+// errNilWriter is returned by the streaming methods when output must be
+// written but the Encoder has no io.Writer (NewWriter(nil) without Reset).
+var errNilWriter = errors.New("zstd: Encoder has no io.Writer (use Reset to set one)")
 
 // NewWriter will create a new Zstandard encoder.
 // If the encoder will be used for encoding blocks a nil writer can be used.
 func NewWriter(w io.Writer, opts ...EOption) (*Encoder, error) {
-	// w is for the streaming Writer, which is not available yet.
 	e := &Encoder{}
 	e.o.setDefault()
 	for _, o := range opts {
@@ -30,17 +60,24 @@ func NewWriter(w io.Writer, opts ...EOption) (*Encoder, error) {
 		}
 	}
 	e.cctxs.New = func() any { return e.newCCtx() }
+	e.s.w = w
+	e.s.pledged = -1
 	return e, nil
 }
 
 // newCCtx returns a compression context with the Encoder's C parameters.
 func (e *Encoder) newCCtx() *cctx {
 	c := newCCtx()
+	e.configure(c)
+	return c
+}
+
+// configure sets c's C parameters from the Encoder's options.
+func (e *Encoder) configure(c *cctx) {
 	c.setLevel(zstdLevels[e.o.level])
 	c.setChecksum(e.o.crc)
 	_ = c.setWindowLog(e.o.windowLog) // in range: validated by WithWindowSize
 	c.requestedParams.literalCompressionMode = e.o.literalCompressionMode()
-	return c
 }
 
 // EncodeAll will encode all input in src and append it to dst.
@@ -61,6 +98,7 @@ func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 		return dst
 	}
 	c := e.cctxs.Get().(*cctx)
+	e.configure(c) // ResetWithOptions may have changed the options since c was pooled
 	dst, err := c.compress2(dst, src)
 	if err != nil {
 		panic(err) // unreachable with validated options
@@ -94,7 +132,13 @@ const (
 //
 // C: no equivalent (klauspost's WithEncoderPadding).
 func addPadding(b []byte, n int) []byte {
-	add := (n - len(b)%n) % n
+	return appendPadding(b, int64(len(b)), n)
+}
+
+// appendPadding appends to b the skippable frame that makes total (the
+// size of the output so far) a multiple of n; see addPadding.
+func appendPadding(b []byte, total int64, n int) []byte {
+	add := int((int64(n) - total%int64(n)) % int64(n))
 	if add == 0 {
 		return b
 	}
@@ -107,4 +151,251 @@ func addPadding(b []byte, n int) []byte {
 	b = append(b, make([]byte, add-skippableHeaderSize)...)
 	rand.Read(b[n0:])
 	return b
+}
+
+// Write data to the encoder.
+// Input data will be buffered and as the buffer fills up
+// content will be compressed and written to the output.
+// When done writing, use Close to flush the remaining output
+// and write CRC if requested.
+//
+// C: ZSTD_compressStream2(ZSTD_e_continue), repeated until p is consumed.
+// Errors, including those of the io.Writer, are sticky until Reset.
+func (e *Encoder) Write(p []byte) (n int, err error) {
+	s := &e.s
+	if err := s.check(); err != nil {
+		return 0, err
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if s.w == nil {
+		return 0, errNilWriter
+	}
+	c := e.startFrame()
+	for {
+		out, consumed, _, err := c.compressStream2(s.out[:0], p[n:], eContinue)
+		n += consumed
+		if err == nil {
+			err = s.write(out)
+		}
+		if err != nil {
+			s.err = err
+			return n, err
+		}
+		if n == len(p) {
+			return n, nil
+		}
+	}
+}
+
+// ReadFrom reads data from r until EOF or error.
+// The return value n is the number of bytes read.
+// Any error except io.EOF encountered during the read is also returned.
+//
+// The Copy function uses ReaderFrom if available.
+//
+// Every chunk read is passed to Write; how the input is split does not
+// change the output.
+func (e *Encoder) ReadFrom(r io.Reader) (n int64, err error) {
+	s := &e.s
+	if err := s.check(); err != nil {
+		return 0, err
+	}
+	if s.readBuf == nil {
+		s.readBuf = make([]byte, blockSizeMax)
+	}
+	for {
+		nr, rerr := r.Read(s.readBuf)
+		n += int64(nr)
+		if nr > 0 {
+			if _, err := e.Write(s.readBuf[:nr]); err != nil {
+				return n, err
+			}
+		}
+		if rerr == io.EOF {
+			return n, nil
+		}
+		if rerr != nil {
+			return n, rerr
+		}
+	}
+}
+
+// Flush will send the currently written data to output
+// and block until everything has been written.
+// This should only be used on rare occasions where pushing the currently queued data is critical.
+//
+// C: ZSTD_compressStream2(ZSTD_e_flush), repeated until it returns 0. With
+// nothing written since Reset (no frame started) it does nothing.
+func (e *Encoder) Flush() error {
+	s := &e.s
+	if err := s.check(); err != nil {
+		return err
+	}
+	if !s.started {
+		return nil
+	}
+	return e.drain(eFlush)
+}
+
+// Close will flush the final output and close the stream.
+// The function will block until everything has been written.
+// The Encoder can still be re-used after calling this.
+//
+// C: ZSTD_compressStream2(ZSTD_e_end), repeated until it returns 0, then
+// the WithEncoderPadding skippable frame. With nothing written since Reset,
+// it writes nothing, unless WithZeroFrames is set: then C's frame for empty
+// input (whose first ZSTD_e_end call pledges a content size of 0). After
+// ResetContentSize, C returns an error when the written size differs from
+// the pledged one; Close returns that error too when nothing was written
+// (where C would pledge 0 instead). Closing a closed Encoder returns nil.
+func (e *Encoder) Close() error {
+	s := &e.s
+	if s.err != nil {
+		return s.err
+	}
+	if s.closed {
+		return nil
+	}
+	if !s.started {
+		if s.pledged > 0 {
+			s.err = errSrcSizeWrong
+			return s.err
+		}
+		if !e.o.zeroFrames {
+			s.closed = true
+			return nil
+		}
+		if s.w == nil {
+			return errNilWriter
+		}
+		e.startFrame()
+	}
+	if err := e.drain(eEnd); err != nil {
+		return err
+	}
+	if e.o.pad > 1 {
+		if err := s.write(appendPadding(nil, s.nWritten, e.o.pad)); err != nil {
+			s.err = err
+			return err
+		}
+	}
+	s.started = false
+	s.closed = true
+	return nil
+}
+
+// Reset will re-initialize the writer and new writes will encode to the supplied writer
+// as a new, independent stream.
+//
+// C: ZSTD_CCtx_reset(ZSTD_reset_session_only): the content size is unknown.
+func (e *Encoder) Reset(w io.Writer) {
+	e.ResetContentSize(w, -1)
+}
+
+// ResetContentSize will reset and set a content size for the next stream.
+// If the bytes written does not match the size given an error will be returned
+// when calling Close().
+// This is removed when Reset is called.
+// Sizes <= 0 results in no content size set.
+//
+// C: ZSTD_CCtx_reset(ZSTD_reset_session_only), then
+// ZSTD_CCtx_setPledgedSrcSize(size). The frame header then carries the
+// size and C's parameters are chosen for it. Writing more than size fails
+// once C compresses the excess (Write, Flush or Close returns C's error),
+// writing less fails at Close.
+func (e *Encoder) ResetContentSize(w io.Writer, size int64) {
+	s := &e.s
+	*s = encStream{c: s.c, w: w, out: s.out, readBuf: s.readBuf, pledged: -1}
+	if size > 0 {
+		s.pledged = size
+	}
+}
+
+// ResetWithOptions will re-initialize the writer and apply the given options
+// as a new, independent stream.
+// Options are applied on top of the existing options.
+// Some options cannot be changed on reset and will return an error.
+//
+// WithEncoderLevel, WithWindowSize and WithEncoderConcurrency cannot change
+// (passing their current value is allowed); on error nothing is reset. The
+// new options apply to the next stream and to EncodeAll.
+func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
+	o := e.o
+	for _, opt := range opts {
+		if err := opt(&o); err != nil {
+			return err
+		}
+	}
+	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.concurrent != e.o.concurrent {
+		return errors.New("zstd: WithEncoderLevel, WithWindowSize and WithEncoderConcurrency cannot be changed with ResetWithOptions")
+	}
+	e.o = o
+	e.Reset(w)
+	return nil
+}
+
+// check returns the error a streaming call must fail with, if any.
+func (s *encStream) check() error {
+	if s.err != nil {
+		return s.err
+	}
+	if s.closed {
+		return ErrEncoderClosed
+	}
+	return nil
+}
+
+// startFrame returns the stream's context, making it ready for a new
+// frame if none is open (C: the ZSTD_CCtx_reset and
+// ZSTD_CCtx_setPledgedSrcSize calls of Reset and ResetContentSize, made
+// when the stream's first data arrives).
+func (e *Encoder) startFrame() *cctx {
+	s := &e.s
+	if s.c == nil {
+		s.c = e.newCCtx()
+		s.out = make([]byte, 0, cStreamOutSize)
+	}
+	if !s.started {
+		s.started = true
+		s.c.reset()
+		e.configure(s.c)
+		if s.pledged > 0 {
+			s.c.setPledgedSrcSize(uint64(s.pledged))
+		}
+	}
+	return s.c
+}
+
+// drain repeats ZSTD_compressStream2 with op (eFlush or eEnd) and no input
+// until nothing is left to flush, writing the output.
+func (e *Encoder) drain(op endDirective) error {
+	s := &e.s
+	for {
+		out, _, remaining, err := s.c.compressStream2(s.out[:0], nil, op)
+		if err == nil {
+			err = s.write(out)
+		}
+		if err != nil {
+			s.err = err
+			return err
+		}
+		if remaining == 0 {
+			return nil
+		}
+	}
+}
+
+// write writes b to the destination.
+func (s *encStream) write(b []byte) error {
+	if len(b) == 0 {
+		return nil
+	}
+	n, err := s.w.Write(b)
+	s.nWritten += int64(n)
+	if err == nil && n < len(b) {
+		err = io.ErrShortWrite
+	}
+	return err
 }

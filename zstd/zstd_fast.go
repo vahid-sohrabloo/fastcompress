@@ -301,3 +301,306 @@ func compressBlockFastNoDictGeneric(ms *matchState, ss *seqStore, rep *[repNum]u
 	// Return the last literals size
 	return iend - anchor
 }
+
+// compressBlockFastExtDict is the ZSTD_fast match finder for a window with
+// an extDict segment. C: zstd_fast.c:ZSTD_compressBlock_fast_extDict (C
+// instantiates the generic function for mls 4..7, any other minMatch uses
+// 4; here mls is a value, as in compressBlockFast).
+func compressBlockFastExtDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	mls := ms.cParams.minMatch
+	if mls < 4 || mls > 7 {
+		mls = 4 // includes case 3
+	}
+	return compressBlockFastExtDictGeneric(ms, ss, rep, src, srcIdx, mls)
+}
+
+// compressBlockFastExtDictGeneric.
+// C: zstd_fast.c:ZSTD_compressBlock_fast_extDict_generic
+//
+// Pointers become positions: in the prefix ms.window.base (C's base + idx
+// is b[idx-baseIdx]) and in the extDict ms.window.dictBase (C's dictBase +
+// idx is d[idx-dictBaseIdx]). C's gotos are the found switch (_match,
+// _offset) and loop exits (_cleanup); `goto _start` is the outer loop.
+func compressBlockFastExtDictGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, mls uint32) int {
+	cParams := &ms.cParams
+	hashTable := ms.hashTable
+	hlog := cParams.hashLog
+	stepSize := int(cParams.targetLength) + 1 // support stepSize of 0
+	if cParams.targetLength == 0 {
+		stepSize++
+	}
+	w := &ms.window
+	b, baseIdx := w.base, w.baseIdx
+	d, dictBaseIdx := w.dictBase, w.dictBaseIdx
+	istart := int(srcIdx - baseIdx)
+	anchor := istart
+	endIndex := srcIdx + uint32(len(src))
+	lowLimit := getLowestMatchIndex(ms, endIndex, cParams.windowLog)
+	dictStartIndex := lowLimit
+	dictLimit := w.dictLimit
+	prefixStartIndex := dictLimit
+	if dictLimit < lowLimit {
+		prefixStartIndex = lowLimit
+	}
+	iend := istart + len(src)
+	ilimit := iend - 8
+	offset1, offset2 := rep[0], rep[1]
+	var offsetSaved1, offsetSaved2 uint32
+
+	// switch to "regular" variant if extDict is invalidated due to maxDistance
+	if prefixStartIndex == dictStartIndex {
+		return compressBlockFast(ms, ss, rep, src, srcIdx)
+	}
+	if extDictHook != nil {
+		extDictHook("fast")
+	}
+	dictStart := int(dictStartIndex - dictBaseIdx)
+	prefixStart := int(prefixStartIndex - baseIdx)
+	dictEnd := int(prefixStartIndex - dictBaseIdx)
+
+	hShift, prime := fastHashParams(mls)
+	hBits := 64 - hlog
+	hash := func(p int) uint32 {
+		return uint32(((binary.LittleEndian.Uint64(b[p:]) << hShift) * prime) >> hBits)
+	}
+	idx := func(p int) uint32 { return uint32(p) + baseIdx }
+	read32 := func(p int) uint32 { return binary.LittleEndian.Uint32(b[p:]) }
+	// seg returns the segment holding index i and i's position in it.
+	seg := func(i uint32) ([]byte, int) {
+		if i < prefixStartIndex {
+			return d, int(i - dictBaseIdx)
+		}
+		return b, int(i - baseIdx)
+	}
+	// segEnd returns the end of the segment holding index i (C: dictEnd or iend).
+	segEnd := func(i uint32) int {
+		if i < prefixStartIndex {
+			return dictEnd
+		}
+		return iend
+	}
+
+	ip0 := istart
+	{
+		curr := idx(ip0)
+		maxRep := curr - dictStartIndex
+		if offset2 >= maxRep {
+			offsetSaved2, offset2 = offset2, 0
+		}
+		if offset1 >= maxRep {
+			offsetSaved1, offset1 = offset1, 0
+		}
+	}
+
+	const kStepIncr = 1 << (kSearchStrength - 1)
+	for { // C: _start (requires ip0)
+		step := stepSize
+		nextStep := ip0 + kStepIncr
+
+		// calculate positions, ip0 - anchor == 0, so we skip step calc
+		ip1 := ip0 + 1
+		ip2 := ip0 + step
+		ip3 := ip2 + 1
+
+		if ip3 >= ilimit {
+			break // C: goto _cleanup
+		}
+
+		hash0 := hash(ip0)
+		hash1 := hash(ip1)
+		matchIdx := hashTable[hash0] // C: idx; idxBase is seg(matchIdx)
+
+		const (
+			found0 = iota // C: _cleanup
+			foundRep
+			foundOffset
+		)
+		found := found0
+		var current0 uint32
+		var match0 []byte
+		var m0, mLength, matchEnd int
+		var offcode uint32
+		// loadMatch is C's "load match for ip[0]": the 4 bytes at matchIdx,
+		// or a value guaranteed not to match ip0's.
+		loadMatch := func() uint32 {
+			if matchIdx >= dictStartIndex {
+				s, p := seg(matchIdx)
+				return binary.LittleEndian.Uint32(s[p:])
+			}
+			return read32(ip0) ^ 1 // guaranteed not to match
+		}
+		for {
+			{ // load repcode match for ip[2]
+				current2 := idx(ip2)
+				repIndex := current2 - offset1
+				repBase, repPos := seg(repIndex)
+				var rval uint32
+				if prefixStartIndex-repIndex >= 4 && offset1 > 0 { // intentional underflow
+					rval = binary.LittleEndian.Uint32(repBase[repPos:])
+				} else {
+					rval = read32(ip2) ^ 1 // guaranteed to not match.
+				}
+
+				// write back hash table entry
+				current0 = idx(ip0)
+				hashTable[hash0] = current0
+
+				// check repcode at ip[2]
+				if read32(ip2) == rval {
+					ip0 = ip2
+					match0, m0 = repBase, repPos
+					matchEnd = segEnd(repIndex)
+					mLength = 0
+					if b[ip0-1] == match0[m0-1] {
+						mLength = 1
+					}
+					ip0 -= mLength
+					m0 -= mLength
+					offcode = repcode1ToOffBase
+					mLength += 4
+					found = foundRep
+					break // C: goto _match
+				}
+			}
+
+			// check match at ip[0]
+			if read32(ip0) == loadMatch() {
+				found = foundOffset
+				break // found a match! C: goto _offset
+			}
+
+			// lookup ip[1]
+			matchIdx = hashTable[hash1]
+
+			// hash ip[2]
+			hash0 = hash1
+			hash1 = hash(ip2)
+
+			// advance to next positions
+			ip0 = ip1
+			ip1 = ip2
+			ip2 = ip3
+
+			// write back hash table entry
+			current0 = idx(ip0)
+			hashTable[hash0] = current0
+
+			// check match at ip[0]
+			if read32(ip0) == loadMatch() {
+				found = foundOffset
+				break // found a match! C: goto _offset
+			}
+
+			// lookup ip[1]
+			matchIdx = hashTable[hash1]
+
+			// hash ip[2]
+			hash0 = hash1
+			hash1 = hash(ip2)
+
+			// advance to next positions
+			ip0 = ip1
+			ip1 = ip2
+			ip2 = ip0 + step
+			ip3 = ip1 + step
+
+			// calculate step
+			if ip2 >= nextStep {
+				step++
+				nextStep += kStepIncr
+			}
+			if ip3 >= ilimit {
+				break
+			}
+		}
+		if found == found0 {
+			break // C: _cleanup
+		}
+
+		if found == foundOffset { // C: _offset (requires ip0, idx, idxBase)
+			// Compute the offset code.
+			offset := current0 - matchIdx
+			lowMatchPtr := prefixStart
+			if matchIdx < prefixStartIndex {
+				lowMatchPtr = dictStart
+			}
+			matchEnd = segEnd(matchIdx)
+			match0, m0 = seg(matchIdx)
+			offset2 = offset1
+			offset1 = offset
+			offcode = offsetToOffBase(offset)
+			mLength = 4
+
+			// Count the backwards match length.
+			for ip0 > anchor && m0 > lowMatchPtr && b[ip0-1] == match0[m0-1] {
+				ip0--
+				m0--
+				mLength++
+			}
+		}
+
+		// C: _match (requires ip0, match0, offcode, matchEnd)
+
+		// Count the forward length.
+		mLength += count2Segments(b, ip0+mLength, match0, m0+mLength, iend, matchEnd, prefixStart)
+
+		storeSeq(ss, ip0-anchor, b[anchor:], offcode, mLength)
+
+		ip0 += mLength
+		anchor = ip0
+
+		// write next hash table entry
+		if ip1 < ip0 {
+			hashTable[hash1] = idx(ip1)
+		}
+
+		// Fill table and check for immediate repcode.
+		if ip0 <= ilimit {
+			// Fill Table
+			hashTable[hash(int(current0+2-baseIdx))] = current0 + 2 // here because current+2 could be > iend-8
+			hashTable[hash(ip0-2)] = idx(ip0 - 2)
+
+			for ip0 <= ilimit {
+				repIndex2 := idx(ip0) - offset2
+				repMatch2, rp := seg(repIndex2)
+				if indexOverlapCheck(prefixStartIndex, repIndex2) && offset2 > 0 &&
+					binary.LittleEndian.Uint32(repMatch2[rp:]) == read32(ip0) {
+					repEnd2 := segEnd(repIndex2)
+					repLength2 := count2Segments(b, ip0+4, repMatch2, rp+4, iend, repEnd2, prefixStart) + 4
+					offset2, offset1 = offset1, offset2 // swap offset_2 <=> offset_1
+					storeSeq(ss, 0, b[anchor:], repcode1ToOffBase, repLength2)
+					hashTable[hash(ip0)] = idx(ip0)
+					ip0 += repLength2
+					anchor = ip0
+					continue
+				}
+				break
+			}
+		}
+	}
+
+	// C: _cleanup
+	// Note that there are probably still a couple positions we could
+	// search. However, it seems to be a meaningful performance hit to try
+	// to search them. So let's not.
+
+	// If offset_1 started invalid (offsetSaved1 != 0) and became valid
+	// (offset_1 != 0), rotate saved offsets. See comment in
+	// compressBlockFastNoDictGeneric for more context.
+	if offsetSaved1 != 0 && offset1 != 0 {
+		offsetSaved2 = offsetSaved1
+	}
+
+	// save reps for next block
+	rep[0] = offset1
+	if offset1 == 0 {
+		rep[0] = offsetSaved1
+	}
+	rep[1] = offset2
+	if offset2 == 0 {
+		rep[1] = offsetSaved2
+	}
+
+	// Return the last literals size
+	return iend - anchor
+}

@@ -578,7 +578,39 @@ type cctx struct {
 	tmpWorkspace []byte   // C: tmpWorkspace, used for entropy
 	splitStats   *fpStats // pre-block-splitter workspace (C: tmpWorkspace too)
 	bmi2         bool
+
+	// Streaming. C's inBufferMode and outBufferMode are always
+	// ZSTD_bm_buffered here (the stable modes are not exposed).
+	inBuff             []byte // C: inBuff; cap may exceed inBuffSize
+	inBuffSize         int
+	inToCompress       int
+	inBuffPos          int
+	inBuffTarget       int
+	outBuff            []byte // C: outBuff; cap may exceed outBuffSize
+	outBuffSize        int
+	outBuffContentSize int
+	outBuffFlushedSize int
+	streamStage        streamStage
+	frameEnded         bool
 }
+
+// streamStage. C: zstd_compress_internal.h:ZSTD_cStreamStage
+type streamStage int
+
+const (
+	zcssInit  streamStage = iota // C: zcss_init
+	zcssLoad                     // C: zcss_load
+	zcssFlush                    // C: zcss_flush
+)
+
+// endDirective. C: zstd.h:ZSTD_EndDirective
+type endDirective int
+
+const (
+	eContinue endDirective = iota // C: ZSTD_e_continue: collect more data, the encoder decides when to output
+	eFlush                        // C: ZSTD_e_flush: flush any data provided so far
+	eEnd                          // C: ZSTD_e_end: flush any remaining data and close the current frame
+)
 
 // newCCtx returns a context with default parameters (level 3, content size
 // flag on, no checksum). C: zstd_compress.c:ZSTD_createCCtx
@@ -621,7 +653,10 @@ func (c *cctx) setPledgedSrcSize(n uint64) { c.pledgedSrcSizePlusOne = n + 1 }
 
 // reset abandons the current frame, keeping the parameters.
 // C: zstd_compress.c:ZSTD_CCtx_reset(ZSTD_reset_session_only)
-func (c *cctx) reset() { c.pledgedSrcSizePlusOne = 0 }
+func (c *cctx) reset() {
+	c.streamStage = zcssInit
+	c.pledgedSrcSizePlusOne = 0
+}
 
 // compress2 compresses src into one frame appended to dst, with the
 // requested parameters and the content size pledged.
@@ -634,8 +669,7 @@ func (c *cctx) reset() { c.pledgedSrcSizePlusOne = 0 }
 // would hit them too).
 func (c *cctx) compress2(dst, src []byte) ([]byte, error) {
 	c.reset()
-	c.pledgedSrcSizePlusOne = uint64(len(src)) + 1 // auto-determine pledgedSrcSize
-	if err := c.initCompressStream2(); err != nil {
+	if err := c.initCompressStream2(eEnd, len(src), false); err != nil {
 		return dst, err
 	}
 	n0 := len(dst)
@@ -650,22 +684,50 @@ func (c *cctx) compress2(dst, src []byte) ([]byte, error) {
 }
 
 // initCompressStream2 resolves the parameters for the pledged size and
-// starts a frame. C: zstd_compress.c:ZSTD_CCtx_init_compressStream2 (no
-// dictionary, single-threaded).
-func (c *cctx) initCompressStream2() error {
+// starts a frame. With endOp eEnd, inSize becomes the pledged size.
+// buffered selects the streaming buffers (C: ZSTD_bm_buffered in and out
+// buffer modes); compress2 compresses straight from and into the caller's
+// buffers (C: ZSTD_compress2 sets both modes to ZSTD_bm_stable).
+// C: zstd_compress.c:ZSTD_CCtx_init_compressStream2 (no dictionary,
+// single-threaded). LDM stays disabled: ZSTD_resolveEnableLdm enables it
+// only for strategy >= btopt with windowLog >= 27, which levels 1, 3, 7
+// and 11 never reach (btopt is selected only for a pledged size <= 16 KiB,
+// which caps windowLog at 14).
+func (c *cctx) initCompressStream2(endOp endDirective, inSize int, buffered bool) error {
 	params := c.requestedParams
+	if endOp == eEnd {
+		c.pledgedSrcSizePlusOne = uint64(inSize) + 1 // auto-determine pledgedSrcSize
+	}
 	pledgedSrcSize := c.pledgedSrcSizePlusOne - 1
 	params.cParams = getCParamsFromCCtxParams(&params, pledgedSrcSize, 0, cpmNoAttachDict)
 	params.postBlockSplitter = resolveBlockSplitterMode(params.postBlockSplitter, &params.cParams)
 	params.useRowMatchFinder = resolveRowMatchFinderMode(params.useRowMatchFinder, &params.cParams)
 	params.maxBlockSize = resolveMaxBlockSize(params.maxBlockSize)
-	return c.compressBeginInternal(&params, pledgedSrcSize)
+	if err := c.compressBeginInternal(&params, pledgedSrcSize, buffered); err != nil {
+		return err
+	}
+	c.inToCompress = 0
+	c.inBuffPos = 0
+	if buffered {
+		// for small input: avoid automatic flush on reaching end of block,
+		// since it would require to add a 3-bytes null block to end frame
+		c.inBuffTarget = c.blockSizeMax
+		if uint64(c.blockSizeMax) == pledgedSrcSize {
+			c.inBuffTarget++
+		}
+	} else {
+		c.inBuffTarget = 0
+	}
+	c.outBuffContentSize, c.outBuffFlushedSize = 0, 0
+	c.streamStage = zcssLoad
+	c.frameEnded = false
+	return nil
 }
 
 // compressBeginInternal. C: zstd_compress.c:ZSTD_compressBegin_internal
 // (no dictionary: ZSTD_compress_insertDictionary returns dictID 0).
-func (c *cctx) compressBeginInternal(params *cctxParams, pledgedSrcSize uint64) error {
-	c.resetCCtxInternal(params, pledgedSrcSize, 0)
+func (c *cctx) compressBeginInternal(params *cctxParams, pledgedSrcSize uint64, buffered bool) error {
+	c.resetCCtxInternal(params, pledgedSrcSize, 0, buffered)
 	c.dictID = 0
 	return nil
 }
@@ -717,7 +779,7 @@ func dictTooBig(loadedDictSize int) bool { return loadedDictSize > chunkSizeMax 
 // lowLimit, so stale entries are never followed (positions skipped after a
 // long match are never referenced either). TestCompress2OverflowCorrectionBtopt
 // checks overflow correction.
-func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, loadedDictSize int) {
+func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, loadedDictSize int, buffered bool) {
 	c.isFirstBlock = true
 	c.appliedParams = *params
 	params = &c.appliedParams
@@ -758,6 +820,22 @@ func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, load
 	}
 	if c.tmpWorkspace == nil {
 		c.tmpWorkspace = make([]byte, entropyWorkspaceSize)
+	}
+
+	// streaming buffers. C carves them out of the workspace; their content
+	// from an earlier frame is never read (the window was cleared above).
+	c.inBuffSize, c.outBuffSize = 0, 0
+	if buffered {
+		c.inBuffSize = int(windowSize) + blockSize
+		c.outBuffSize = compressBound(blockSize) + 1
+		if cap(c.inBuff) < c.inBuffSize {
+			c.inBuff = make([]byte, c.inBuffSize)
+		}
+		if cap(c.outBuff) < c.outBuffSize {
+			c.outBuff = make([]byte, c.outBuffSize)
+		}
+		c.inBuff = c.inBuff[:c.inBuffSize]
+		c.outBuff = c.outBuff[:c.outBuffSize]
 	}
 	c.initialized = true
 }
@@ -909,7 +987,8 @@ type blockCompressor func(ms *matchState, ss *seqStore, rep *[repNum]uint32, src
 // C: zstd_compress.c:ZSTD_selectBlockCompressor
 func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) blockCompressor {
 	if rowMatchfinder {
-		if mode == noDict {
+		switch mode {
+		case noDict:
 			switch strat {
 			case zstdGreedy:
 				return compressBlockGreedyRow
@@ -918,6 +997,34 @@ func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) b
 			case zstdLazy2:
 				return compressBlockLazy2Row
 			}
+		case extDict:
+			switch strat {
+			case zstdGreedy:
+				return compressBlockGreedyExtDictRow
+			case zstdLazy:
+				return compressBlockLazyExtDictRow
+			case zstdLazy2:
+				return compressBlockLazy2ExtDictRow
+			}
+		}
+		return nil
+	}
+	if mode == extDict {
+		switch strat {
+		case zstdFast:
+			return compressBlockFastExtDict
+		case zstdDfast:
+			return compressBlockDoubleFastExtDict
+		case zstdGreedy:
+			return compressBlockGreedyExtDict
+		case zstdLazy:
+			return compressBlockLazyExtDict
+		case zstdLazy2:
+			return compressBlockLazy2ExtDict
+		case zstdBtlazy2:
+			return compressBlockBtlazy2ExtDict
+		case zstdBtopt:
+			return compressBlockBtoptExtDict
 		}
 		return nil
 	}
@@ -1359,4 +1466,144 @@ func (c *cctx) compressEnd(dst, src []byte) (int, error) {
 		}
 	}
 	return cSize + endResult, nil
+}
+
+/*-*************************************
+*  Streaming
+***************************************/
+
+// cStreamOutSize is the recommended size of a streaming output buffer: it
+// holds one compressed block, its header and a checksum.
+// C: zstd_compress.c:ZSTD_CStreamOutSize
+var cStreamOutSize = compressBound(blockSizeMax) + blockHeaderSize + 4
+
+var errInitMissing = errors.New("zstd: stream not initialized") // ERROR(init_missing)
+
+// compressStream2 compresses in with directive op. Output is appended to
+// dst within its capacity: dst[len(dst):cap(dst)] is C's free output space,
+// so cap(dst) - len(dst) must be > 0 for progress. It returns dst extended
+// by the output, the number of bytes of in consumed, and the number of
+// bytes still to flush: with eFlush or eEnd the call must be repeated (with
+// free output space) until it is 0; 0 after eEnd means the frame is
+// complete. With eContinue the call must be repeated until in is consumed.
+// C: zstd_compress.c:ZSTD_compressStream2 (single-threaded, buffered
+// in/out modes, so no stable-buffer checks).
+func (c *cctx) compressStream2(dst []byte, in []byte, op endDirective) ([]byte, int, int, error) {
+	// transparent initialization stage
+	if c.streamStage == zcssInit {
+		if err := c.initCompressStream2(op, len(in), true); err != nil {
+			return dst, 0, 0, err
+		}
+	}
+	// compression stage
+	dst, consumed, err := c.compressStreamGeneric(dst, in, op)
+	if err != nil {
+		return dst, consumed, 0, err
+	}
+	return dst, consumed, c.outBuffContentSize - c.outBuffFlushedSize, nil // remaining to flush
+}
+
+// compressStreamGeneric. C: zstd_compress.c:ZSTD_compressStream_generic
+// with inBufferMode and outBufferMode ZSTD_bm_buffered. Output goes to
+// dst[len(dst):cap(dst)]; it returns dst extended and the number of bytes
+// of in consumed. C's return value (the next input size hint) is unused.
+func (c *cctx) compressStreamGeneric(dst []byte, in []byte, flushMode endDirective) ([]byte, int, error) {
+	ip := 0
+	iend := len(in)
+	for someMoreWork := true; someMoreWork; {
+		switch c.streamStage {
+		case zcssInit:
+			return dst, ip, errInitMissing // call ZSTD_initCStream() first!
+		case zcssLoad:
+			if flushMode == eEnd && cap(dst)-len(dst) >= compressBound(iend-ip) && // Enough output space
+				c.inBuffPos == 0 {
+				// shortcut to compression pass directly into output buffer
+				cSize, err := c.compressEnd(dst[len(dst):cap(dst)], in[ip:iend])
+				if err != nil {
+					return dst, ip, err
+				}
+				ip = iend
+				dst = dst[:len(dst)+cSize]
+				c.frameEnded = true
+				c.reset()
+				someMoreWork = false
+				continue
+			}
+			// complete loading into inBuffer in buffered mode
+			loaded := copy(c.inBuff[c.inBuffPos:c.inBuffTarget], in[ip:iend]) // C: ZSTD_limitCopy
+			c.inBuffPos += loaded
+			ip += loaded
+			if flushMode == eContinue && c.inBuffPos < c.inBuffTarget {
+				// not enough input to fill full block : stop here
+				someMoreWork = false
+				continue
+			}
+			if flushMode == eFlush && c.inBuffPos == c.inToCompress {
+				// empty
+				someMoreWork = false
+				continue
+			}
+			// compress current block (note : this stage cannot be stopped in the middle)
+			{
+				oSize := cap(dst) - len(dst)
+				iSize := c.inBuffPos - c.inToCompress
+				var cDst []byte
+				direct := oSize >= compressBound(iSize)
+				if direct {
+					cDst = dst[len(dst):cap(dst)] // compress into output buffer, to skip flush stage
+				} else {
+					cDst = c.outBuff
+				}
+				lastBlock := flushMode == eEnd && ip == iend
+				src := c.inBuff[c.inToCompress:c.inBuffPos]
+				var cSize int
+				var err error
+				if lastBlock {
+					cSize, err = c.compressEnd(cDst, src)
+				} else {
+					cSize, err = c.compressContinueInternal(cDst, src, false)
+				}
+				if err != nil {
+					return dst, ip, err
+				}
+				c.frameEnded = lastBlock
+				// prepare next block
+				c.inBuffTarget = c.inBuffPos + c.blockSizeMax
+				if c.inBuffTarget > c.inBuffSize {
+					c.inBuffPos, c.inBuffTarget = 0, c.blockSizeMax
+				}
+				c.inToCompress = c.inBuffPos
+				if direct { // no need to flush
+					dst = dst[:len(dst)+cSize]
+					if c.frameEnded {
+						someMoreWork = false
+						c.reset()
+					}
+					continue
+				}
+				c.outBuffContentSize = cSize
+				c.outBuffFlushedSize = 0
+				c.streamStage = zcssFlush // pass-through to flush stage
+			}
+			fallthrough
+		case zcssFlush:
+			toFlush := c.outBuffContentSize - c.outBuffFlushedSize
+			flushed := copy(dst[len(dst):cap(dst)], c.outBuff[c.outBuffFlushedSize:c.outBuffContentSize]) // C: ZSTD_limitCopy
+			dst = dst[:len(dst)+flushed]
+			c.outBuffFlushedSize += flushed
+			if toFlush != flushed {
+				// flush not fully completed, presumably because dst is too small
+				someMoreWork = false
+				continue
+			}
+			c.outBuffContentSize, c.outBuffFlushedSize = 0, 0
+			if c.frameEnded {
+				someMoreWork = false
+				c.reset()
+				continue
+			}
+			c.streamStage = zcssLoad
+		}
+	}
+	return dst, ip, nil
 }

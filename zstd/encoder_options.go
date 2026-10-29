@@ -19,7 +19,8 @@ const (
 // EOption is an option for creating a encoder.
 //
 // Mapping to C libzstd v1.5.7 (EncodeAll is ZSTD_compress2 with
-// pledgedSrcSize = len(src) and these parameters):
+// pledgedSrcSize = len(src) and these parameters; the Writer is
+// ZSTD_compressStream2 with them, see Encoder):
 //
 //	WithEncoderLevel             ZSTD_c_compressionLevel 1/3/7/11
 //	WithEncoderCRC               ZSTD_c_checksumFlag (default on)
@@ -31,9 +32,11 @@ const (
 //	WithLowerEncoderMem          none; accepted, no effect on output
 //	WithSingleSegment            none; the frame header follows C's automatic
 //	                             choice (single segment iff window >= len(src))
-//	WithZeroFrames               none; decides whether empty input emits C's
+//	WithZeroFrames               none; decides whether empty input (or a
+//	                             stream with nothing written) emits C's
 //	                             empty frame or nothing
 //	WithEncoderPadding           none; a skippable frame after C's frame
+//	                             (after Close's frame for the Writer)
 type EOption func(*encoderOptions) error
 
 // encoderOptions holds the options an Encoder was created with.

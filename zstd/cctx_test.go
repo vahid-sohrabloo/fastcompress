@@ -347,8 +347,8 @@ func TestCompress2IndexResetTables(t *testing.T) {
 		{11, inputs["text256KiB"], inputs["text16KiB+1"]},
 		// Level 11 btopt (hashLog 14, chainLog 15), then hashLog 11 and
 		// chainLog 11; level 12 adds hashTable3 (hashLog3 14, then 10).
-		// small is a copy: the frame after it must not start inside the
-		// memory of the previous one (windowUpdate's overlap check).
+		// (small is a separate copy; inputs sharing memory with the
+		// previous frame are TestCompress2AliasedInputs' subject.)
 		{11, inputs["text16KiB"], bytes.Clone(inputs["text16KiB"][:1024])},
 		{12, inputs["text16KiB"], bytes.Clone(inputs["text16KiB"][:1024])},
 	} {
@@ -460,8 +460,7 @@ func checkOverflowCorrection(t *testing.T, c compress2Case, name string, src []b
 	t.Helper()
 	cc := c.newCCtx(t)
 	cc.reset()
-	cc.pledgedSrcSizePlusOne = uint64(len(src)) + 1
-	if err := cc.initCompressStream2(); err != nil {
+	if err := cc.initCompressStream2(eEnd, len(src), false); err != nil {
 		t.Fatal(err)
 	}
 	// Continue the indices from just below currentMax (odd low bits),

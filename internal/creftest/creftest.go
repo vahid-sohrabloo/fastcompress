@@ -5,6 +5,7 @@ package creftest
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -58,6 +59,21 @@ func run(t testing.TB, path string, in []byte, args ...string) []byte {
 func Run(t testing.TB, in []byte, args ...string) []byte {
 	t.Helper()
 	return run(t, Bin(t), in, args...)
+}
+
+// RunErr is Run for a cref call that may fail: it returns cref's stdout,
+// or an error with its stderr when it exits non-zero.
+func RunErr(t testing.TB, in []byte, args ...string) ([]byte, error) {
+	t.Helper()
+	cmd := exec.Command(Bin(t), args...)
+	cmd.Stdin = bytes.NewReader(in)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("cref %v: %w: %s", args, err, stderr.String())
+	}
+	return out.Bytes(), nil
 }
 
 // DecodeC decompresses frame with the C zstd program (`zstd -d -c`).
