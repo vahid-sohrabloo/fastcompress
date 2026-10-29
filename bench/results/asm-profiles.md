@@ -8,9 +8,10 @@ hist and DUBT assembly). Level 11 on these inputs is row-based lazy2
 (inputs > 256 KiB), plus btlazy2/btopt for the -B128K/-B16K rows profiled
 separately below.
 
-`perf` is not installed on this machine (no `perf` binary, no
-linux-tools package), so there is no C-side function split; the C/Go
-comparison is per row in the compare tables only.
+Hardware counters: `perf` 6.8 (`/usr/lib/linux-tools/6.8.0-147-generic/perf`,
+cpu_core events) on C `zstd -b<L> -i4 -T1` and on gobench, same input,
+`taskset -c 2`; see "perf: C vs Go" at the end. (An earlier draft used a
+gprof build of C because perf was not yet installed; that section is kept.)
 
 Speeds of these runs (MB/s, % of the C baseline in 2026-10-29-pure-go.md):
 
@@ -296,3 +297,61 @@ the instruction sequence mirrors C's (same prefetches, SSE2 tag match, same
 candidate order), so the difference is not visible at function granularity
 and `perf stat` counters (not installed) would be needed to see whether it
 is TLB/fill-buffer pressure or code layout.
+
+## perf: C vs Go on the row search (dickens, levels 7 and 11)
+
+`perf stat` shows both processes at the same clock (3.79 GHz on CPU 2), so
+the gap is cycles per byte, not frequency. `perf record` with cycles,
+instructions, cache-misses (LLC), dTLB-load-misses and L1-dcache-load-misses
+on `zstd -b<L> -i4 -T1` and `gobench -secs 4`; counts per input byte, the
+C ones over its compression functions only (the -b run also decompresses;
+bytes = speed x compression cycles / clock). Go at commit 4dbadc3.
+
+| L | function | cycles/B | instr/B | IPC | LLC miss/B | dTLB miss/B | L1D miss/B |
+|---|---|---|---|---|---|---|---|
+| 7 | C ZSTD_RowFindBestMatch_noDict_5_4 (update inlined) | 46.5 | 144.6 | 3.11 | 0.018 | 0.040 | 0.232 |
+| 7 | Go rowFindBestMatchAsm + rowUpdateAsmHelper | 62.1 | 177.6 | 2.86 | 0.017 | 0.029 | 0.233 |
+| 7 | C ZSTD_compressBlock_lazy_row | 5.1 | 14.2 | | | | |
+| 7 | Go compressBlockLazyGeneric (+ AsmCall, searchMax) | 6.5+ | 26.2+ | | | | |
+| 7 | all compression | C 56.7 | C 178 | | C 0.04 | C 0.04 | C 0.29 |
+| 7 | all compression | Go 75.1 | Go 232 | | Go 0.04 | Go 0.03 | Go 0.28 |
+| 11 | C ZSTD_RowFindBestMatch_noDict_5_6 | 137.9 | 430.9 | 3.13 | 0.93 | 1.42 | 2.78 |
+| 11 | Go rowFindBestMatchAsm + rowUpdateAsmHelper | 218.5 | 522.5 | 2.39 | 1.61 | 1.46 | 2.67 |
+| 11 | all compression | C 152 | C 475 | | C 1.00 | C 1.43 | C 2.85 |
+| 11 | all compression | Go 236 | Go 585 | | Go 1.71 | Go 1.47 | Go 2.78 |
+
+What this says:
+
+- **Level 7 is instruction-bound, not memory-bound.** Cache, TLB and L1
+  misses per byte are the same as C's; Go executes ~30% more instructions
+  per byte at a similar IPC. The excess is in the row update helper (41
+  instructions/byte: it reloads ten parameters from rowAsmParams on every
+  call and reads rowLog/rowMask/table bases from memory inside its loop,
+  where C has them as compile-time constants of the `_5_4` specialisation)
+  and in the Go lazy loop (26 vs 14 instructions/byte: bounds checks on the
+  repcode `read32`s, the searchMax/rowFindBestMatchAsmCall dispatch).
+- **Level 11 has 1.7x C's LLC misses per byte** on top of ~20% more
+  instructions; TLB and L1 misses match C's. Instruction-level annotation
+  (`perf annotate`, cycles and cache-misses) gives the same shape on both
+  sides: the store into the candidate buffer just after the candidate
+  PREFETCHT0 is the hottest instruction (C 27.6%, Go 42% of LLC-miss
+  samples), i.e. the misses are taken on row entries / candidate data in
+  the same loop, Go just takes more of them.
+- **Huge pages and alignment do not explain it:** transparent huge pages
+  are `madvise` on this machine and neither process gets any
+  (`AnonHugePages: 0 kB` in both /proc/PID/smaps_rollup); Go's tables are
+  large heap allocations and so page aligned (rows are 64-byte aligned on
+  both sides). Neither side clears its tables between passes
+  (memset/memclr < 0.1%).
+- Experiments: prefetching all four lines of a 64-entry hash row (instead
+  of C's two) made L11 1% and L7 5% slower; dropping the candidate
+  PREFETCHT0 made L11 3-6% slower. Both reverted.
+
+Targets that follow (not done in this task; recorded for Task 22):
+specialise the row search/update per (mls, rowLog) like C's
+`ZSTD_RowFindBestMatch_noDict_<mls>_<rowLog>` so table bases, rowLog and
+hash constants are immediates or stay in registers; move the lazy parser
+loop (compressBlockLazyGeneric) into the same assembly to remove the
+per-search call and parameter reloads; then re-measure the L11 LLC excess,
+which needs a finer split (e.g. `mem_load_retired.l3_miss` per load
+address) to attribute.
