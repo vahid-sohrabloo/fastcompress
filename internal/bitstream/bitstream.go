@@ -108,9 +108,14 @@ var (
 )
 
 // DStream is the backward bit reader. C: bitstream.h:BIT_DStream_t. ptr is
-// a byte offset into src; C's limitPtr is start + 8, i.e. offset 8. When
-// the stream overflows, C points ptr at a static zero word; here the
-// container is set to zero instead (the only thing read through it).
+// a byte offset into src; C's limitPtr is start + 8, i.e. offset 8.
+//
+// C: bitstream.h:BIT_reloadDStream — on overflow C keeps bitContainer and
+// only points ptr at a static zero word, for later reloads; here ptr stays
+// and the container is zeroed instead. Output-neutral: a stream stays in
+// overflow until reset, and its only reader, the FSE decoder, then decodes
+// one last symbol, which comes from the decoding state, not from the bits
+// read; only the discarded final state differs.
 type DStream struct {
 	bitContainer uint64
 	bitsConsumed uint32

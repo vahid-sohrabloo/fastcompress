@@ -8,6 +8,7 @@ package zstd
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
 	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
@@ -90,6 +91,9 @@ type cdict struct {
 	// through ZSTD_initLocalDict (ZSTD_createCDict_advanced2).
 	compressionLevel  int
 	useRowMatchFinder paramSwitch
+	// repsInContent tells whether the starting repcodes stay within the
+	// loaded content (see shouldAttachDict). Go only.
+	repsInContent bool
 }
 
 // localDict is a dictionary loaded into a context, digested into a CDict
@@ -192,6 +196,38 @@ func initCDictInternal(cd *cdict, dict []byte, dct dictContentType, params cctxP
 		return err
 	}
 	cd.dictID = dictID
+	cdictLen := cd.matchState.window.nextSrc - cd.matchState.window.dictLimit
+	cd.repsInContent = true
+	for _, r := range cd.cBlockState.rep {
+		if cdictLen != 0 && r > cdictLen {
+			cd.repsInContent = false
+		}
+	}
+	return nil
+}
+
+// maxDictContentLoaded is the most dictionary content any CDict keeps in
+// its window: ZSTD_loadDictionaryContent keeps only the last
+// currentMax - windowStartIndex bytes, and only the last
+// 1<<(32-shortCacheTagBits) - windowStartIndex bytes for the fast and dfast
+// strategies (short cache). Its other truncation (to what the tables can
+// index) only limits the positions indexed, not the window.
+const maxDictContentLoaded = min(currentMax-windowStartIndex, 1<<(32-shortCacheTagBits)-windowStartIndex)
+
+// checkDictReps rejects a zstd dictionary whose repcodes reach beyond the
+// content a CDict of some strategy keeps (dictContentSize is the size of
+// the content after the header). C only checks them against the whole
+// content (ZSTD_loadCEntropy); a larger repcode makes C's dictMatchState
+// compressors read before the dictionary (C asserts it does not happen;
+// the behaviour is undefined). No dictionary C handles correctly is
+// rejected.
+func checkDictReps(rep [repNum]uint32, dictContentSize int) error {
+	limit := min(dictContentSize, maxDictContentLoaded)
+	for _, r := range rep {
+		if int(r) > limit {
+			return fmt.Errorf("%w: repcode %d beyond the %d bytes of content a dictionary can use", errDictionaryCorrupted, r, limit)
+		}
+	}
 	return nil
 }
 
@@ -459,9 +495,17 @@ var attachDictSizeCutoffs = [zstdBtultra2 + 1]uint64{
 // C: zstd_compress.c:ZSTD_shouldAttachDict — dedicatedDictSearch is never
 // set, and attachDictPref (ZSTD_dictDefaultAttach) and forceWindow (0) keep
 // their defaults.
+//
+// C: same function — Go also copies (never attaches) a CDict whose starting
+// repcodes reach beyond its loaded content (repsInContent): attached, C's
+// dictMatchState compressors would read before the dictionary (undefined
+// behaviour, asserted against in C), while the extDict compressors of a
+// copy validate repcodes. The Encoder's options reject such dictionaries
+// (checkDictReps), so this only guards contexts loaded directly; for every
+// other dictionary it does not change the choice.
 func shouldAttachDict(cd *cdict, pledgedSrcSize uint64) bool {
 	cutoff := attachDictSizeCutoffs[cd.matchState.cParams.strategy]
-	return pledgedSrcSize <= cutoff || pledgedSrcSize == contentSizeUnknown
+	return (pledgedSrcSize <= cutoff || pledgedSrcSize == contentSizeUnknown) && cd.repsInContent
 }
 
 // getCParamMode. C: zstd_compress.c:ZSTD_getCParamMode

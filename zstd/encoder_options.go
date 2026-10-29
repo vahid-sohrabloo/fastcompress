@@ -334,7 +334,9 @@ func WithLowerEncoderMem(b bool) EOption {
 // and shares it between its contexts. dict is copied. A dict that is not a
 // valid zstd dictionary (no magic number, corrupted entropy tables, invalid
 // repcodes) returns an error, as C's ZSTD_dictionary_wrong and
-// ZSTD_dictionary_corrupted.
+// ZSTD_dictionary_corrupted. Unlike C, a repcode beyond the content a CDict
+// keeps for some strategy (the last 16 MiB - 2 bytes for the fastest
+// levels) is rejected too: C's behaviour with it is undefined.
 //
 // [dictionary format]: https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#dictionary-format
 func WithEncoderDict(dict []byte) EOption {
@@ -343,7 +345,11 @@ func WithEncoderDict(dict []byte) EOption {
 			return errDictionaryWrong
 		}
 		var bs compressedBlockState
-		if _, err := loadCEntropy(&bs, dict); err != nil {
+		eSize, err := loadCEntropy(&bs, dict)
+		if err != nil {
+			return err
+		}
+		if err := checkDictReps(bs.rep, len(dict)-eSize); err != nil {
 			return err
 		}
 		o.dict, o.dictRaw, o.dictID = bytes.Clone(dict), false, 0

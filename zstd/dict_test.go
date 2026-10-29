@@ -365,13 +365,14 @@ func TestDictRawIDHeader(t *testing.T) {
 func TestDictOptionErrors(t *testing.T) {
 	dict := readTestdata(t, "train.dict")
 	bad := map[string]EOption{
-		"nil":          WithEncoderDict(nil),
-		"short":        WithEncoderDict(dict[:7]),
-		"no magic":     WithEncoderDict(readTestdata(t, "dickens-32k.raw")),
-		"truncated":    WithEncoderDict(dict[:40]),
-		"corrupt huf":  WithEncoderDict(slices.Concat(dict[:8], []byte{0xFF, 0xFF}, dict[10:])),
-		"zero repcode": WithEncoderDict(zeroRep(dict)),
-		"raw empty":    WithEncoderDictRaw(1, nil),
+		"nil":                       WithEncoderDict(nil),
+		"short":                     WithEncoderDict(dict[:7]),
+		"no magic":                  WithEncoderDict(readTestdata(t, "dickens-32k.raw")),
+		"truncated":                 WithEncoderDict(dict[:40]),
+		"corrupt huf":               WithEncoderDict(slices.Concat(dict[:8], []byte{0xFF, 0xFF}, dict[10:])),
+		"zero repcode":              WithEncoderDict(zeroRep(dict)),
+		"raw empty":                 WithEncoderDictRaw(1, nil),
+		"rep beyond loaded content": WithEncoderDict(bigRepDict(t, 17<<20, maxDictContentLoaded+1)),
 	}
 	for name, opt := range bad {
 		if _, err := NewWriter(nil, opt); err == nil {
@@ -511,6 +512,76 @@ func TestDictEncodeAllConcurrent(t *testing.T) {
 				}()
 			}
 			wg.Wait()
+		}
+	}
+}
+
+// bigRepDict returns train.dict's header with contentSize bytes of content
+// and repcodes rep0, rep0-1, rep0-2 (valid for C's ZSTD_loadCEntropy when
+// rep0 <= contentSize).
+func bigRepDict(t testing.TB, contentSize, rep0 int) []byte {
+	t.Helper()
+	d := readTestdata(t, "train.dict")
+	var bs compressedBlockState
+	eSize, err := loadCEntropy(&bs, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dict := make([]byte, eSize+contentSize)
+	copy(dict, d[:eSize])
+	for j := range contentSize {
+		dict[eSize+j] = byte(j*7 + j>>9)
+	}
+	for i := range 3 {
+		binary.LittleEndian.PutUint32(dict[eSize-12+4*i:], uint32(rep0-i))
+	}
+	return dict
+}
+
+// TestDictRepBeyondLoadedContent: a zstd dictionary of more than 16 MiB of
+// content whose repcodes reach before the last 16 MiB - 2 bytes, which the
+// fast and dfast CDicts keep (C: undefined behaviour when attached).
+// WithEncoderDict rejects it; a context loaded with it directly copies the
+// CDict instead of attaching it, and its frames decode with C at levels 1,
+// 3, 7 and 11. Repcodes exactly at the limit are accepted and give C's
+// frames.
+func TestDictRepBeyondLoadedContent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("17 MiB dictionaries")
+	}
+	bad := bigRepDict(t, 17<<20, 17<<20)
+	if _, err := NewWriter(nil, WithEncoderDict(bad)); err == nil {
+		t.Fatal("dictionary accepted")
+	}
+	text := readTestdata(t, "dickens-32k.raw")
+	for _, lv := range encoderLevels {
+		for _, n := range []int{100, 40000} {
+			src := bytes.Repeat(text[:n/4], 4)
+			c := newCCtx()
+			c.setLevel(lv.c)
+			if err := c.loadDictionary(bad, dctFullDict); err != nil {
+				t.Fatal(err)
+			}
+			got, err := c.compress2(nil, src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dec, err := creftest.DecodeCDict(t, got, bad)
+			if err != nil || !bytes.Equal(dec, src) {
+				t.Fatalf("L%d/%d: C decode: %v", lv.c, n, err)
+			}
+		}
+	}
+	good := bigRepDict(t, 17<<20, maxDictContentLoaded)
+	dargs := dictCase{dict: good}.crefArgs(t)
+	for _, lv := range encoderLevels {
+		e := newTestEncoder(t, WithEncoderLevel(lv.l), WithEncoderDict(good))
+		for _, n := range []int{100, 40000} {
+			src := bytes.Repeat(text[:n/4], 4)
+			want := creftest.Run(t, src, append([]string{"compress", "-level", strconv.Itoa(lv.c), "-checksum", "1", "-pledged", "1"}, dargs...)...)
+			if got := e.EncodeAll(src, nil); !bytes.Equal(got, want) {
+				t.Fatalf("L%d/%d: frame differs from C", lv.c, n)
+			}
 		}
 	}
 }

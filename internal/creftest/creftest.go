@@ -83,6 +83,26 @@ func DecodeC(t testing.TB, frame []byte) []byte {
 	return run(t, p, frame, "-d", "-c")
 }
 
+// DecodeCDict decompresses frame with the C zstd program and dictionary
+// dict (`zstd -d -c -D`). It returns an error when zstd fails.
+func DecodeCDict(t testing.TB, frame, dict []byte) ([]byte, error) {
+	t.Helper()
+	p := tool(t, "ref/zstd/programs/zstd", "run ref/fetch.sh")
+	f := filepath.Join(t.TempDir(), "dict")
+	if err := os.WriteFile(f, dict, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(p, "-d", "-c", "-D", f)
+	cmd.Stdin = bytes.NewReader(frame)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("zstd -d -D: %w: %s", err, stderr.String())
+	}
+	return out.Bytes(), nil
+}
+
 const (
 	kib = 1 << 10
 	mib = 1 << 20

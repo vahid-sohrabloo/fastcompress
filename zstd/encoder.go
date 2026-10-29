@@ -64,40 +64,41 @@ func NewWriter(w io.Writer, opts ...EOption) (*Encoder, error) {
 	e.cctxs.New = func() any { return e.newCCtx() }
 	e.s.w = w
 	e.s.pledged = -1
-	if err := e.makeCDict(); err != nil {
+	cd, err := makeCDict(&e.o)
+	if err != nil {
 		return nil, err
 	}
+	e.cd = cd
 	return e, nil
 }
 
-// makeCDict digests the dictionary of e.o (if any) into e.cd, as C's
+// makeCDict digests the dictionary of o (nil if none), as C's
 // ZSTD_initLocalDict does at a context's first frame: from the context's
-// requested parameters, which depend only on the level and window size,
-// neither of which ResetWithOptions can change.
-func (e *Encoder) makeCDict() error {
-	e.cd = nil
-	if e.o.dict == nil {
-		return nil
+// requested parameters. The CDict's stored state depends only on the
+// dictionary, the level and the window size, and ResetWithOptions can
+// change neither of the last two.
+func makeCDict(o *encoderOptions) (*cdict, error) {
+	if o.dict == nil {
+		return nil, nil
 	}
 	c := newCCtx()
-	e.configure(c)
-	cd, err := createCDictAdvanced2(e.o.dict, e.dictContentType(), &c.requestedParams)
+	configureParams(c, o)
+	cd, err := createCDictAdvanced2(o.dict, o.dictContentType(), &c.requestedParams)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if e.o.dictRaw {
+	if o.dictRaw {
 		// C: zstd_compress.c:ZSTD_compress_insertDictionary — raw content
 		// has dictID 0 in C; WithEncoderDictRaw's ID goes into the frame
 		// header instead (it is used nowhere else).
-		cd.dictID = e.o.dictID
+		cd.dictID = o.dictID
 	}
-	e.cd = cd
-	return nil
+	return cd, nil
 }
 
-// dictContentType is the C content type of e.o.dict.
-func (e *Encoder) dictContentType() dictContentType {
-	if e.o.dictRaw {
+// dictContentType is the C content type of o.dict.
+func (o *encoderOptions) dictContentType() dictContentType {
+	if o.dictRaw {
 		return dctRawContent
 	}
 	return dctFullDict
@@ -110,17 +111,22 @@ func (e *Encoder) newCCtx() *cctx {
 	return c
 }
 
-// configure sets c's C parameters from the Encoder's options.
+// configure sets c's C parameters and dictionary from the Encoder's options.
 func (e *Encoder) configure(c *cctx) {
-	c.setLevel(zstdLevels[e.o.level])
-	c.setChecksum(e.o.crc)
-	_ = c.setWindowLog(e.o.windowLog) // in range: validated by WithWindowSize
-	c.requestedParams.literalCompressionMode = e.o.literalCompressionMode()
+	configureParams(c, &e.o)
 	if e.cd != nil {
-		c.setLocalDict(e.o.dict, e.dictContentType(), e.cd)
+		c.setLocalDict(e.o.dict, e.o.dictContentType(), e.cd)
 	} else {
 		c.clearAllDicts()
 	}
+}
+
+// configureParams sets c's C parameters (not the dictionary) from o.
+func configureParams(c *cctx, o *encoderOptions) {
+	c.setLevel(zstdLevels[o.level])
+	c.setChecksum(o.crc)
+	_ = c.setWindowLog(o.windowLog) // in range: validated by WithWindowSize
+	c.requestedParams.literalCompressionMode = o.literalCompressionMode()
 }
 
 // EncodeAll will encode all input in src and append it to dst.
@@ -377,12 +383,14 @@ func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
 	}
 	newDict := len(o.dict) != len(e.o.dict) || len(o.dict) > 0 && &o.dict[0] != &e.o.dict[0] ||
 		o.dictRaw != e.o.dictRaw || o.dictID != e.o.dictID
-	e.o = o
+	cd := e.cd
 	if newDict {
-		if err := e.makeCDict(); err != nil {
-			return err // unreachable: the options validated the dictionary
+		var err error
+		if cd, err = makeCDict(&o); err != nil {
+			return err // nothing is reset
 		}
 	}
+	e.o, e.cd = o, cd
 	e.Reset(w)
 	return nil
 }
