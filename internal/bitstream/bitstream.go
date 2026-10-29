@@ -1,4 +1,5 @@
-// Package bitstream ports the BIT_CStream_t encoder from libzstd v1.5.7
+// Package bitstream ports the BIT_CStream_t encoder and the BIT_DStream_t
+// decoder from libzstd v1.5.7
 // lib/common/bitstream.h (Copyright (c) Meta Platforms, Inc. and affiliates;
 // BSD/GPLv2 dual license). The container is 64 bits (C: BitContainerType on
 // 64-bit systems), bits are added LSB-first and flushed little-endian.
@@ -7,6 +8,7 @@ package bitstream
 import (
 	"encoding/binary"
 	"errors"
+	"math/bits"
 )
 
 // ErrDstSizeTooSmall mirrors ERROR(dstSize_tooSmall).
@@ -86,4 +88,119 @@ func (c *CStream) Close() int {
 		n++
 	}
 	return n
+}
+
+// DStatus is the result of DStream.Reload. C: bitstream.h:BIT_DStream_status
+type DStatus int
+
+const (
+	DStreamUnfinished  DStatus = 0 // fully refilled
+	DStreamEndOfBuffer DStatus = 1 // still some bits left in bitstream
+	DStreamCompleted   DStatus = 2 // bitstream entirely consumed, bit-exact
+	DStreamOverflow    DStatus = 3 // user requested more bits than present in bitstream
+)
+
+// Errors of DStream.Init, mirroring the C error codes.
+var (
+	ErrSrcSizeWrong       = errors.New("bitstream: src size wrong")      // ERROR(srcSize_wrong)
+	ErrGeneric            = errors.New("bitstream: generic error")       // ERROR(GENERIC)
+	ErrCorruptionDetected = errors.New("bitstream: corruption detected") // ERROR(corruption_detected)
+)
+
+// DStream is the backward bit reader. C: bitstream.h:BIT_DStream_t. ptr is
+// a byte offset into src; C's limitPtr is start + 8, i.e. offset 8. When
+// the stream overflows, C points ptr at a static zero word; here the
+// container is set to zero instead (the only thing read through it).
+type DStream struct {
+	bitContainer uint64
+	bitsConsumed uint32
+	src          []byte
+	ptr          int
+}
+
+// Init starts reading src, which must end with the end mark. It returns
+// len(src). C: bitstream.h:BIT_initDStream
+func (d *DStream) Init(src []byte) (int, error) {
+	if len(src) < 1 {
+		*d = DStream{}
+		return 0, ErrSrcSizeWrong
+	}
+	d.src = src
+	if len(src) >= 8 { // normal case
+		d.ptr = len(src) - 8
+		d.bitContainer = binary.LittleEndian.Uint64(src[d.ptr:])
+		lastByte := src[len(src)-1]
+		d.bitsConsumed = 0
+		if lastByte != 0 {
+			d.bitsConsumed = 8 - uint32(bits.Len8(lastByte)-1) // ensures bitsConsumed is always set
+		}
+		if lastByte == 0 {
+			return 0, ErrGeneric // endMark not present
+		}
+	} else {
+		d.ptr = 0
+		d.bitContainer = 0
+		for i := len(src) - 1; i >= 0; i-- {
+			d.bitContainer += uint64(src[i]) << (8 * uint(i))
+		}
+		lastByte := src[len(src)-1]
+		d.bitsConsumed = 0
+		if lastByte != 0 {
+			d.bitsConsumed = 8 - uint32(bits.Len8(lastByte)-1)
+		}
+		if lastByte == 0 {
+			return 0, ErrCorruptionDetected // endMark not present
+		}
+		d.bitsConsumed += uint32(8-len(src)) * 8
+	}
+	return len(src), nil
+}
+
+// LookBits returns the next nbBits bits (nbBits < 32) without consuming
+// them. C: bitstream.h:BIT_lookBits (BIT_getMiddleBits, x86-64 form)
+func (d *DStream) LookBits(nbBits uint32) uint64 {
+	const regMask = 63
+	start := 64 - d.bitsConsumed - nbBits
+	return (d.bitContainer >> (start & regMask)) & (1<<nbBits - 1)
+}
+
+// ReadBits reads and consumes nbBits bits (nbBits < 32).
+// C: bitstream.h:BIT_readBits
+func (d *DStream) ReadBits(nbBits uint32) uint64 {
+	v := d.LookBits(nbBits)
+	d.bitsConsumed += nbBits
+	return v
+}
+
+// Reload refills the container from memory. C: bitstream.h:BIT_reloadDStream
+func (d *DStream) Reload() DStatus {
+	// note : once in overflow mode, a bitstream remains in this mode until it's reset
+	if d.bitsConsumed > 64 {
+		d.bitContainer = 0 // C: ptr = &zeroFilled
+		return DStreamOverflow
+	}
+	if d.ptr >= 8 { // C: ptr >= limitPtr
+		d.ptr -= int(d.bitsConsumed >> 3)
+		d.bitsConsumed &= 7
+		d.bitContainer = binary.LittleEndian.Uint64(d.src[d.ptr:])
+		return DStreamUnfinished
+	}
+	if d.ptr == 0 {
+		// reached end of bitStream => no update
+		if d.bitsConsumed < 64 {
+			return DStreamEndOfBuffer
+		}
+		return DStreamCompleted
+	}
+	// start < ptr < limitPtr => cautious update
+	nbBytes := int(d.bitsConsumed >> 3)
+	result := DStreamUnfinished
+	if d.ptr-nbBytes < 0 {
+		nbBytes = d.ptr // ptr > start
+		result = DStreamEndOfBuffer
+	}
+	d.ptr -= nbBytes
+	d.bitsConsumed -= uint32(nbBytes) * 8
+	d.bitContainer = binary.LittleEndian.Uint64(d.src[d.ptr:]) // reminder : srcSize > 8, otherwise ptr == start
+	return result
 }

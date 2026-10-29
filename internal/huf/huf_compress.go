@@ -2,8 +2,9 @@
 // libzstd v1.5.7 (Copyright (c) Meta Platforms, Inc. and affiliates; BSD/GPLv2
 // dual license), with the pieces of lib/common/huf.h it needs.
 //
-// The decoder side, and HUF_readCTable (which needs HUF_readStats and the FSE
-// decoder), are not part of this package.
+// HUF_readCTable is here too (with HUF_readStats, in entropy_common.go), to
+// load a dictionary's table; the Huffman decoder is not part of this
+// package.
 package huf
 
 import (
@@ -1066,4 +1067,81 @@ func Compress1XRepeat(dst, src []byte, maxSymbol, huffLog uint, wksp []byte, huf
 // C: huf_compress.c:HUF_compress4X_repeat
 func Compress4XRepeat(dst, src []byte, maxSymbol, huffLog uint, wksp []byte, hufTable CTable, repeat *Repeat, flags int) (int, error) {
 	return compressInternal(dst, src, maxSymbol, huffLog, true, wksp, hufTable, repeat, flags)
+}
+
+// ---------------------------------------------------------------------------
+// Table description reading
+// ---------------------------------------------------------------------------
+
+// tableLogAbsoluteMax. C: huf.h:HUF_TABLELOG_ABSOLUTEMAX
+const tableLogAbsoluteMax = 12
+
+// ReadCTable rebuilds the compression table described by src (as written
+// by WriteCTable) into ct. On entry *maxSymbolValue is the largest symbol
+// accepted; on return the table's largest symbol. It returns the number of
+// bytes read and whether some symbol up to it has weight 0 (no code).
+// Elements of ct beyond the table's largest symbol are left as they were.
+// C: huf_compress.c:HUF_readCTable
+func ReadCTable(ct CTable, maxSymbolValue *uint, src []byte) (size int, hasZeroWeights bool, err error) {
+	var huffWeight [SymbolValueMax + 1]byte
+	var rankVal [tableLogAbsoluteMax + 1]uint32 // large enough for values from 0 to 16
+	elts := ct[1:]
+
+	// get symbol weights
+	nbSymbols, tableLog, readSize, err := ReadStats(huffWeight[:], rankVal[:], src)
+	if err != nil {
+		return 0, false, err
+	}
+	hasZeroWeights = rankVal[0] > 0
+
+	// check result
+	if tableLog > TableLogMax {
+		return 0, false, ErrTableLogTooLarge
+	}
+	if uint(nbSymbols) > *maxSymbolValue+1 {
+		return 0, false, ErrMaxSymbolTooSmall
+	}
+
+	*maxSymbolValue = uint(nbSymbols) - 1
+
+	writeCTableHeader(ct, tableLog, uint32(*maxSymbolValue))
+
+	// Prepare base value per rank
+	var nextRankStart uint32
+	for n := uint32(1); n <= tableLog; n++ {
+		curr := nextRankStart
+		nextRankStart += rankVal[n] << (n - 1)
+		rankVal[n] = curr
+	}
+
+	// fill nbBits
+	for n := uint32(0); n < nbSymbols; n++ {
+		w := uint32(huffWeight[n])
+		var nb uint32
+		if w != 0 {
+			nb = tableLog + 1 - w
+		}
+		setNbBits(&elts[n], uint(byte(nb)))
+	}
+
+	// fill val
+	var nbPerRank, valPerRank [TableLogMax + 2]uint16 // support w=0=>n=tableLog+1
+	for n := uint32(0); n < nbSymbols; n++ {
+		nbPerRank[getNbBits(elts[n])]++
+	}
+	// determine stating value per rank
+	valPerRank[tableLog+1] = 0 // for w==0
+	var minV uint16
+	for n := tableLog; n > 0; n-- { // start at n=tablelog <-> w=1
+		valPerRank[n] = minV // get starting value within each rank
+		minV += nbPerRank[n]
+		minV >>= 1
+	}
+	// assign value within rank, symbol order
+	for n := uint32(0); n < nbSymbols; n++ {
+		nb := getNbBits(elts[n])
+		setValue(&elts[n], uint(valPerRank[nb]))
+		valPerRank[nb]++
+	}
+	return readSize, hasZeroWeights, nil
 }
