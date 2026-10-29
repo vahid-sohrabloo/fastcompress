@@ -8,11 +8,13 @@ import (
 	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
 )
 
-// useSeqAsm selects the assembly loop of encodeSequences (baseline amd64).
-var useSeqAsm bool
+// useSeqAsm selects the assembly loop of encodeSequences (baseline amd64);
+// useSeqBMI2 its BMI2 variant.
+var useSeqAsm, useSeqBMI2 bool
 
 func init() {
 	cpu.RegisterAsm("sequences", &useSeqAsm, func() bool { return true })
+	cpu.RegisterAsm("sequences-bmi2", &useSeqBMI2, func() bool { return cpu.X86.HasBMI2 })
 }
 
 // encodeSequencesAsm encodes seqs[n-1] down to seqs[0] (C: the loop of
@@ -31,6 +33,14 @@ func init() {
 //
 //go:noescape
 func encodeSequencesAsm(seqs *seqDef, llCodes, mlCodes, ofCodes *byte, n int,
+	mlStateTable, mlTT, ofStateTable, ofTT, llStateTable, llTT *uint32, llBitsTab, mlBitsTab *uint8,
+	buf *byte, ptr, endPtr int, container, bitPos uint64, stML, stOF, stLL uint32,
+	mlMax, ofMax, llMax uint32) (containerOut, bitPosOut uint64, ptrOut int, stMLOut, stOFOut, stLLOut uint32)
+
+// encodeSequencesAsmBMI2 is encodeSequencesAsm using BMI2.
+//
+//go:noescape
+func encodeSequencesAsmBMI2(seqs *seqDef, llCodes, mlCodes, ofCodes *byte, n int,
 	mlStateTable, mlTT, ofStateTable, ofTT, llStateTable, llTT *uint32, llBitsTab, mlBitsTab *uint8,
 	buf *byte, ptr, endPtr int, container, bitPos uint64, stML, stOF, stLL uint32,
 	mlMax, ofMax, llMax uint32) (containerOut, bitPosOut uint64, ptrOut int, stMLOut, stOFOut, stLLOut uint32)
@@ -63,11 +73,21 @@ func encodeSequences(dst []byte, ctML, ctOF, ctLL fse.CTable, seqs []seqDef,
 	if endPtr != len(buf)-8 || ptr < 0 || ptr > endPtr || bitPos >= 8 {
 		panic("zstd: encodeSequences preconditions")
 	}
-	container, bitPos64, ptr, vML, vOF, vLL := encodeSequencesAsm(&seqs[0], &llCodes[0], &mlCodes[0], &ofCodes[0], last,
-		&ctML[1], &ctML.SymbolTT()[0], &ctOF[1], &ctOF.SymbolTT()[0], &ctLL[1], &ctLL.SymbolTT()[0], &llBits[0], &mlBits[0],
-		&buf[0], ptr, endPtr, container, uint64(bitPos),
-		stateMatchLength.Value(), stateOffsetBits.Value(), stateLitLength.Value(),
-		getFSEMaxSymbolValue(ctML), getFSEMaxSymbolValue(ctOF), getFSEMaxSymbolValue(ctLL))
+	var bitPos64 uint64
+	var vML, vOF, vLL uint32
+	if useSeqBMI2 {
+		container, bitPos64, ptr, vML, vOF, vLL = encodeSequencesAsmBMI2(&seqs[0], &llCodes[0], &mlCodes[0], &ofCodes[0], last,
+			&ctML[1], &ctML.SymbolTT()[0], &ctOF[1], &ctOF.SymbolTT()[0], &ctLL[1], &ctLL.SymbolTT()[0], &llBits[0], &mlBits[0],
+			&buf[0], ptr, endPtr, container, uint64(bitPos),
+			stateMatchLength.Value(), stateOffsetBits.Value(), stateLitLength.Value(),
+			getFSEMaxSymbolValue(ctML), getFSEMaxSymbolValue(ctOF), getFSEMaxSymbolValue(ctLL))
+	} else {
+		container, bitPos64, ptr, vML, vOF, vLL = encodeSequencesAsm(&seqs[0], &llCodes[0], &mlCodes[0], &ofCodes[0], last,
+			&ctML[1], &ctML.SymbolTT()[0], &ctOF[1], &ctOF.SymbolTT()[0], &ctLL[1], &ctLL.SymbolTT()[0], &llBits[0], &mlBits[0],
+			&buf[0], ptr, endPtr, container, uint64(bitPos),
+			stateMatchLength.Value(), stateOffsetBits.Value(), stateLitLength.Value(),
+			getFSEMaxSymbolValue(ctML), getFSEMaxSymbolValue(ctOF), getFSEMaxSymbolValue(ctLL))
+	}
 	if bitPos64 > 63 {
 		panic("zstd: sequence code beyond its FSE table")
 	}
