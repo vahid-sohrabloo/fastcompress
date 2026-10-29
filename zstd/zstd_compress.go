@@ -553,7 +553,9 @@ type blockState struct {
 // they are plain slices kept across compressions and regrown when too small.
 // That cannot change output: C's tables are either zeroed or hold indices
 // from earlier compressions, which are all below the new window's lowLimit
-// and so rejected exactly like zeros (see resetMatchState).
+// and so rejected exactly like zeros (see resetMatchState). Every table the
+// matchState owns goes through resizeTable, which keeps that true for
+// storage beyond a table's current length too.
 type cctx struct {
 	requestedParams cctxParams
 	appliedParams   cctxParams
@@ -733,10 +735,20 @@ func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, load
 }
 
 // resizeTable returns t with n entries, reusing its storage when possible.
-// Entries kept from an earlier use are stale indices below the window.
+//
+// Invariant (C: ZSTD_cwksp's tableValidEnd): only t[:len(t)] is kept
+// current — zeroed on an index reset, reduced on overflow correction —
+// so entries in t[len(t):cap(t)] may hold indices from before a reset,
+// which could lie ahead of the new window. Growing within capacity
+// therefore zeroes the newly exposed part, as C cleans any table area
+// beyond its previously valid end. Entries kept in t[:len(t)] are stale
+// indices below the window, rejected like zeros.
 func resizeTable(t []uint32, n int) []uint32 {
 	if cap(t) < n {
 		return make([]uint32, n)
+	}
+	if n > len(t) {
+		clear(t[len(t):n])
 	}
 	return t[:n]
 }

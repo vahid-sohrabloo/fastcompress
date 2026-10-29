@@ -238,3 +238,57 @@ func TestCount(t *testing.T) {
 		}
 	}
 }
+
+// TestCompress2IndexResetTables shrinks the hash table across an index
+// reset and grows it again: entries beyond the shrunk length still hold
+// pre-reset indices, which lie ahead of the new window unless growing the
+// table zeroes them (C: ZSTD_cwksp cleans tables beyond tableValidEnd).
+func TestCompress2IndexResetTables(t *testing.T) {
+	_, inputs := sortedInputs(t)
+	big := inputs["text16KiB"] // level 1: hashLog 15
+	small := inputs["text16KiB"][:1024]
+	c := compress2Case{level: 1}
+	cc := c.newCCtx(t)
+	if _, err := cc.compress2(nil, big); err != nil {
+		t.Fatal(err)
+	}
+	// Force ZSTD_indexTooCloseToMax: the next frame restarts the indices.
+	cc.blockState.matchState.window.nextSrc = currentMax
+	if _, err := cc.compress2(nil, small); err != nil { // hashLog 11
+		t.Fatal(err)
+	}
+	got, err := cc.compress2(nil, big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := creftest.Run(t, big, c.crefArgs("compress")...); !bytes.Equal(got, want) {
+		t.Fatalf("frame after index reset differs from C (Go %d bytes, C %d bytes)%s", len(got), len(want), firstDiff(got, want))
+	}
+}
+
+// TestCompress2ReuseMultiBlock is TestCompress2Reuse for inputs larger
+// than one block, at window log 10 (1 KiB blocks, never pre-split by C).
+func TestCompress2ReuseMultiBlock(t *testing.T) {
+	names, inputs := sortedInputs(t)
+	cc := newCCtx()
+	for i, name := range names {
+		src := inputs[name]
+		if len(src) <= 128<<10 {
+			continue
+		}
+		c := compress2Case{level: 1, checksum: i%2 == 1, windowLog: 10}
+		cc.setLevel(c.level)
+		cc.setChecksum(c.checksum)
+		if err := cc.setWindowLog(c.windowLog); err != nil {
+			t.Fatal(err)
+		}
+		got, err := cc.compress2(nil, src)
+		if err != nil {
+			t.Fatalf("%s/%s: compress2: %v", c, name, err)
+		}
+		want := creftest.Run(t, src, c.crefArgs("compress")...)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s/%s: frame differs from C (Go %d bytes, C %d bytes)%s", c, name, len(got), len(want), firstDiff(got, want))
+		}
+	}
+}

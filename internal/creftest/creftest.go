@@ -172,6 +172,28 @@ func nbSeqLong() []byte {
 	return b
 }
 
+// stepFour targets the fast search's "if step <= 4" hash-table write
+// (zstd_fast.c, second probe): 700 bytes of compressible noise (64 symbols)
+// with R[10:18] copied to p, and the 5 bytes at p+4 copied to 320. At level
+// 1 (mls 5, hashLog 11) the search runs at step 4 near 300; for these
+// (seed, p) it finds the copy at p on its second probe at ip0 = p+1 and,
+// only because step <= 4, also records ip1 = ip0+3 = p+4 in the hash table.
+// After the match the search restarts at step 2 and visits 320, whose hash
+// slot then holds p+4: a match that is absent without that write. The
+// probe phase and hash collisions depend on the noise, so the (seed, p)
+// pairs were chosen by checking that output changes when the condition is
+// mutated to step <= 3.
+func stepFour(seed uint64, p int) []byte {
+	r := rand.New(rand.NewPCG(seed, 5))
+	b := make([]byte, 700)
+	for i := range b {
+		b[i] = '0' + byte(r.Uint32()&63)
+	}
+	copy(b[p:p+8], b[10:18])
+	copy(b[320:325], b[p+4:p+9])
+	return b
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -230,12 +252,11 @@ func Inputs(t testing.TB) map[string][]byte {
 	add("litrle", litRLE())
 	add("litlong", litLong())
 	add("nbseqlong", nbSeqLong())
-	for _, f := range []string{"zstd-README.md", "zstd-format.md"} {
-		b, err := os.ReadFile(filepath.Join(root(), "internal", "creftest", "testdata", f))
-		if err != nil {
-			t.Fatalf("read testdata %s: %v", f, err)
-		}
-		add(f, b)
+	for _, v := range []struct {
+		seed uint64
+		p    int
+	}{{100, 302}, {113, 302}, {135, 303}} {
+		add("step4-"+itoa(int(v.seed))+"-"+itoa(v.p), stepFour(v.seed, v.p))
 	}
 
 	if testing.Short() {
