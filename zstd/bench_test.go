@@ -1,7 +1,6 @@
 package zstd
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,9 +36,6 @@ func BenchmarkEncodeAll(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					if reason := notPorted(enc, src[:min(len(src), 1<<16)]); reason != "" {
-						b.Skip(reason)
-					}
 					dst := make([]byte, 0, enc.MaxEncodedSize(len(src)))
 					b.SetBytes(int64(len(src)))
 					b.ReportAllocs()
@@ -51,20 +47,4 @@ func BenchmarkEncodeAll(b *testing.B) {
 			}
 		})
 	}
-}
-
-// notPorted reports why enc cannot encode yet (a level whose strategy is not
-// ported panics with errStrategyNotPorted), or "" if it can.
-func notPorted(enc *Encoder, probe []byte) (reason string) {
-	defer func() {
-		if r := recover(); r != nil {
-			if err, ok := r.(error); ok && errors.Is(err, errStrategyNotPorted) {
-				reason = err.Error()
-				return
-			}
-			panic(r)
-		}
-	}()
-	enc.EncodeAll(probe, nil)
-	return ""
 }

@@ -457,6 +457,70 @@ const (
 	dedicatedDictSearch
 )
 
+// optNum is the most positions the optimal parser prices ahead.
+// C: zstd_internal.h:ZSTD_OPT_NUM
+const optNum = 1 << 12
+
+// optSize is the size of the optimal parser's tables.
+// C: zstd_compress_internal.h:ZSTD_OPT_SIZE
+const optSize = optNum + 3
+
+// maxLit is the largest literal value. C: zstd_internal.h:MaxLit
+const maxLit = 1<<8 - 1
+
+// optMatch is a match candidate. C: zstd_compress_internal.h:ZSTD_match_t
+type optMatch struct {
+	off uint32 // offset sumtype code for the match, using storeSeq format
+	len uint32 // raw length of match
+}
+
+// optimal is one position tracked by the optimal parser.
+// C: zstd_compress_internal.h:ZSTD_optimal_t — price is C's int; this port
+// computes it in a wider int, which cannot change a comparison since C's
+// prices stay far below 2^31 (C asserts price < 1e9).
+type optimal struct {
+	price  int            // price from beginning of segment to this position
+	off    uint32         // offset of previous match
+	mlen   uint32         // length of previous match
+	litlen uint32         // nb of literals since previous match
+	rep    [repNum]uint32 // offset history after previous match
+}
+
+// optPrice. C: zstd_compress_internal.h:ZSTD_OptPrice_e
+type optPrice int
+
+const (
+	zopDynamic optPrice = iota
+	zopPredef
+)
+
+// optState is the optimal parser state.
+// C: zstd_compress_internal.h:optState_t — the frequency tables are arrays
+// here; matchTable and priceTable are allocated by resetMatchState for
+// strategies >= btopt, like C's workspace reservations.
+type optState struct {
+	litFreq         [maxLit + 1]uint32 // table of literals statistics
+	litLengthFreq   [maxLL + 1]uint32  // table of litLength statistics
+	matchLengthFreq [maxML + 1]uint32  // table of matchLength statistics
+	offCodeFreq     [maxOff + 1]uint32 // table of offCode statistics
+	matchTable      *[optSize]optMatch // list of found matches
+	priceTable      *[optSize]optimal  // all positions tracked by optimal parser
+
+	litSum                  uint32 // nb of literals
+	litLengthSum            uint32 // nb of litLength codes
+	matchLengthSum          uint32 // nb of matchLength codes
+	offCodeSum              uint32 // nb of offset codes
+	litSumBasePrice         uint32 // to compare to log2(litfreq)
+	litLengthSumBasePrice   uint32 // to compare to log2(llfreq)
+	matchLengthSumBasePrice uint32 // to compare to log2(mlfreq)
+	offCodeSumBasePrice     uint32 // to compare to log2(offreq)
+	priceType               optPrice
+	// symbolCosts are the previous block's entropy tables (pre-calculated
+	// dictionary statistics on a frame's first block).
+	symbolCosts            *entropyCTables
+	literalCompressionMode paramSwitch
+}
+
 // matchState. C: zstd_compress_internal.h:ZSTD_MatchState_t (the fields the
 // ported strategies use; later strategies and dictionaries add theirs).
 type matchState struct {
@@ -482,6 +546,8 @@ type matchState struct {
 
 	// forceNonContiguous makes the next windowUpdate start a new segment.
 	forceNonContiguous bool
+
+	opt optState // optimal parser state
 
 	cParams compressionParameters
 }
@@ -531,6 +597,40 @@ func getLowestPrefixIndex(ms *matchState, curr uint32, windowLog uint32) uint32 
 	return withinWindow
 }
 
+// updateRep updates rep in place for a sequence with offBase (storeSeq's
+// numeric representation); ll0 tells whether its literal length is 0.
+// C: zstd_compress_internal.h:ZSTD_updateRep
+func updateRep(rep *[repNum]uint32, offBase uint32, ll0 bool) {
+	if offBase > repNum { // full offset
+		rep[2] = rep[1]
+		rep[1] = rep[0]
+		rep[0] = offBase - repNum
+		return
+	}
+	repCode := offBase - 1 // repcode
+	if ll0 {
+		repCode++
+	}
+	if repCode > 0 { // note : if repCode==0, no change
+		currentOffset := rep[0] - 1
+		if repCode != repNum {
+			currentOffset = rep[repCode]
+		}
+		if repCode >= 2 {
+			rep[2] = rep[1]
+		}
+		rep[1] = rep[0]
+		rep[0] = currentOffset
+	}
+}
+
+// newRep returns rep updated for a sequence with offBase.
+// C: zstd_compress_internal.h:ZSTD_newRep
+func newRep(rep [repNum]uint32, offBase uint32, ll0 bool) [repNum]uint32 {
+	updateRep(&rep, offBase, ll0)
+	return rep
+}
+
 // count returns the length of the common prefix of b[ip:] and b[match:],
 // stopping at iEnd (match < ip). C: zstd_compress_internal.h:ZSTD_count
 // (the result does not depend on C's word-at-a-time strategy).
@@ -553,12 +653,19 @@ func count(b []byte, ip, match, iEnd int) int {
 
 // Hash primes. C: zstd_compress_internal.h
 const (
+	prime3bytes = 506832829
 	prime4bytes = 2654435761
 	prime5bytes = 889523592379
 	prime6bytes = 227718039650203
 	prime7bytes = 58295818150454627
 	prime8bytes = 0xCF1BBCDCB7A56463
 )
+
+// hash3Ptr hashes the first 3 bytes at b[i:] to h bits (4 bytes are read).
+// C: zstd_compress_internal.h:ZSTD_hash3Ptr
+func hash3Ptr(b []byte, i int, h uint32) uint32 {
+	return ((binary.LittleEndian.Uint32(b[i:]) << (32 - 24)) * prime3bytes) >> (32 - h)
+}
 
 // hashPtr hashes the first mls bytes at b[i:] to hBits bits.
 // C: zstd_compress_internal.h:ZSTD_hashPtr

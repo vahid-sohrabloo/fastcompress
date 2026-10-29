@@ -88,16 +88,27 @@ func btCases() []compress2Case {
 	return []compress2Case{{10, false, 0}, {12, true, 0}, {13, false, 17}}
 }
 
+// optCases use the optimal parser (btopt): level 12 at 16 KiB or less
+// (minMatch 3, so hashTable3), and levels 13 to 16 with window log 16,
+// which keeps the post-block splitter off (it needs window log 17 or more)
+// so that btopt runs on larger and multi-block inputs: level 13 up to 256
+// KiB (minMatch 4, 64 KiB blocks above 64 KiB), 14 and 15 up to 256 KiB
+// (minMatch 3; targetLength 32 and 256) and 16 above 256 KiB (minMatch 5).
+func optCases() []compress2Case {
+	return []compress2Case{{12, false, 0}, {13, true, 16}, {14, false, 16}, {15, true, 16}, {16, false, 16}}
+}
+
 // ported reports whether this port has the match finder that compress2
 // selects with c for an input of n bytes: fast, dfast, greedy/lazy/lazy2
-// (row-based or hash chain) and btlazy2. Other inputs make compress2 return
-// errStrategyUnsupported (unless they are too small to search at all).
+// (row-based or hash chain), btlazy2 and btopt, without the post-block
+// splitter. Other inputs make compress2 return errStrategyUnsupported
+// (unless they are too small to search at all).
 func (c compress2Case) ported(n int) bool {
 	var p cctxParams
 	cctxParamsInit(&p, c.level)
 	p.cParams.windowLog = c.windowLog
 	cp := getCParamsFromCCtxParams(&p, uint64(n), 0, cpmNoAttachDict)
-	return cp.strategy <= zstdBtlazy2
+	return cp.strategy <= zstdBtopt && resolveBlockSplitterMode(psAuto, &cp) != psEnable
 }
 
 // seqStep is one compress2 call on a reused context.
@@ -174,12 +185,12 @@ func sortedInputs(t *testing.T) ([]string, map[string][]byte) {
 
 // TestCompress2Cref requires cctx.compress2 to produce exactly the frame of
 // C's ZSTD_compress2 at levels 1 and 3, with and without checksum and with
-// window logs 10 and 17, and at levels 5 to 13 (rowCases, hcCases,
-// btCases) wherever their strategy is ported, for every input, including
+// window logs 10 and 17, and at levels 5 to 16 (rowCases, hcCases,
+// btCases, optCases) wherever their strategy is ported, for every input, including
 // multi-block ones that C pre-splits (inputs over 128 KiB).
 func TestCompress2Cref(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	for _, c := range slices.Concat(level1Cases(), rowCases(), hcCases(), btCases()) {
+	for _, c := range slices.Concat(level1Cases(), rowCases(), hcCases(), btCases(), optCases()) {
 		for _, name := range names {
 			src := inputs[name]
 			t.Run(c.String()+"/"+name, func(t *testing.T) {
@@ -214,13 +225,14 @@ func TestCompress2Cref(t *testing.T) {
 
 // TestCompress2Reuse compresses every single-block input with ONE context,
 // alternating parameters (each input once at levels 1/3 and once with a
-// rowCases, hcCases or btCases parameter set, levels 5 to 13, where
-// ported), and requires each frame to equal C's from ONE reused C context:
+// rowCases, hcCases, btCases or optCases parameter set, levels 5 to 16,
+// where ported), and requires each frame to equal C's from ONE reused C context:
 // index continuation, uncleared tables, the row match finder's per-reset
-// hash salt and the binary tree's stale entries must all behave as in C.
+// hash salt, the binary trees' stale entries and the optimal parser's
+// statistics must all behave as in C.
 func TestCompress2Reuse(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	cases, rc := level1Cases(), slices.Concat(rowCases(), hcCases(), btCases())
+	cases, rc := level1Cases(), slices.Concat(rowCases(), hcCases(), btCases(), optCases())
 	var steps []seqStep
 	for i, name := range names {
 		src := inputs[name]
@@ -333,6 +345,12 @@ func TestCompress2IndexResetTables(t *testing.T) {
 		// Level 11 btlazy2 (hashLog 19, chainLog 18), then btlazy2 with
 		// hashLog and chainLog 15: hash and binary-tree tables are resized.
 		{11, inputs["text256KiB"], inputs["text16KiB+1"]},
+		// Level 11 btopt (hashLog 14, chainLog 15), then hashLog 11 and
+		// chainLog 11; level 12 adds hashTable3 (hashLog3 14, then 10).
+		// small is a copy: the frame after it must not start inside the
+		// memory of the previous one (windowUpdate's overlap check).
+		{11, inputs["text16KiB"], bytes.Clone(inputs["text16KiB"][:1024])},
+		{12, inputs["text16KiB"], bytes.Clone(inputs["text16KiB"][:1024])},
 	} {
 		c := compress2Case{level: tc.level}
 		want := crefSeq(t, []seqStep{{"big", c, tc.big}, {"small", c, tc.small}, {"big", c, tc.big}})
@@ -358,8 +376,10 @@ func TestCompress2IndexResetTables(t *testing.T) {
 // TestCompress2ReuseMultiBlock is TestCompress2Reuse for inputs larger
 // than one block: levels 1/3 at window log 10 (1 KiB blocks, never
 // pre-split by C) or the default window log (pre-split blocks), levels
-// 7/11 at the default window log or 15, and level 13 (btlazy2) at window
-// log 17 or 18, all through one context.
+// 7/11 at the default window log or 15, level 13 (btlazy2) at window
+// log 17 or 18, and btopt over 64 KiB blocks (level 13 up to 256 KiB, level
+// 16 above, window log 16), all through one context: the optimal parser's
+// statistics carry over from block to block (ZSTD_rescaleFreqs).
 func TestCompress2ReuseMultiBlock(t *testing.T) {
 	names, inputs := sortedInputs(t)
 	var steps []seqStep
@@ -385,6 +405,14 @@ func TestCompress2ReuseMultiBlock(t *testing.T) {
 		if bt := (compress2Case{level: 13, checksum: i%2 == 1, windowLog: 17 + uint32(i%2)}); bt.ported(len(src)) {
 			steps = append(steps, seqStep{name, bt, src})
 		}
+		opt := compress2Case{level: 13, checksum: i%2 == 0, windowLog: 16}
+		if len(src) > 256<<10 {
+			opt.level = 16
+		}
+		if getCParams(opt.level, uint64(len(src)), 0).strategy != zstdBtopt || !opt.ported(len(src)) {
+			t.Fatalf("%s: %s is not btopt without post-splitter", name, opt)
+		}
+		steps = append(steps, seqStep{name, opt, src})
 	}
 	runSeq(t, steps)
 }
@@ -404,29 +432,54 @@ func TestCompress2OverflowCorrectionBtlazy2(t *testing.T) {
 		if getCParams(11, uint64(len(src)), 0).strategy != zstdBtlazy2 {
 			t.Fatalf("%s: level 11 is not btlazy2", name)
 		}
-		cc := c.newCCtx(t)
-		cc.reset()
-		cc.pledgedSrcSizePlusOne = uint64(len(src)) + 1
-		if err := cc.initCompressStream2(); err != nil {
-			t.Fatal(err)
+		checkOverflowCorrection(t, c, name, src)
+	}
+}
+
+// TestCompress2OverflowCorrectionBtopt is TestCompress2OverflowCorrectionBtlazy2
+// for btopt's binary tree (and hashTable3 at level 14): level 13 or 14 with
+// window log 16 (64 KiB blocks).
+func TestCompress2OverflowCorrectionBtopt(t *testing.T) {
+	_, inputs := sortedInputs(t)
+	for _, tc := range []struct {
+		level int
+		name  string
+	}{{13, "text256KiB"}, {14, "zstd-format.md"}, {13, "text128KiB+1"}} {
+		src := inputs[tc.name]
+		c := compress2Case{level: tc.level, windowLog: 16}
+		if getCParams(tc.level, uint64(len(src)), 0).strategy != zstdBtopt || !c.ported(len(src)) {
+			t.Fatalf("%s: %s is not btopt without post-splitter", tc.name, c)
 		}
-		// Continue the indices from just below currentMax (odd low bits),
-		// as a long-reused context would: C's ZSTD_window_clear state.
-		ms := &cc.blockState.matchState
-		start := uint32(currentMax - len(src)/2 - 12345)
-		ms.window.nextSrc, ms.window.lowLimit, ms.window.dictLimit = start, start, start
-		ms.nextToUpdate = start
-		out := make([]byte, compressBound(len(src)))
-		n, err := cc.compressEnd(out, src)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if ms.window.nbOverflowCorrections == 0 {
-			t.Fatalf("%s: no overflow correction happened", name)
-		}
-		want := creftest.Run(t, src, c.crefArgs("compress")...)
-		if got := out[:n]; !bytes.Equal(got, want) {
-			t.Fatalf("%s: frame after overflow correction differs from C (Go %d bytes, C %d bytes)%s", name, len(got), len(want), firstDiff(got, want))
-		}
+		checkOverflowCorrection(t, c, tc.name, src)
+	}
+}
+
+// checkOverflowCorrection compresses src with c starting just below
+// currentMax and requires at least one overflow correction and C's frame.
+func checkOverflowCorrection(t *testing.T, c compress2Case, name string, src []byte) {
+	t.Helper()
+	cc := c.newCCtx(t)
+	cc.reset()
+	cc.pledgedSrcSizePlusOne = uint64(len(src)) + 1
+	if err := cc.initCompressStream2(); err != nil {
+		t.Fatal(err)
+	}
+	// Continue the indices from just below currentMax (odd low bits),
+	// as a long-reused context would: C's ZSTD_window_clear state.
+	ms := &cc.blockState.matchState
+	start := uint32(currentMax - len(src)/2 - 12345)
+	ms.window.nextSrc, ms.window.lowLimit, ms.window.dictLimit = start, start, start
+	ms.nextToUpdate = start
+	out := make([]byte, compressBound(len(src)))
+	n, err := cc.compressEnd(out, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms.window.nbOverflowCorrections == 0 {
+		t.Fatalf("%s: no overflow correction happened", name)
+	}
+	want := creftest.Run(t, src, c.crefArgs("compress")...)
+	if got := out[:n]; !bytes.Equal(got, want) {
+		t.Fatalf("%s/%s: frame after overflow correction differs from C (Go %d bytes, C %d bytes)%s", c, name, len(got), len(want), firstDiff(got, want))
 	}
 }

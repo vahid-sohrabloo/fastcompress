@@ -710,6 +710,13 @@ func dictTooBig(loadedDictSize int) bool { return loadedDictSize > chunkSizeMax 
 // every index, every index within the window, and the unsorted marks
 // (reduceTable's preserveMark), as TestCompress2OverflowCorrectionBtlazy2
 // checks.
+//
+// btopt's tree (insertBt1, insertBtAndGetAllMatches) and hashTable3 follow
+// the same argument: btLow is clamped or shifted as above, and every read
+// is guarded by `matchIndex >= windowLow` or `>= matchLow`, both >=
+// lowLimit, so stale entries are never followed (positions skipped after a
+// long match are never referenced either). TestCompress2OverflowCorrectionBtopt
+// checks overflow correction.
 func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, loadedDictSize int) {
 	c.isFirstBlock = true
 	c.appliedParams = *params
@@ -779,7 +786,8 @@ func resizeTable(t []uint32, n int) []uint32 {
 // (ZSTDirp_reset marks them dirty, then cleans them) and otherwise leaves
 // whatever earlier compressions stored; so does this port. The row match
 // finder's tag table is never cleaned (see resizeTagTable) and its hash
-// salt advances on every reset. (Optimal-parser space arrives with btopt.)
+// salt advances on every reset. The optimal parser's tables are allocated
+// for strategies >= btopt and its statistics restart on every reset.
 func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatchFinder paramSwitch, forceResetIndex bool) {
 	// disable chain table allocation for fast or row-based strategies
 	var chainSize int
@@ -806,6 +814,7 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 	windowClear(&ms.window)
 	ms.nextToUpdate = ms.window.dictLimit
 	ms.loadedDictEnd = 0
+	ms.opt.litLengthSum = 0 // force reset of btopt stats
 
 	ms.hashTable = resizeTable(ms.hashTable, hSize)
 	ms.chainTable = resizeTable(ms.chainTable, chainSize)
@@ -823,6 +832,12 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 		// Switch to 32-entry rows if searchLog is 5 (or more)
 		rowLog := min(max(cParams.searchLog, 4), 6)
 		ms.rowHashLog = cParams.hashLog - rowLog
+	}
+
+	// opt parser space
+	if cParams.strategy >= zstdBtopt && ms.opt.priceTable == nil {
+		ms.opt.matchTable = new([optSize]optMatch)
+		ms.opt.priceTable = new([optSize]optimal)
 	}
 	ms.cParams = *cParams
 }
@@ -920,6 +935,8 @@ func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) b
 			return compressBlockLazy2
 		case zstdBtlazy2:
 			return compressBlockBtlazy2
+		case zstdBtopt:
+			return compressBlockBtopt
 		}
 	}
 	return nil
@@ -944,6 +961,10 @@ func (c *cctx) buildSeqStore(src []byte, srcIdx uint32) (int, error) {
 		return bssNoCompress, nil // don't even attempt compression below a certain srcSize
 	}
 	resetSeqStore(&c.seqStore)
+	// required for optimal parser to read stats from dictionary
+	ms.opt.symbolCosts = &c.blockState.prevCBlock.entropy
+	// tell the optimal parser how we expect to compress literals
+	ms.opt.literalCompressionMode = c.appliedParams.literalCompressionMode
 
 	// limited update after a very long match
 	curr := srcIdx

@@ -3,7 +3,6 @@ package zstd
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"errors"
 	"io"
 	"sync"
 )
@@ -57,8 +56,6 @@ func (e *Encoder) newCCtx() *cctx {
 // SpeedBestCompression C's row match finder re-salts its hash on every
 // reset, which this port mirrors, but the salt only relabels hash rows), so
 // the frame does not depend on which pooled context serves the call.
-// EncodeAll has no error result: it panics on an input whose strategy is not
-// ported yet.
 func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 	if len(src) == 0 && !e.o.zeroFrames {
 		return dst
@@ -66,9 +63,6 @@ func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 	c := e.cctxs.Get().(*cctx)
 	dst, err := c.compress2(dst, src)
 	if err != nil {
-		if errors.Is(err, errStrategyUnsupported) {
-			panic(errStrategyNotPorted)
-		}
 		panic(err) // unreachable with validated options
 	}
 	e.cctxs.Put(c)

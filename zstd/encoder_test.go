@@ -3,7 +3,6 @@ package zstd
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -215,27 +214,17 @@ func TestMaxEncodedSize(t *testing.T) {
 	}
 }
 
-// TestEncodeAllNotPorted: inputs whose strategy is not ported yet panic
-// with errStrategyNotPorted (EncodeAll has no error result): level 11 at 16
-// KiB or less (btopt). Removed once Task 16 ports it.
-func TestEncodeAllNotPorted(t *testing.T) {
-	in := creftest.Inputs(t)["text128KiB"]
-	for _, tc := range []struct {
-		l  EncoderLevel
-		in []byte
-	}{
-		{SpeedBestCompression, in[:1000]},
-	} {
-		t.Run(tc.l.String()+"/"+strconv.Itoa(len(tc.in)), func(t *testing.T) {
-			e := newTestEncoder(t, WithEncoderLevel(tc.l))
-			defer func() {
-				err, _ := recover().(error)
-				if !errors.Is(err, errStrategyNotPorted) {
-					t.Fatalf("recovered %v, want errStrategyNotPorted", err)
-				}
-			}()
-			e.EncodeAll(tc.in, nil)
-		})
+// TestEncodeAllEveryLevelPorted: every EncoderLevel has its C strategy
+// ported for every input size (level 11 at 16 KiB or less is btopt), so
+// TestEncodeAllCref and TestEncodeAllConcurrent skip nothing.
+func TestEncodeAllEveryLevelPorted(t *testing.T) {
+	names, inputs := sortedInputs(t)
+	for _, lv := range encoderLevels {
+		for _, name := range names {
+			if !(compress2Case{level: lv.c}).ported(len(inputs[name])) {
+				t.Errorf("L%d/%s: strategy not ported", lv.c, name)
+			}
+		}
 	}
 }
 
