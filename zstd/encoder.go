@@ -52,8 +52,13 @@ func (e *Encoder) newCCtx() *cctx {
 // using either a stream or DecodeAll.
 //
 // The frame is C's ZSTD_compress2 output for the mapped parameters (see
-// EOption). EncodeAll has no error result: it panics on a level whose
-// strategy is not ported yet.
+// EOption). Calls share a pool of compression contexts; as in C, reusing a
+// context does not change the output (at SpeedBetterCompression and
+// SpeedBestCompression C's row match finder re-salts its hash on every
+// reset, which this port mirrors, but the salt only relabels hash rows), so
+// the frame does not depend on which pooled context serves the call.
+// EncodeAll has no error result: it panics on an input whose strategy is not
+// ported yet.
 func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 	if len(src) == 0 && !e.o.zeroFrames {
 		return dst

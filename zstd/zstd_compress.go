@@ -757,8 +757,9 @@ func resizeTable(t []uint32, n int) []uint32 {
 // resetMatchState. C: zstd_compress.c:ZSTD_reset_matchState for a CCtx
 // with ZSTDcrp_makeClean. C zeroes the tables when the indices restart
 // (ZSTDirp_reset marks them dirty, then cleans them) and otherwise leaves
-// whatever earlier compressions stored; so does this port. (Row-based
-// tag tables and optimal-parser space arrive with those strategies.)
+// whatever earlier compressions stored; so does this port. The row match
+// finder's tag table is never cleaned (see resizeTagTable) and its hash
+// salt advances on every reset. (Optimal-parser space arrives with btopt.)
 func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatchFinder paramSwitch, forceResetIndex bool) {
 	// disable chain table allocation for fast or row-based strategies
 	var chainSize int
@@ -779,6 +780,7 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 		windowInit(&ms.window)
 	}
 	ms.hashLog3 = hashLog3
+	ms.lazySkipping = false
 
 	// C: ZSTD_invalidateMatchState
 	windowClear(&ms.window)
@@ -792,6 +794,15 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 		clear(ms.hashTable)
 		clear(ms.chainTable)
 		clear(ms.hashTable3)
+	}
+
+	if rowMatchFinderUsed(cParams.strategy, useRowMatchFinder) {
+		// Row match finder needs an additional table of hashes ("tags")
+		ms.tagTable = resizeTagTable(ms.tagTable, hSize)
+		advanceHashSalt(ms)
+		// Switch to 32-entry rows if searchLog is 5 (or more)
+		rowLog := min(max(cParams.searchLog, 4), 6)
+		ms.rowHashLog = cParams.hashLog - rowLog
 	}
 	ms.cParams = *cParams
 }
@@ -862,6 +873,19 @@ type blockCompressor func(ms *matchState, ss *seqStore, rep *[repNum]uint32, src
 // strategies this port does not have yet.
 // C: zstd_compress.c:ZSTD_selectBlockCompressor
 func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) blockCompressor {
+	if rowMatchfinder {
+		if mode == noDict {
+			switch strat {
+			case zstdGreedy:
+				return compressBlockGreedyRow
+			case zstdLazy:
+				return compressBlockLazyRow
+			case zstdLazy2:
+				return compressBlockLazy2Row
+			}
+		}
+		return nil
+	}
 	if mode == noDict {
 		switch strat {
 		case zstdFast:

@@ -35,18 +35,30 @@ func crefLevel(t testing.TB, level int, in []byte, extra ...string) []byte {
 	return creftest.Run(t, in, args...)
 }
 
-// TestEncodeAllCref requires EncodeAll at SpeedFastest with otherwise default
-// options to equal C's ZSTD_compress2 at level 1 with checksum on, for every
-// input. WithZeroFrames makes the empty input produce C's empty frame.
+// encoderLevels are the four EncoderLevels and their C levels.
+var encoderLevels = []struct {
+	l EncoderLevel
+	c int
+}{{SpeedFastest, 1}, {SpeedDefault, 3}, {SpeedBetterCompression, 7}, {SpeedBestCompression, 11}}
+
+// TestEncodeAllCref requires EncodeAll at each EncoderLevel with otherwise
+// default options to equal C's ZSTD_compress2 at the mapped level with
+// checksum on, for every input whose strategy is ported. WithZeroFrames makes
+// the empty input produce C's empty frame. At levels 7 and 11 each input gets
+// a fresh Encoder (so a fresh cctx, like cref's fresh ZSTD_CCtx); reuse is
+// covered by TestEncodeAllConcurrent and the cctx reuse tests.
 func TestEncodeAllCref(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	for _, lv := range []struct {
-		l EncoderLevel
-		c int
-	}{{SpeedFastest, 1}, {SpeedDefault, 3}} {
+	for _, lv := range encoderLevels {
 		e := newTestEncoder(t, WithEncoderLevel(lv.l), WithZeroFrames(true))
 		for _, name := range names {
 			in := inputs[name]
+			if !(compress2Case{level: lv.c}).ported(len(in)) {
+				continue
+			}
+			if lv.c >= 7 {
+				e = newTestEncoder(t, WithEncoderLevel(lv.l), WithZeroFrames(true))
+			}
 			want := crefLevel(t, lv.c, in)
 			got := e.EncodeAll(in, nil)
 			if !bytes.Equal(got, want) {
@@ -118,16 +130,21 @@ func TestEncodeAllOptionsCref(t *testing.T) {
 }
 
 // TestEncodeAllConcurrent runs EncodeAll on one Encoder from 8 goroutines over
-// all inputs; every output must equal cref's. Run it under -race.
+// all inputs whose strategy is ported; every output must equal cref's from a
+// fresh context. Which pooled cctx serves a call is nondeterministic, so this
+// also asserts that context reuse does not change output, which holds for C
+// too: the row match finder's hash salt changes on every reset but only
+// relabels rows and tags (TestRowHashSaltNeutral). Run it under -race.
 func TestEncodeAllConcurrent(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	for _, lv := range []struct {
-		l EncoderLevel
-		c int
-	}{{SpeedFastest, 1}, {SpeedDefault, 3}} {
+	for _, lv := range encoderLevels {
+		var ported []string
 		want := make(map[string][]byte, len(names))
 		for _, name := range names {
-			want[name] = crefLevel(t, lv.c, inputs[name])
+			if (compress2Case{level: lv.c}).ported(len(inputs[name])) {
+				ported = append(ported, name)
+				want[name] = crefLevel(t, lv.c, inputs[name])
+			}
 		}
 		e := newTestEncoder(t, WithEncoderLevel(lv.l), WithZeroFrames(true))
 		var wg sync.WaitGroup
@@ -135,8 +152,8 @@ func TestEncodeAllConcurrent(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				for i := range names {
-					name := names[(i+g)%len(names)]
+				for i := range ported {
+					name := ported[(i+g)%len(ported)]
 					if got := e.EncodeAll(inputs[name], nil); !bytes.Equal(got, want[name]) {
 						t.Errorf("L%d goroutine %d, %s: differs from cref", lv.c, g, name)
 					}
@@ -198,20 +215,30 @@ func TestMaxEncodedSize(t *testing.T) {
 	}
 }
 
-// TestEncodeAllNotPorted: levels whose strategies are not ported yet panic
-// with errStrategyNotPorted (EncodeAll has no error result). Removed once
-// Tasks 13-16 port greedy/lazy.
+// TestEncodeAllNotPorted: inputs whose strategy is not ported yet panic
+// with errStrategyNotPorted (EncodeAll has no error result): level 7 at 16
+// KiB or less (window log 14: hash-chain lazy2), level 11 at 16 KiB to 256
+// KiB (btlazy2) and at 16 KiB or less (btopt). Removed once Tasks 14-16 port
+// them.
 func TestEncodeAllNotPorted(t *testing.T) {
-	for _, l := range []EncoderLevel{SpeedBetterCompression, SpeedBestCompression} {
-		t.Run(l.String(), func(t *testing.T) {
-			e := newTestEncoder(t, WithEncoderLevel(l))
+	in := creftest.Inputs(t)["text128KiB"]
+	for _, tc := range []struct {
+		l  EncoderLevel
+		in []byte
+	}{
+		{SpeedBetterCompression, in[:16<<10]},
+		{SpeedBestCompression, in},
+		{SpeedBestCompression, in[:1000]},
+	} {
+		t.Run(tc.l.String()+"/"+strconv.Itoa(len(tc.in)), func(t *testing.T) {
+			e := newTestEncoder(t, WithEncoderLevel(tc.l))
 			defer func() {
 				err, _ := recover().(error)
 				if !errors.Is(err, errStrategyNotPorted) {
 					t.Fatalf("recovered %v, want errStrategyNotPorted", err)
 				}
 			}()
-			e.EncodeAll([]byte("hello hello hello"), nil)
+			e.EncodeAll(tc.in, nil)
 		})
 	}
 }

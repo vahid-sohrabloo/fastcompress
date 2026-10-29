@@ -472,6 +472,14 @@ type matchState struct {
 	hashTable3 []uint32
 	chainTable []uint32
 
+	// Row-based match finder state.
+	rowHashLog      uint32                   // hashLog - rowLog
+	tagTable        []byte                   // a tag byte per hashTable entry; entry 0 of each row is the row's head
+	hashCache       [rowHashCacheSize]uint32 // hashes of the next positions to insert
+	hashSalt        uint64                   // salts the hash; changes on every context reset
+	hashSaltEntropy uint32                   // collects entropy for the next salt
+	lazySkipping    bool                     // the lazy parser only inserts the positions it searches
+
 	// forceNonContiguous makes the next windowUpdate start a new segment.
 	forceNonContiguous bool
 

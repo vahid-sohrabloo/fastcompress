@@ -27,6 +27,25 @@
  *     input, looping until it returns 0.
  *   Output: the zstd frame (raw bytes).
  *
+ * compress-seq [common opts] -sizes N1,N2,... [-levels L1,L2,...]
+ *              [-checksums C1,C2,...] [-window-logs W1,W2,...]
+ *   Compresses consecutive pieces of stdin (sizes N1, N2, ..., which must sum
+ *   to the input length; 0 is an empty piece) one after another through ONE
+ *   ZSTD_CCtx, each with ZSTD_compress2 and a ZSTD_compressBound(Ni) output
+ *   buffer. The common opts configure the context once; before step i, the
+ *   i-th entry of each given list is applied with ZSTD_CCtx_setParameter
+ *   (ZSTD_c_compressionLevel, ZSTD_c_checksumFlag, ZSTD_c_windowLog; a window
+ *   log of 0 restores the level default). A list shorter than the number of
+ *   pieces leaves later steps unchanged. This reproduces a reused context:
+ *   e.g. the row-based match finder (greedy..lazy2 with windowLog > 14)
+ *   advances its hash salt on every context reset, so the Nth frame of a
+ *   reused context can differ from a fresh context's.
+ *   Output: for each frame, its length as a 4-byte little-endian integer,
+ *   then the frame.
+ *   -salt-out FILE: after each step, append a text line to FILE with the
+ *   row match finder's state of the context's match state:
+ *   "<hashSalt as 16 hex digits> <hashSaltEntropy decimal>\n".
+ *
  * stream [common opts, -pledged default 0] -chunks N1,N2,... -flush-after i,j,...
  *   Feeds the input in chunks of the given sizes (must sum to the input length;
  *   a 0 size means an empty ZSTD_e_continue call) with ZSTD_e_continue; after
@@ -142,6 +161,7 @@ typedef struct {
     const char* chunks;
     const char* flushAfter;
     const char* frameOut;
+    const char *sizes, *levels, *checksums, *windowLogs, *saltOut;
 } Opts;
 
 static void* readAll(FILE* f, size_t* n) {
@@ -190,6 +210,11 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-chunks"))     o->chunks = v;
         else if (!strcmp(a, "-flush-after")) o->flushAfter = v;
         else if (!strcmp(a, "-frame-out"))  o->frameOut = v;
+        else if (!strcmp(a, "-sizes"))      o->sizes = v;
+        else if (!strcmp(a, "-levels"))     o->levels = v;
+        else if (!strcmp(a, "-checksums"))  o->checksums = v;
+        else if (!strcmp(a, "-window-logs")) o->windowLogs = v;
+        else if (!strcmp(a, "-salt-out"))   o->saltOut = v;
     else { fprintf(stderr, "cref: unknown option %s\n", a); exit(2); }
     }
 }
@@ -298,6 +323,68 @@ static int cmdStream(const Opts* o, const unsigned char* src, size_t n) {
     if (pos != n) die("chunks do not cover input length");
     feed(c, ZSTD_e_end, src + pos, 0, &out, &olen, &ocap);
     writeAll(out, olen);
+    return 0;
+}
+
+/* listAt returns the idx-th (0-based) comma-separated entry of list as an
+ * int in *v, or 0 if list is NULL or shorter. */
+static int listAt(const char* list, size_t idx, int* v) {
+    char* s = list ? strdup(list) : NULL;
+    char* save = NULL;
+    size_t i = 0;
+    if (!s) return 0;
+    for (char* t = strtok_r(s, ",", &save); t; t = strtok_r(NULL, ",", &save), i++)
+        if (i == idx) { *v = atoi(t); free(s); return 1; }
+    free(s);
+    return 0;
+}
+
+static void writeLE32(size_t n) {
+    unsigned char b[4] = { (unsigned char)n, (unsigned char)(n >> 8), (unsigned char)(n >> 16), (unsigned char)(n >> 24) };
+    writeAll(b, 4);
+}
+
+static int cmdCompressSeq(const Opts* o, const unsigned char* src, size_t n) {
+    if (!o->sizes) die("compress-seq needs -sizes");
+    ZSTD_CCtx* c = newCCtx(o);
+    FILE* salts = o->saltOut ? fopen(o->saltOut, "w") : NULL;
+    char* ss = strdup(o->sizes);
+    char* save = NULL;
+    size_t pos = 0, idx = 0;
+    for (char* t = strtok_r(ss, ",", &save); t; t = strtok_r(NULL, ",", &save), idx++) {
+        size_t sz = (size_t)strtoull(t, NULL, 10);
+        int v;
+        size_t r;
+        if (sz > n - pos) die("sizes exceed input length");
+        if (listAt(o->levels, idx, &v)) {
+            r = ZSTD_CCtx_setParameter(c, ZSTD_c_compressionLevel, v);
+            if (ZSTD_isError(r)) dieZ("set level", r);
+        }
+        if (listAt(o->checksums, idx, &v)) {
+            r = ZSTD_CCtx_setParameter(c, ZSTD_c_checksumFlag, v);
+            if (ZSTD_isError(r)) dieZ("set checksum", r);
+        }
+        if (listAt(o->windowLogs, idx, &v)) {
+            r = ZSTD_CCtx_setParameter(c, ZSTD_c_windowLog, v);
+            if (ZSTD_isError(r)) dieZ("set windowLog", r);
+        }
+        {   size_t cap = ZSTD_compressBound(sz);
+            unsigned char* out = malloc(cap ? cap : 1);
+            if (!out) die("oom");
+            r = ZSTD_compress2(c, out, cap, src + pos, sz);
+            if (ZSTD_isError(r)) dieZ("ZSTD_compress2", r);
+            writeLE32(r);
+            writeAll(out, r);
+            free(out);
+        }
+        if (salts) fprintf(salts, "%016llx %u\n", (unsigned long long)c->blockState.matchState.hashSalt,
+                           (unsigned)c->blockState.matchState.hashSaltEntropy);
+        pos += sz;
+    }
+    free(ss);
+    if (pos != n) die("sizes do not cover input length");
+    if (o->saltOut && (!salts || fclose(salts))) die("cannot write -salt-out");
+    ZSTD_freeCCtx(c);
     return 0;
 }
 
@@ -410,6 +497,7 @@ int main(int argc, char** argv) {
     unsigned char* src = readAll(stdin, &n);
     if (!strcmp(m, "compress"))      rc = cmdCompress(&o, src, n);
     else if (!strcmp(m, "stream"))   rc = cmdStream(&o, src, n);
+    else if (!strcmp(m, "compress-seq")) rc = cmdCompressSeq(&o, src, n);
     else if (!strcmp(m, "xxh64"))    rc = cmdXxh64(&o, src, n);
     else if (!strcmp(m, "hist"))     rc = cmdHist(src, n);
     else if (!strcmp(m, "fse"))      rc = cmdFse(&o, src, n);
