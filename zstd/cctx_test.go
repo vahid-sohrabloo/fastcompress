@@ -466,7 +466,7 @@ func checkOverflowCorrection(t *testing.T, c compress2Case, name string, src []b
 	// Continue the indices from just below currentMax (odd low bits),
 	// as a long-reused context would: C's ZSTD_window_clear state.
 	ms := &cc.blockState.matchState
-	start := uint32(currentMax - len(src)/2 - 12345)
+	start := uint32(currentMax) - uint32(len(src)/2) - 12345
 	ms.window.nextSrc, ms.window.lowLimit, ms.window.dictLimit = start, start, start
 	ms.nextToUpdate = start
 	out := make([]byte, compressBound(len(src)))
