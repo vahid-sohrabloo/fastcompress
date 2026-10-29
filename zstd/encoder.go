@@ -367,8 +367,8 @@ func (e *Encoder) ResetContentSize(w io.Writer, size int64) {
 // Options are applied on top of the existing options.
 // Some options cannot be changed on reset and will return an error.
 //
-// WithEncoderLevel, WithWindowSize, WithEncoderConcurrency and
-// WithLowerEncoderMem cannot change (passing their current value is
+// WithEncoderLevel, WithWindowSize, WithEncoderConcurrency,
+// WithConcurrentBlocks and WithLowerEncoderMem cannot change (passing their current value is
 // allowed); on error nothing is reset. The new options apply to the next
 // stream and to EncodeAll. A new dictionary is digested here.
 func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
@@ -378,8 +378,8 @@ func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
 			return err
 		}
 	}
-	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.concurrent != e.o.concurrent || o.lowerMem != e.o.lowerMem {
-		return errors.New("zstd: WithEncoderLevel, WithWindowSize, WithEncoderConcurrency and WithLowerEncoderMem cannot be changed with ResetWithOptions")
+	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.concurrent != e.o.concurrent || o.concBlocks != e.o.concBlocks || o.lowerMem != e.o.lowerMem {
+		return errors.New("zstd: WithEncoderLevel, WithWindowSize, WithEncoderConcurrency, WithConcurrentBlocks and WithLowerEncoderMem cannot be changed with ResetWithOptions")
 	}
 	newDict := len(o.dict) != len(e.o.dict) || len(o.dict) > 0 && &o.dict[0] != &e.o.dict[0] ||
 		o.dictRaw != e.o.dictRaw || o.dictID != e.o.dictID
@@ -457,4 +457,23 @@ func (s *encStream) write(b []byte) error {
 		err = io.ErrShortWrite
 	}
 	return err
+}
+
+var (
+	defaultEncoderOnce sync.Once
+	defaultEncoder     *Encoder
+)
+
+// EncodeTo appends the encoded data from src to dst.
+//
+// It is EncodeAll(src, dst) of an Encoder with the default options
+// (SpeedDefault, content checksum on), shared by all callers.
+func EncodeTo(dst []byte, src []byte) []byte {
+	defaultEncoderOnce.Do(func() {
+		var err error
+		if defaultEncoder, err = NewWriter(nil); err != nil {
+			panic(err) // unreachable: no options
+		}
+	})
+	return defaultEncoder.EncodeAll(src, dst)
 }

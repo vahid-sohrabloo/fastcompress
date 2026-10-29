@@ -32,6 +32,8 @@ const (
 //	WithAllLitEntropyCompression ZSTD_c_literalCompressionMode = ZSTD_ps_enable
 //	                             (false: ZSTD_ps_auto, the level's default)
 //	WithEncoderConcurrency       none; encoding is single-threaded (nbWorkers=0)
+//	WithConcurrentBlocks         none; accepted, encoding is single-threaded
+//	WithEncoderDictDelete        removes the dictionary (no C call)
 //	WithLowerEncoderMem          none; accepted, no effect on output
 //	WithSingleSegment            none; the frame header follows C's automatic
 //	                             choice (single segment iff window >= len(src))
@@ -53,6 +55,7 @@ type encoderOptions struct {
 	crc           bool
 	windowLog     uint32 // 0 = level default
 	concurrent    int    // stored only: encoding is single-threaded
+	concBlocks    bool   // stored only (WithConcurrentBlocks), to reject a change in ResetWithOptions
 	zeroFrames    bool
 	pad           int // 0 or 1 = no padding
 	noEntropy     bool
@@ -113,6 +116,17 @@ func WithEncoderConcurrency(n int) EOption {
 		o.concurrent = n
 		return nil
 	}
+}
+
+// WithConcurrentBlocks enables job-based parallel compression for streams.
+// When enabled and concurrent > 1, input is split into large sections (jobs)
+// that are compressed simultaneously by multiple goroutines.
+// Cannot be changed with ResetWithOptions.
+//
+// C: none (nbWorkers = 0). The value is stored but encoding is always
+// single-threaded, so it never changes the output.
+func WithConcurrentBlocks(b bool) EOption {
+	return func(o *encoderOptions) error { o.concBlocks = b; return nil }
 }
 
 // WithWindowSize will set the maximum allowed back-reference distance.
@@ -376,6 +390,17 @@ func WithEncoderDictRaw(id uint32, content []byte) EOption {
 			return errors.New("zstd: empty raw dictionary content")
 		}
 		o.dict, o.dictRaw, o.dictID = bytes.Clone(content), true, id
+		return nil
+	}
+}
+
+// WithEncoderDictDelete clears the dictionary, so no dictionary will be used.
+// Should be used with ResetWithOptions.
+//
+// C: no call; the next frames are produced as without a dictionary.
+func WithEncoderDictDelete() EOption {
+	return func(o *encoderOptions) error {
+		o.dict, o.dictRaw, o.dictID = nil, false, 0
 		return nil
 	}
 }
