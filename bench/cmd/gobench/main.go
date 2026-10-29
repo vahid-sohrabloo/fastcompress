@@ -2,11 +2,16 @@
 // (programs/benchzstd.c) does, so the two can be compared by bench/compare.sh.
 //
 // benchzstd splits the input into independent blocks of -B bytes (the whole
-// file when -B is unset), compresses each with ZSTD_compress2 on one reused
-// CCtx, repeats the pass for at least -i seconds and reports the fastest pass.
-// ZSTD_c_checksumFlag is left at its default (off), hence WithEncoderCRC(false).
+// file when -B is unset) and compresses each with ZSTD_compress2 on one reused
+// CCtx. benchfn.c:BMK_benchTimedFn times "runs" of nbLoops passes, sizing
+// nbLoops so a run lasts about 1 s and discarding runs shorter than 0.5 s; a
+// run's speed is its mean time per pass, and the reported speed is the best
+// run seen during -i seconds. ZSTD_c_checksumFlag is left at its default
+// (off), hence WithEncoderCRC(false).
 // gobench mirrors that: one Encoder (which pools its cctx), one EncodeAll per
-// block, best of -iters passes (and at least -secs seconds).
+// block, ~1 s windows of passes scored by mean time per pass, best of at least
+// -iters counted windows and at least -secs seconds of timed passes (compare.sh
+// passes -secs equal to zstd's -i).
 //
 // Output (stdout, one line): "<MB/s> <ratio>", with MB/s = 1e6 bytes/s of
 // input and ratio = input/compressed, with the number of decimals zstd prints.
@@ -24,8 +29,8 @@ import (
 func main() {
 	level := flag.Int("level", 1, "C compression level: 1, 3, 7 or 11")
 	block := flag.Int("block", 0, "independent block size in bytes (0 = whole file)")
-	iters := flag.Int("iters", 5, "minimum number of timed passes")
-	secs := flag.Float64("secs", 0, "also keep running until this many seconds have elapsed")
+	iters := flag.Int("iters", 1, "minimum number of counted ~1 s windows")
+	secs := flag.Float64("secs", 0, "also keep running until this many seconds of passes have been timed")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: gobench [-level N] [-block N] [-iters N] [-secs S] FILE")
@@ -83,14 +88,32 @@ func run(level, block, iters int, secs float64, path string) (err error) {
 	}
 
 	csize := pass() // untimed warm-up: allocates the pooled cctx, faults in pages
-	best := time.Duration(1<<63 - 1)
-	start := time.Now()
-	for i := 0; i < iters || time.Since(start).Seconds() < secs; i++ {
+
+	// C: benchfn.c:BMK_benchTimedFn — windows of nbLoops passes; nbLoops is
+	// re-estimated to last runBudget (1 s), or multiplied by 10 after a window
+	// shorter than runBudget/50; windows shorter than runBudget/2 are not counted.
+	const runBudget = time.Second
+	best := time.Duration(1<<63 - 1) // best mean time per pass
+	nbLoops, counted := 1, 0
+	var spent time.Duration
+	for counted < iters || spent.Seconds() < secs {
 		t := time.Now()
-		pass()
-		if d := time.Since(t); d < best {
-			best = d
+		for i := 0; i < nbLoops; i++ {
+			pass()
 		}
+		d := time.Since(t)
+		spent += d
+		perPass := d / time.Duration(nbLoops)
+		if d > runBudget/50 {
+			nbLoops = int(runBudget/min(best, perPass)) + 1
+		} else {
+			nbLoops *= 10
+		}
+		if d < runBudget/2 {
+			continue
+		}
+		counted++
+		best = min(best, perPass)
 	}
 	ratio := float64(len(src)) / float64(csize)
 	// C: benchzstd.c:BMK_benchMemAdvancedNoAlloc — ratio digits are 3, 2 or 1 below 10, 100, else.
