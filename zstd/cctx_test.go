@@ -483,3 +483,90 @@ func checkOverflowCorrection(t *testing.T, c compress2Case, name string, src []b
 		t.Fatalf("%s/%s: frame after overflow correction differs from C (Go %d bytes, C %d bytes)%s", c, name, len(got), len(want), firstDiff(got, want))
 	}
 }
+
+// TestCompress2AliasedInputs compresses, through ONE context per level,
+// inputs that share memory with the previous frame's input: the same slice,
+// a prefix, a suffix, an interior overlap, and an adjacent continuation
+// (the next input starts where the previous one ended, so
+// ZSTD_window_update sees it as contiguous). C's ZSTD_window_update
+// compares the new input with the old prefix (now the dictionary) by
+// address and shrinks the dictionary where they overlap; between frames
+// the window is cleared, so with C's pointers that never changes a frame.
+// Each frame must therefore equal C's from one reused context fed the same
+// bytes in distinct buffers (cref compress-seq), and nothing may panic.
+func TestCompress2AliasedInputs(t *testing.T) {
+	_, inputs := sortedInputs(t)
+	big := bytes.Clone(inputs["text16KiB"])
+	n := len(big)
+	parts := []struct {
+		name string
+		src  []byte
+	}{
+		{"whole", big},
+		{"same", big},
+		{"prefix", big[:4096]},
+		{"whole-after-prefix", big},
+		{"suffix", big[n-4096:]},
+		{"interior", big[1000:9000]},
+		{"overlap-before", big[500:5000]},
+		{"head", big[:8000]},
+		{"adjacent", big[8000:]},
+		{"whole-again", big},
+	}
+	for _, level := range []int{1, 3, 7, 11} {
+		c := compress2Case{level: level, checksum: true}
+		var steps []seqStep
+		for _, p := range parts {
+			steps = append(steps, seqStep{p.name, c, p.src})
+		}
+		want := crefSeq(t, steps)
+		cc := c.newCCtx(t)
+		for i, s := range steps {
+			got, err := func() (got []byte, err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("L%d step %d %s: panic: %v", level, i, s.name, r)
+					}
+				}()
+				return cc.compress2(nil, s.src)
+			}()
+			if err != nil {
+				t.Fatalf("L%d step %d %s: %v", level, i, s.name, err)
+			}
+			if !bytes.Equal(got, want[i]) {
+				t.Fatalf("L%d step %d %s: frame differs from C (Go %d bytes, C %d bytes)%s", level, i, s.name, len(got), len(want[i]), firstDiff(got, want[i]))
+			}
+		}
+	}
+}
+
+// TestWindowUpdateOverlap checks ZSTD_window_update's dictionary reduction
+// when a non-contiguous input overlaps the old prefix in memory. The
+// expected lowLimit is C's: min((ip + srcSize) - dictBase, dictLimit),
+// where dictBase is index 0 of the dictionary (here 2 bytes before the
+// array's first byte, which wrapped in the uint32 arithmetic before).
+func TestWindowUpdateOverlap(t *testing.T) {
+	arr := make([]byte, 1000)
+	for _, tc := range []struct {
+		name                   string
+		first, second          [2]int
+		wantLow, wantDictLimit uint32
+	}{
+		// dict: arr[300:700] at indices 2..402; input arr[100:350] ends at
+		// index 2+50 = 52 of the dictionary.
+		{"ends-inside", [2]int{300, 700}, [2]int{100, 350}, 52, 402},
+		// input arr[200:600] covers the dictionary's end: lowLimit = dictLimit.
+		{"covers-end", [2]int{0, 400}, [2]int{200, 600}, 402, 402},
+		// input before the dictionary: no change (too small extDict rule
+		// does not apply: 400 bytes).
+		{"disjoint", [2]int{500, 900}, [2]int{0, 400}, 2, 402},
+	} {
+		var w window
+		windowInit(&w)
+		windowUpdate(&w, arr[tc.first[0]:tc.first[1]], false)
+		windowUpdate(&w, arr[tc.second[0]:tc.second[1]], false)
+		if w.lowLimit != tc.wantLow || w.dictLimit != tc.wantDictLimit {
+			t.Errorf("%s: lowLimit %d dictLimit %d, want %d %d", tc.name, w.lowLimit, w.dictLimit, tc.wantLow, tc.wantDictLimit)
+		}
+	}
+}

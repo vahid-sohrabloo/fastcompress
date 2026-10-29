@@ -408,7 +408,8 @@ func arrayEnd(b []byte) *byte {
 // C compares raw pointers. Here src continues the prefix when it starts at
 // the byte after the prefix in the same backing array; the overlap check
 // below likewise only applies to slices of one array (two arrays never
-// overlap).
+// overlap, and w.dictBase keeps its array alive, so its memory cannot be
+// reused for src).
 func windowUpdate(w *window, src []byte, forceNonContiguous bool) bool {
 	if len(src) == 0 {
 		return true
@@ -432,14 +433,22 @@ func windowUpdate(w *window, src []byte, forceNonContiguous bool) bool {
 	w.nextSrc += uint32(len(src))
 	// if input and dictionary overlap : reduce dictionary (area presumed modified by input)
 	if e := arrayEnd(src); e != nil && e == arrayEnd(w.dictBase) {
-		// Positions relative to the end of the shared array.
+		// Positions relative to the end of the shared array. dictAt is only
+		// taken at lowLimit and dictLimit, which lie at or after the first
+		// byte of w.dictBase (index dictBaseIdx), so idx-dictBaseIdx does
+		// not wrap.
 		ip := -cap(src)
 		dictAt := func(idx uint32) int { return -cap(w.dictBase) + int(idx-w.dictBaseIdx) }
-		if ip+len(src) > dictAt(w.lowLimit) && ip < dictAt(w.dictLimit) {
-			highInputIdx := ip + len(src) - dictAt(0) // C: (ip + srcSize) - dictBase
+		dictEnd := dictAt(w.dictLimit)
+		if ip+len(src) > dictAt(w.lowLimit) && ip < dictEnd {
+			// C: zstd_compress_internal.h:ZSTD_window_update — C computes
+			// highInputIdx = (ip + srcSize) - dictBase; its dictBase (index
+			// 0) may lie before the array, where this port's uint32 index
+			// arithmetic wraps, so the same value is taken relative to
+			// dictLimit (min(highInputIdx, dictLimit) is all C uses).
 			lowLimitMax := w.dictLimit
-			if highInputIdx <= int(w.dictLimit) {
-				lowLimitMax = uint32(highInputIdx)
+			if hi := ip + len(src); hi <= dictEnd {
+				lowLimitMax = w.dictLimit - uint32(dictEnd-hi)
 			}
 			w.lowLimit = lowLimitMax
 		}
