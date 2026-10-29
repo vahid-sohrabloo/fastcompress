@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  ZSTD_TAG: v1.5.7
+
+jobs:
+  test:
+    name: test (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cache C reference (zstd source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/zstd
+          key: zstd-${{ env.ZSTD_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch C zstd and build CLI (no corpus)
+        run: ref/fetch.sh --no-corpus
+      # internal/creftest fails (rather than skips) under CI=true when cref is missing.
+      - name: Build cref
+        run: make -C ref/cref
+      - name: Test
+        run: go test ./...
+      - name: Test (noasm)
+        run: go test -tags noasm ./...
+      - name: Test (race)
+        if: runner.arch == 'X64'
+        # The race runtime needs cgo on linux/amd64. The library itself has no
+        # cgo; this is test tooling only.
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -short ./...
+      - name: API check
+        run: scripts/apicheck.sh --subset
+
+  cross-build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: "386"}
+          - {goos: linux, goarch: arm}
+          - {goos: linux, goarch: ppc64le}
+          - {goos: linux, goarch: s390x}
+          - {goos: linux, goarch: riscv64}
+          - {goos: darwin, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./...
