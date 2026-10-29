@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"time"
 
 	"github.com/vahid-sohrabloo/fastzstd/zstd"
@@ -31,18 +32,19 @@ func main() {
 	block := flag.Int("block", 0, "independent block size in bytes (0 = whole file)")
 	iters := flag.Int("iters", 1, "minimum number of counted ~1 s windows")
 	secs := flag.Float64("secs", 0, "also keep running until this many seconds of passes have been timed")
+	cpuprofile := flag.String("cpuprofile", "", "write a CPU profile of the timed passes to this file")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: gobench [-level N] [-block N] [-iters N] [-secs S] FILE")
+		fmt.Fprintln(os.Stderr, "usage: gobench [-level N] [-block N] [-iters N] [-secs S] [-cpuprofile F] FILE")
 		os.Exit(2)
 	}
-	if err := run(*level, *block, *iters, *secs, flag.Arg(0)); err != nil {
+	if err := run(*level, *block, *iters, *secs, *cpuprofile, flag.Arg(0)); err != nil {
 		fmt.Fprintln(os.Stderr, "gobench:", err)
 		os.Exit(1)
 	}
 }
 
-func run(level, block, iters int, secs float64, path string) (err error) {
+func run(level, block, iters int, secs float64, cpuprofile, path string) (err error) {
 	var l zstd.EncoderLevel
 	switch level {
 	case 1:
@@ -88,6 +90,17 @@ func run(level, block, iters int, secs float64, path string) (err error) {
 	}
 
 	csize := pass() // untimed warm-up: allocates the pooled cctx, faults in pages
+	if cpuprofile != "" {
+		f, err := os.Create(cpuprofile)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			return err
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	// C: benchfn.c:BMK_benchTimedFn — windows of nbLoops passes; nbLoops is
 	// re-estimated to last runBudget (1 s), or multiplied by 10 after a window
