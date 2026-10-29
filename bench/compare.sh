@@ -4,8 +4,9 @@
 #   bench/compare.sh [-l "1 3 7 11"] [-f "FILE[:BLOCK]..."] [-i SECS] [-g SECS] [-n RUNS] -label NAME
 #
 # Writes bench/results/<date>-<label>.md. Each row: taskset -c $CPU, RUNS
-# (default 3) interleaved C/Go runs, median speed reported. A level that is not
-# ported yet gets "n/a (not ported)". Rows whose C and Go ratios differ are
+# (default 3) interleaved C/Go runs, median speed reported. (All levels are
+# ported; the "n/a (not ported)" row for a gobench failure mentioning "not
+# ported" is no longer reachable.) Rows whose C and Go ratios differ are
 # flagged "MISMATCH" (the port must be byte-identical, so ratios must be equal).
 set -euo pipefail
 cd "$(dirname "$0")/.."

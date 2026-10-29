@@ -65,7 +65,8 @@ func run(level, block, iters int, secs float64, path string) (err error) {
 	if err != nil {
 		return err
 	}
-	// EncodeAll panics on levels that are not ported yet.
+	// Every level is ported; EncodeAll panics only on an internal error,
+	// which is reported as an error.
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("level %d: %v", level, r)
