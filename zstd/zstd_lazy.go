@@ -28,20 +28,24 @@ const (
 // unsalted hash XOR (salt >> shift): a constant relabelling of rows and
 // tags. That is why the salt (which C changes on every context reset) does
 // not change output (see TestRowHashSaltNeutral).
+//
+// Branch-free (so it inlines into the row match finder's loops): every mls
+// is the 64-bit form ((le64 << shift) * prime ^ salt) >> (64 - hBits). For
+// mls 4, C's 32-bit (u32 * prime4 ^ uint32(salt)) >> (32 - hBits) is the
+// same value with shift 32 and the salt's low 32 bits moved to the top: the
+// low 32 bits of (u32 << 32) * prime4 are zero and its top 32 bits are
+// u32 * prime4 mod 2^32. Reads 8 bytes, as C does for mls >= 5.
 func hashPtrSalted(b []byte, i int, hBits, mls uint32, salt uint64) uint32 {
-	switch mls {
-	default: // 4
-		return ((binary.LittleEndian.Uint32(b[i:]) * prime4bytes) ^ uint32(salt)) >> (32 - hBits)
-	case 5:
-		return uint32((((binary.LittleEndian.Uint64(b[i:]) << (64 - 40)) * prime5bytes) ^ salt) >> (64 - hBits))
-	case 6:
-		return uint32((((binary.LittleEndian.Uint64(b[i:]) << (64 - 48)) * prime6bytes) ^ salt) >> (64 - hBits))
-	case 7:
-		return uint32((((binary.LittleEndian.Uint64(b[i:]) << (64 - 56)) * prime7bytes) ^ salt) >> (64 - hBits))
-	case 8:
-		return uint32(((binary.LittleEndian.Uint64(b[i:]) * prime8bytes) ^ salt) >> (64 - hBits))
-	}
+	m := mls & 15
+	return uint32((((binary.LittleEndian.Uint64(b[i:]) << saltedHashShift[m]) * saltedHashPrime[m]) ^ (salt << saltedHashSaltShift[m])) >> (64 - hBits))
 }
+
+// Parameters of hashPtrSalted per mls (4..8; other entries unused).
+var (
+	saltedHashShift     = [16]uint8{4: 32, 5: 64 - 40, 6: 64 - 48, 7: 64 - 56, 8: 0}
+	saltedHashPrime     = [16]uint64{4: prime4bytes, 5: prime5bytes, 6: prime6bytes, 7: prime7bytes, 8: prime8bytes}
+	saltedHashSaltShift = [16]uint8{4: 32}
+)
 
 // bitmix mixes the bits of a 64-bit value, based on XXH3_rrmxmx.
 // C: zstd_compress.c:ZSTD_bitmix
@@ -125,18 +129,17 @@ func rowNextCachedHash(cache *[rowHashCacheSize]uint32, b []byte, baseIdx, idx, 
 // into the hash and tag tables.
 // C: zstd_lazy.c:ZSTD_row_update_internalImpl
 func rowUpdateInternalImpl(ms *matchState, updateStartIdx, updateEndIdx, mls, rowLog, rowMask uint32, useCache bool) {
+	if useCache {
+		rowUpdateCached(ms, updateStartIdx, updateEndIdx, mls, rowLog)
+		return
+	}
 	hashTable := ms.hashTable
 	tagTable := ms.tagTable
 	hashLog := ms.rowHashLog
 	b := ms.window.base
 	baseIdx := ms.window.baseIdx
 	for ; updateStartIdx < updateEndIdx; updateStartIdx++ {
-		var hash uint32
-		if useCache {
-			hash = rowNextCachedHash(&ms.hashCache, b, baseIdx, updateStartIdx, hashLog, mls, ms.hashSalt)
-		} else {
-			hash = hashPtrSalted(b, int(updateStartIdx-baseIdx), hashLog+rowHashTagBits, mls, ms.hashSalt)
-		}
+		hash := hashPtrSalted(b, int(updateStartIdx-baseIdx), hashLog+rowHashTagBits, mls, ms.hashSalt)
 		relRow := (hash >> rowHashTagBits) << rowLog
 		tagRow := tagTable[relRow : relRow+rowMask+1]
 		pos := rowNextIndex(tagRow, rowMask)
@@ -232,8 +235,6 @@ func rowGetMatchMask(tagRow []byte, tag byte, headGrouped uint32, rowEntries uin
 // — C's PREFETCH_L1 of the row and of the matches are cache hints only, so
 // they are omitted.
 func rowFindBestMatch(ms *matchState, ip, iLimit int, mls, rowLog uint32) (int, uint32) {
-	hashTable := ms.hashTable
-	tagTable := ms.tagTable
 	hashLog := ms.rowHashLog
 	cParams := &ms.cParams
 	b := ms.window.base
@@ -255,7 +256,6 @@ func rowFindBestMatch(ms *matchState, ip, iLimit int, mls, rowLog uint32) (int, 
 	cappedSearchLog := min(cParams.searchLog, rowLog) // nb of searches is capped at nb entries per row
 	hashSalt := ms.hashSalt
 	nbAttempts := uint32(1) << cappedSearchLog
-	ml := 4 - 1
 	offBase := uint32(offBaseNotFound)
 	var hash uint32
 
@@ -274,54 +274,10 @@ func rowFindBestMatch(ms *matchState, ip, iLimit int, mls, rowLog uint32) (int, 
 	// Get the hash for ip, compute the appropriate row
 	relRow := (hash >> rowHashTagBits) << rowLog
 	tag := hash & rowHashTagMask
-	row := hashTable[relRow : relRow+rowEntries]
-	tagRow := tagTable[relRow : relRow+rowEntries]
-	headGrouped := uint32(tagRow[0]) & rowMask
-	var matchBuffer [rowHashMaxEntries]uint32
-	numMatches := 0
-	matches := rowGetMatchMask(tagRow, byte(tag), headGrouped, rowEntries)
-
-	// Cycle through the matches
-	for ; matches > 0 && nbAttempts > 0; matches &= matches - 1 {
-		matchPos := (headGrouped + rowVecMaskNext(matches)) & rowMask
-		matchIndex := row[matchPos]
-		if matchPos == 0 {
-			continue
-		}
-		if matchIndex < lowLimit {
-			break
-		}
-		matchBuffer[numMatches] = matchIndex
-		numMatches++
-		nbAttempts--
-	}
-
-	// Speed opt: insert current byte into hashtable too. This allows us to
-	// avoid one iteration of the loop in rowUpdateInternal() at the next
-	// search.
-	{
-		pos := rowNextIndex(tagRow, rowMask)
-		tagRow[pos] = byte(tag)
-		row[pos] = ms.nextToUpdate
-		ms.nextToUpdate++
-	}
-
-	// Return the longest match
-	for _, matchIndex := range matchBuffer[:numMatches] {
-		currentMl := 0
-		match := int(matchIndex - baseIdx)
-		// read 4B starting from (match + ml + 1 - sizeof(U32))
-		if binary.LittleEndian.Uint32(b[match+ml-3:]) == binary.LittleEndian.Uint32(b[ip+ml-3:]) { // potentially better
-			currentMl = count(b, ip, match, iLimit)
-		}
-		// Save best solution
-		if currentMl > ml {
-			ml = currentMl
-			offBase = offsetToOffBase(curr - matchIndex)
-			if ip+currentMl == iLimit {
-				break // best possible, avoids read overflow on next attempt
-			}
-		}
+	ml, matchIndex := rowSearch(ms, ip, iLimit, relRow, tag, rowLog, nbAttempts, lowLimit)
+	ms.nextToUpdate++ // rowSearch inserted it
+	if ml > 4-1 {
+		offBase = offsetToOffBase(curr - matchIndex)
 	}
 	return ml, offBase
 }
