@@ -22,7 +22,7 @@ if [ "$CORPUS" = 1 ]; then
     mkdir -p "$dir" bench/corpus
     tmp=$(mktemp -d)
     curl -fL -o "$tmp/silesia.zip" https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip \
-      || curl -fL -o "$tmp/silesia.zip" https://sun.aei.polsl.pl//~sdeor/corpus/silesia.zip
+      || curl -fL -o "$tmp/silesia.zip" https://mattmahoney.net/dc/silesia.zip
     unzip -q -o "$tmp/silesia.zip" -d "$dir"
     rm -rf "$tmp"
   fi

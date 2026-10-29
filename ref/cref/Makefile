@@ -1,14 +1,22 @@
-# Builds cref straight from ref/zstd/lib sources (no system libzstd), single-threaded.
+# Builds cref straight from ref/zstd/lib sources (no system libzstd), single-threaded
+# (ZSTD_MULTITHREAD is deliberately NOT defined: the lib tests it with #ifdef).
+# lib/compress/zstd_compress.c is compiled from a patched COPY in build/ (seqdump.patch
+# adds a no-op-by-default seqStore dump hook); ref/zstd itself is never modified.
 ZLIB := ../zstd/lib
-SRCS := $(wildcard $(ZLIB)/common/*.c) $(wildcard $(ZLIB)/compress/*.c) $(wildcard $(ZLIB)/decompress/*.c)
+ALL  := $(wildcard $(ZLIB)/common/*.c) $(wildcard $(ZLIB)/compress/*.c) $(wildcard $(ZLIB)/decompress/*.c)
+SRCS := $(filter-out $(ZLIB)/compress/zstd_compress.c,$(ALL))
 CFLAGS ?= -O2
 CFLAGS += -DZSTD_STATIC_LINKING_ONLY -DFSE_STATIC_LINKING_ONLY -DHUF_STATIC_LINKING_ONLY \
-          -DZSTD_MULTITHREAD=0 -DZSTD_DISABLE_ASM \
-          -I$(ZLIB) -I$(ZLIB)/common -I$(ZLIB)/compress
+          -DZSTD_DISABLE_ASM -I$(ZLIB) -I$(ZLIB)/common -I$(ZLIB)/compress
 
-cref: cref.c $(SRCS)
-	$(CC) $(CFLAGS) -o $@ cref.c $(SRCS)
+cref: cref.c build/zstd_compress.c $(SRCS)
+	$(CC) $(CFLAGS) -o $@ cref.c build/zstd_compress.c $(SRCS)
+
+build/zstd_compress.c: $(ZLIB)/compress/zstd_compress.c seqdump.patch
+	mkdir -p build
+	cp $(ZLIB)/compress/zstd_compress.c $@
+	patch $@ < seqdump.patch
 
 clean:
-	rm -f cref
+	rm -rf cref build
 .PHONY: clean

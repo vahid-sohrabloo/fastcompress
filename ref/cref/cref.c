@@ -67,24 +67,45 @@
  *   compressible; also srcSize <= 1); rc = 1 -> exactly 1 byte, the repeated
  *   symbol (RLE); else the HUF table header || stream(s).
  *
- * seqs [common opts]
- *   ZSTD_generateSequences (deprecated, in 1.5.7 always emits a block
- *   delimiter after each block; ZSTD_c_blockDelimiters does not apply to it).
- *   Text output, one record per line:
- *     block\n                                   starts a block
- *     seq lit=<ll> ml=<ml> off=<offset> rep=<rep> offbase=<ob>\n
- *     last lit=<n>\n                            C's block delimiter (offset 0,
- *                                               matchLength 0, litLength n =
- *                                               trailing literals of the block)
- *     lits=<hex>\n                              the block's literals, in order
- *                                               (all seq literals then the trailing
- *                                               literals), reconstructed from the
- *                                               source by walking ll/ml. Empty
- *                                               block literals => "lits=".
- *   <offset> is the raw offset from ZSTD_Sequence.offset (rep-resolved);
- *   <rep> is ZSTD_Sequence.rep (0 = not a repcode, else 1..3);
- *   <ob> is seqStore's offBase: rep if rep > 0, else offset + 3 (ZSTD_REP_NUM).
- *   Per block the order is: block, seq*, last, lits.
+ * seqs [common opts] [-frame-out FILE]
+ *   Runs a NORMAL ZSTD_compress2 (pledged size known, identical output to
+ *   `compress`; the frame is written to FILE if -frame-out is given) and dumps
+ *   the REAL seqStore of every emitted block. lib/compress/zstd_compress.c is
+ *   built from a patched copy (ref/cref/seqdump.patch) that calls a hook (a
+ *   no-op unless set) in ZSTD_compressBlock_internal right after the seqStore
+ *   is built and the block type is known, and in
+ *   ZSTD_compressSeqStore_singleBlock (the post-block-splitter path; the
+ *   splitter is only enabled for strategy >= btopt, i.e. NOT reachable at
+ *   levels <= 11 unless forced, but is hooked for completeness).
+ *   Stdout is text, one block after another:
+ *     block type=<raw|compressed|rle> src=<srcSize>\n
+ *     seq lit=<ll> ml=<ml> offbase=<ob>\n     one per stored sequence, in order
+ *     longlen type=<0|1|2> pos=<n>\n          seqStore.longLengthType (0 none,
+ *                                             1 literalLength, 2 matchLength)
+ *                                             and longLengthPos
+ *     lits=<hex>\n                            seqStore literal buffer (all
+ *                                             sequence literals then the trailing
+ *                                             last literals); "lits=" if empty
+ *   <ll> is the stored SeqDef.litLength (U16, WITHOUT the +0x10000 long-length
+ *   correction), <ml> is SeqDef.mlBase + MINMATCH(3) (also without correction),
+ *   <ob> is SeqDef.offBase (1..3 repcode, else offset + 3). The effective
+ *   length of the sequence at index == longlen.pos is stored + 0x10000 for the
+ *   field named by longlen.type. A block with no seqStore (ZSTD_buildSeqStore
+ *   declined a tiny block; it is emitted raw) prints no seq lines, "longlen
+ *   type=0 pos=0", and "lits=". type is the block's final form (raw =
+ *   uncompressed, rle, or compressed) and src the bytes it covers.
+ *
+ * OUTPUT BUFFER CONTRACT: every ZSTD_compressStream2 call in cref (compress
+ * -pledged 0, and stream) uses an output buffer of exactly
+ * ZSTD_CStreamOutSize() bytes which is drained into the result after each
+ * call. (Output-buffer free space can change the bytes, via the "compress
+ * directly into output" shortcut in ZSTD_compressStream_generic.)
+ *
+ * NOTE on fse: it is an oracle for the individual FSE functions only
+ * (HIST_count, FSE_optimalTableLog, FSE_normalizeCount, FSE_writeNCount,
+ * FSE_buildCTable_wksp, FSE_compress_usingCTable). Its outer heuristics come
+ * from the removed/deprecated FSE_compress, not from the compressor's own
+ * ZSTD_buildCTable / HUF_compressWeights paths.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -97,6 +118,9 @@
 #include "fse.h"
 #include "huf.h"
 #include "hist.h"
+#include "zstd_compress_internal.h"
+
+extern void (*ZSTD_crefHook)(const SeqStore_t*, size_t, int); /* seqdump.patch */
 
 static void die(const char* msg) { fprintf(stderr, "cref: %s\n", msg); exit(1); }
 static void dieZ(const char* what, size_t rc) {
@@ -109,6 +133,7 @@ typedef struct {
     unsigned long long seed;
     const char* chunks;
     const char* flushAfter;
+    const char* frameOut;
 } Opts;
 
 static void* readAll(FILE* f, size_t* n) {
@@ -155,6 +180,7 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-seed"))       o->seed = strtoull(v, NULL, 0);
         else if (!strcmp(a, "-chunks"))     o->chunks = v;
         else if (!strcmp(a, "-flush-after")) o->flushAfter = v;
+        else if (!strcmp(a, "-frame-out"))  o->frameOut = v;
         else { fprintf(stderr, "cref: unknown option %s\n", a); exit(2); }
     }
 }
@@ -184,20 +210,26 @@ static ZSTD_CCtx* newCCtx(const Opts* o) {
 }
 
 /* Run compressStream2 with `endOp` over [in, in+n) until fully consumed and
- * (for flush/end) until it returns 0; appends all output to *out. */
+ * (for flush/end) until it returns 0; appends all output to *out. Every call
+ * gets an output buffer of exactly ZSTD_CStreamOutSize() bytes, drained after
+ * the call (see OUTPUT BUFFER CONTRACT above). */
 static void feed(ZSTD_CCtx* c, ZSTD_EndDirective op, const void* in, size_t n,
                  unsigned char** out, size_t* olen, size_t* ocap) {
+    static unsigned char* buf;
+    const size_t bsz = ZSTD_CStreamOutSize();
     ZSTD_inBuffer ib = { in, n, 0 };
+    if (!buf && !(buf = malloc(bsz))) die("oom");
     for (;;) {
-        if (*ocap - *olen < ZSTD_CStreamOutSize()) {
-            *ocap = *ocap * 2 + ZSTD_CStreamOutSize();
+        ZSTD_outBuffer ob = { buf, bsz, 0 };
+        size_t r = ZSTD_compressStream2(c, &ob, &ib, op);
+        if (ZSTD_isError(r)) dieZ("ZSTD_compressStream2", r);
+        if (*ocap - *olen < ob.pos) {
+            *ocap = *ocap * 2 + ob.pos;
             *out = realloc(*out, *ocap);
             if (!*out) die("oom");
         }
-        ZSTD_outBuffer ob = { *out, *ocap, *olen };
-        size_t r = ZSTD_compressStream2(c, &ob, &ib, op);
-        if (ZSTD_isError(r)) dieZ("ZSTD_compressStream2", r);
-        *olen = ob.pos;
+        memcpy(*out + *olen, buf, ob.pos);
+        *olen += ob.pos;
         if (op == ZSTD_e_continue) { if (ib.pos == ib.size) break; }
         else if (r == 0) break;
     }
@@ -317,42 +349,34 @@ static int cmdHuf(const Opts* o, const unsigned char* src, size_t n, int streams
     return 0;
 }
 
+static void seqHook(const SeqStore_t* st, size_t srcSize, int type) {
+    static const char hex[] = "0123456789abcdef";
+    static const char* const names[] = { "raw", "compressed", "rle" };
+    printf("block type=%s src=%zu\n", names[type], srcSize);
+    if (!st) { printf("longlen type=0 pos=0\nlits=\n"); return; }
+    for (const SeqDef* q = st->sequencesStart; q < st->sequences; q++)
+        printf("seq lit=%u ml=%u offbase=%u\n", (unsigned)q->litLength,
+               (unsigned)q->mlBase + 3, (unsigned)q->offBase);
+    printf("longlen type=%d pos=%u\n", (int)st->longLengthType, (unsigned)st->longLengthPos);
+    fputs("lits=", stdout);
+    for (const BYTE* p = st->litStart; p < st->lit; p++) { putchar(hex[*p >> 4]); putchar(hex[*p & 15]); }
+    putchar('\n');
+}
+
 static int cmdSeqs(const Opts* o, const unsigned char* src, size_t n) {
     ZSTD_CCtx* c = newCCtx(o);
-    size_t cap = ZSTD_sequenceBound(n);
-    ZSTD_Sequence* s = malloc((cap ? cap : 1) * sizeof(*s));
-    if (!s) die("oom");
-    size_t cnt = ZSTD_generateSequences(c, s, cap, src, n);
-    if (ZSTD_isError(cnt)) dieZ("ZSTD_generateSequences", cnt);
-    size_t pos = 0;
-    int open = 0;
-    static const char hex[] = "0123456789abcdef";
-    /* Each block's literals: gather runs [pos, pos+ll) while walking. */
-    unsigned char* lits = malloc(n + 1);
-    size_t nl = 0;
-    for (size_t i = 0; i < cnt; i++) {
-        if (!open) { printf("block\n"); open = 1; nl = 0; }
-        if (s[i].offset == 0 && s[i].matchLength == 0) {
-            printf("last lit=%u\n", s[i].litLength);
-            if (s[i].litLength > n - pos) die("literal overrun");
-            memcpy(lits + nl, src + pos, s[i].litLength);
-            nl += s[i].litLength; pos += s[i].litLength;
-            fputs("lits=", stdout);
-            for (size_t k = 0; k < nl; k++) { putchar(hex[lits[k] >> 4]); putchar(hex[lits[k] & 15]); }
-            putchar('\n');
-            open = 0;
-        } else {
-            unsigned ob = s[i].rep ? s[i].rep : s[i].offset + 3;
-            printf("seq lit=%u ml=%u off=%u rep=%u offbase=%u\n",
-                   s[i].litLength, s[i].matchLength, s[i].offset, s[i].rep, ob);
-            if ((size_t)s[i].litLength + s[i].matchLength > n - pos) die("sequence overrun");
-            memcpy(lits + nl, src + pos, s[i].litLength);
-            nl += s[i].litLength;
-            pos += (size_t)s[i].litLength + s[i].matchLength;
-        }
+    size_t cap = ZSTD_compressBound(n);
+    unsigned char* dst = malloc(cap ? cap : 1);
+    if (!dst) die("oom");
+    if (n == 0) seqHook(NULL, 0, 0); /* empty input: lib writes the empty last block without a hook */
+    ZSTD_crefHook = seqHook;
+    size_t r = ZSTD_compress2(c, dst, cap, src, n);
+    ZSTD_crefHook = NULL;
+    if (ZSTD_isError(r)) dieZ("ZSTD_compress2", r);
+    if (o->frameOut) {
+        FILE* f = fopen(o->frameOut, "wb");
+        if (!f || fwrite(dst, 1, r, f) != r || fclose(f)) die("cannot write -frame-out");
     }
-    if (open) die("sequences did not end with a block delimiter");
-    if (pos != n) die("sequences do not cover the input");
     return 0;
 }
 

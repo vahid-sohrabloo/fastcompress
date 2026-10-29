@@ -3,3 +3,4 @@ ref/cref/cref
 bench/corpus/
 *.prof
 .superpowers/
+ref/cref/build/
