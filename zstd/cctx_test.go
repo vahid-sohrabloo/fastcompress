@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,21 +69,28 @@ func level1Cases() []compress2Case {
 }
 
 // rowCases are the level 7 and 11 parameter sets. Their strategies (lazy,
-// lazy2) use the row-based match finder when the window log is above 14.
+// lazy2) use the row-based match finder when the window log is above 14, and
+// the hash chain at or below it (level 7 at 16 KiB or less).
 func rowCases() []compress2Case {
 	return []compress2Case{{7, true, 0}, {7, false, 15}, {11, true, 0}, {11, false, 17}}
 }
 
+// hcCases force the hash-chain match finder (window log 14 or less) for
+// greedy (5), lazy (6) and lazy2 (7, 9), whatever the input size.
+func hcCases() []compress2Case {
+	return []compress2Case{{5, false, 14}, {6, true, 12}, {7, false, 14}, {9, true, 10}, {7, true, 0}}
+}
+
 // ported reports whether this port has the match finder that compress2
-// selects with c for an input of n bytes: fast, dfast, and the row-based
-// greedy/lazy/lazy2. Other inputs make compress2 return
+// selects with c for an input of n bytes: fast, dfast, and greedy/lazy/lazy2
+// (row-based or hash chain). Other inputs make compress2 return
 // errStrategyUnsupported (unless they are too small to search at all).
 func (c compress2Case) ported(n int) bool {
 	var p cctxParams
 	cctxParamsInit(&p, c.level)
 	p.cParams.windowLog = c.windowLog
 	cp := getCParamsFromCCtxParams(&p, uint64(n), 0, cpmNoAttachDict)
-	return cp.strategy <= zstdDfast || rowMatchFinderUsed(cp.strategy, resolveRowMatchFinderMode(psAuto, &cp))
+	return cp.strategy <= zstdLazy2
 }
 
 // seqStep is one compress2 call on a reused context.
@@ -164,7 +172,7 @@ func sortedInputs(t *testing.T) ([]string, map[string][]byte) {
 // pre-splits (inputs over 128 KiB).
 func TestCompress2Cref(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	for _, c := range append(level1Cases(), rowCases()...) {
+	for _, c := range slices.Concat(level1Cases(), rowCases(), hcCases()) {
 		for _, name := range names {
 			src := inputs[name]
 			t.Run(c.String()+"/"+name, func(t *testing.T) {
@@ -204,7 +212,7 @@ func TestCompress2Cref(t *testing.T) {
 // finder's per-reset hash salt must all behave as in C.
 func TestCompress2Reuse(t *testing.T) {
 	names, inputs := sortedInputs(t)
-	cases, rc := level1Cases(), rowCases()
+	cases, rc := level1Cases(), slices.Concat(rowCases(), hcCases())
 	var steps []seqStep
 	for i, name := range names {
 		src := inputs[name]

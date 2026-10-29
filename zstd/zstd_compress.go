@@ -892,6 +892,12 @@ func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) b
 			return compressBlockFast
 		case zstdDfast:
 			return compressBlockDoubleFast
+		case zstdGreedy:
+			return compressBlockGreedy
+		case zstdLazy:
+			return compressBlockLazy
+		case zstdLazy2:
+			return compressBlockLazy2
 		}
 	}
 	return nil

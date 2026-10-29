@@ -1,7 +1,8 @@
 // Port of libzstd v1.5.7 lib/compress/zstd_lazy.c (Copyright (c) Meta
-// Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the row-based
-// match finder and the lazy parser (ZSTD_compressBlock_lazy_generic) with
-// searchMethod search_rowHash and dictMode ZSTD_noDict.
+// Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the hash-chain
+// and row-based match finders and the lazy parser
+// (ZSTD_compressBlock_lazy_generic) with searchMethod search_hashChain or
+// search_rowHash and dictMode ZSTD_noDict.
 
 package zstd
 
@@ -94,8 +95,8 @@ func rowNextIndex(tagRow []byte, rowMask uint32) uint32 {
 
 // rowFillHashCache fills the hash cache starting at index idx, up to
 // rowHashCacheSize entries but not beyond position iLimit of ms.window.base.
-// C: zstd_lazy.c:ZSTD_row_fillHashCache (ZSTD_row_prefetch is a prefetch
-// hint only and is omitted).
+// C: zstd_lazy.c:ZSTD_row_fillHashCache — C also calls ZSTD_row_prefetch for
+// each hash; it is a cache hint only, so it is omitted.
 func rowFillHashCache(ms *matchState, b []byte, baseIdx, mls, idx uint32, iLimit int) {
 	hashLog := ms.rowHashLog
 	var maxElemsToPrefetch uint32
@@ -111,7 +112,8 @@ func rowFillHashCache(ms *matchState, b []byte, baseIdx, mls, idx uint32, iLimit
 
 // rowNextCachedHash returns the hash of index idx from the cache, and
 // replaces it with the hash of idx + rowHashCacheSize.
-// C: zstd_lazy.c:ZSTD_row_nextCachedHash (without the prefetch)
+// C: zstd_lazy.c:ZSTD_row_nextCachedHash — C also prefetches the row of the
+// new hash; it is a cache hint only, so it is omitted.
 func rowNextCachedHash(cache *[rowHashCacheSize]uint32, b []byte, baseIdx, idx, hashLog, mls uint32, hashSalt uint64) uint32 {
 	newHash := hashPtrSalted(b, int(idx-baseIdx)+rowHashCacheSize, hashLog+rowHashTagBits, mls, hashSalt)
 	hash := cache[idx&rowHashCacheMask]
@@ -226,7 +228,9 @@ func rowGetMatchMask(tagRow []byte, tag byte, headGrouped uint32, rowEntries uin
 // input. It also inserts ip (and the positions before it, from
 // ms.nextToUpdate) into the tables.
 // C: zstd_lazy.c:ZSTD_RowFindBestMatch with dictMode ZSTD_noDict.
-// groupWidth is 1 (see rowGetMatchMask); the prefetches are omitted.
+// groupWidth is 1 (see rowGetMatchMask). C: zstd_lazy.c:ZSTD_RowFindBestMatch
+// — C's PREFETCH_L1 of the row and of the matches are cache hints only, so
+// they are omitted.
 func rowFindBestMatch(ms *matchState, ip, iLimit int, mls, rowLog uint32) (int, uint32) {
 	hashTable := ms.hashTable
 	tagTable := ms.tagTable
@@ -322,36 +326,162 @@ func rowFindBestMatch(ms *matchState, ip, iLimit int, mls, rowLog uint32) (int, 
 	return ml, offBase
 }
 
+// searchMethod selects the match finder of the lazy parser.
+// C: zstd_lazy.c:searchMethod_e (search_binaryTree is not ported yet)
+type searchMethod uint8
+
+const (
+	searchHashChain searchMethod = 0 // C: search_hashChain
+	searchRowHash   searchMethod = 2 // C: search_rowHash
+)
+
+// insertAndFindFirstIndexInternal inserts the positions from ms.nextToUpdate
+// up to ip (excluded) into the hash chain and returns the most recent index
+// with the same hash as ip. In lazy skipping mode only one position is
+// inserted. C: zstd_lazy.c:ZSTD_insertAndFindFirstIndex_internal
+func insertAndFindFirstIndexInternal(ms *matchState, ip int, mls uint32, lazySkipping bool) uint32 {
+	hashTable := ms.hashTable
+	hashLog := ms.cParams.hashLog
+	chainTable := ms.chainTable
+	chainMask := uint32(1)<<ms.cParams.chainLog - 1
+	b := ms.window.base
+	baseIdx := ms.window.baseIdx
+	target := uint32(ip) + baseIdx
+	idx := ms.nextToUpdate
+
+	for idx < target { // catch up
+		h := hashPtr(b, int(idx-baseIdx), hashLog, mls)
+		chainTable[idx&chainMask] = hashTable[h] // C: NEXT_IN_CHAIN(idx, chainMask)
+		hashTable[h] = idx
+		idx++
+		// Stop inserting every position when in the lazy skipping mode.
+		if lazySkipping {
+			break
+		}
+	}
+
+	ms.nextToUpdate = target
+	return hashTable[hashPtr(b, ip, hashLog, mls)]
+}
+
+// hcFindBestMatch returns the length of the longest match at position ip
+// (in ms.window.base) found by walking its hash chain, and its offBase; a
+// length below 4 means none (offBase is then offBaseNotFound). iLimit is the
+// end of the input. It also inserts the positions before ip into the chain.
+// C: zstd_lazy.c:ZSTD_HcFindBestMatch with dictMode ZSTD_noDict.
+func hcFindBestMatch(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
+	cParams := &ms.cParams
+	chainTable := ms.chainTable
+	chainSize := uint32(1) << cParams.chainLog
+	chainMask := chainSize - 1
+	b := ms.window.base
+	baseIdx := ms.window.baseIdx
+	curr := uint32(ip) + baseIdx
+	maxDistance := uint32(1) << cParams.windowLog
+	lowestValid := ms.window.lowLimit
+	withinMaxDistance := lowestValid
+	if curr-lowestValid > maxDistance {
+		withinMaxDistance = curr - maxDistance
+	}
+	isDictionary := ms.loadedDictEnd != 0
+	lowLimit := withinMaxDistance
+	if isDictionary {
+		lowLimit = lowestValid
+	}
+	var minChain uint32
+	if curr > chainSize {
+		minChain = curr - chainSize
+	}
+	nbAttempts := uint32(1) << cParams.searchLog
+	ml := 4 - 1
+	offBase := uint32(offBaseNotFound)
+
+	// HC4 match finder
+	matchIndex := insertAndFindFirstIndexInternal(ms, ip, mls, ms.lazySkipping)
+
+	// C: `&` of the two conditions; && is equivalent (no side effects).
+	for ; matchIndex >= lowLimit && nbAttempts > 0; nbAttempts-- {
+		currentMl := 0
+		match := int(matchIndex - baseIdx)
+		// read 4B starting from (match + ml + 1 - sizeof(U32))
+		if binary.LittleEndian.Uint32(b[match+ml-3:]) == binary.LittleEndian.Uint32(b[ip+ml-3:]) { // potentially better
+			currentMl = count(b, ip, match, iLimit)
+		}
+
+		// save best solution
+		if currentMl > ml {
+			ml = currentMl
+			offBase = offsetToOffBase(curr - matchIndex)
+			if ip+currentMl == iLimit {
+				break // best possible, avoids read overflow on next attempt
+			}
+		}
+
+		if matchIndex <= minChain {
+			break
+		}
+		matchIndex = chainTable[matchIndex&chainMask] // C: NEXT_IN_CHAIN(matchIndex, chainMask)
+	}
+	return ml, offBase
+}
+
+// searchMax runs the match finder method at ip.
+// C: zstd_lazy.c:ZSTD_searchMax — C picks a search function per (dictMode,
+// mls, rowLog) through a table of specialised copies; this port passes mls
+// and rowLog as arguments.
+func searchMax(ms *matchState, ip, iLimit int, mls, rowLog uint32, method searchMethod) (int, uint32) {
+	if method == searchRowHash {
+		return rowFindBestMatch(ms, ip, iLimit, mls, rowLog)
+	}
+	return hcFindBestMatch(ms, ip, iLimit, mls)
+}
+
+// compressBlockGreedy. C: zstd_lazy.c:ZSTD_compressBlock_greedy
+func compressBlockGreedy(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyGeneric(ms, ss, rep, src, srcIdx, searchHashChain, 0)
+}
+
+// compressBlockLazy. C: zstd_lazy.c:ZSTD_compressBlock_lazy
+func compressBlockLazy(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyGeneric(ms, ss, rep, src, srcIdx, searchHashChain, 1)
+}
+
+// compressBlockLazy2. C: zstd_lazy.c:ZSTD_compressBlock_lazy2
+func compressBlockLazy2(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyGeneric(ms, ss, rep, src, srcIdx, searchHashChain, 2)
+}
+
 // compressBlockGreedyRow. C: zstd_lazy.c:ZSTD_compressBlock_greedy_row
 func compressBlockGreedyRow(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
-	return compressBlockLazyGenericRow(ms, ss, rep, src, srcIdx, 0)
+	return compressBlockLazyGeneric(ms, ss, rep, src, srcIdx, searchRowHash, 0)
 }
 
 // compressBlockLazyRow. C: zstd_lazy.c:ZSTD_compressBlock_lazy_row
 func compressBlockLazyRow(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
-	return compressBlockLazyGenericRow(ms, ss, rep, src, srcIdx, 1)
+	return compressBlockLazyGeneric(ms, ss, rep, src, srcIdx, searchRowHash, 1)
 }
 
 // compressBlockLazy2Row. C: zstd_lazy.c:ZSTD_compressBlock_lazy2_row
 func compressBlockLazy2Row(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
-	return compressBlockLazyGenericRow(ms, ss, rep, src, srcIdx, 2)
+	return compressBlockLazyGeneric(ms, ss, rep, src, srcIdx, searchRowHash, 2)
 }
 
-// compressBlockLazyGenericRow is the lazy parser: at each position it takes
+// compressBlockLazyGeneric is the lazy parser: at each position it takes
 // the repcode or best match, then (depth 1 and 2) looks 1 (and 2) positions
 // ahead for a better one.
-// C: zstd_lazy.c:ZSTD_compressBlock_lazy_generic with searchMethod
-// search_rowHash and dictMode ZSTD_noDict; C's ZSTD_searchMax dispatch is
-// the direct call to rowFindBestMatch, and its `goto _storeSequence` is the
-// store flag.
-func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, depth int) int {
+// C: zstd_lazy.c:ZSTD_compressBlock_lazy_generic with dictMode ZSTD_noDict;
+// C's `goto _storeSequence` is the store flag.
+func compressBlockLazyGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, method searchMethod, depth int) int {
 	b := ms.window.base
 	baseIdx := ms.window.baseIdx
 	istart := int(srcIdx - baseIdx)
 	ip := istart
 	anchor := istart
 	iend := istart + len(src)
-	ilimit := iend - 8 - rowHashCacheSize
+	ilimit := iend - 8
+	if method == searchRowHash {
+		ilimit -= rowHashCacheSize
+	}
 	prefixLowestIndex := ms.window.dictLimit
 	prefixLowest := int(prefixLowestIndex - baseIdx)
 	mls := min(max(ms.cParams.minMatch, 4), 6)
@@ -381,7 +511,9 @@ func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint
 	// Reset the lazy skipping state
 	ms.lazySkipping = false
 
-	rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+	if method == searchRowHash {
+		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+	}
 
 	// Match Loop
 	for ip < ilimit {
@@ -391,6 +523,9 @@ func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint
 		store := false // C: goto _storeSequence
 
 		// check repCode
+		// C: zstd_lazy.c:ZSTD_compressBlock_lazy_generic — C combines the
+		// conditions with `&` (both operands always evaluated); `&&` is the
+		// same result, as the read is in bounds even for offset1 == 0.
 		if offset1 > 0 && read32(ip+1-int(offset1)) == read32(ip+1) {
 			matchLength = count(b, ip+1+4, ip+1+4-int(offset1), iend) + 4
 			store = depth == 0
@@ -398,7 +533,7 @@ func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint
 
 		if !store {
 			// first search (depth 0)
-			if ml2, offbaseFound := rowFindBestMatch(ms, ip, iend, mls, rowLog); ml2 > matchLength {
+			if ml2, offbaseFound := searchMax(ms, ip, iend, mls, rowLog, method); ml2 > matchLength {
 				matchLength, start, offBase = ml2, ip, offbaseFound
 			}
 
@@ -421,6 +556,7 @@ func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint
 			if depth >= 1 {
 				for ip < ilimit {
 					ip++
+					// C: zstd_lazy.c:ZSTD_compressBlock_lazy_generic — `&` in C, `&&` here (same result).
 					if offBase != 0 && offset1 > 0 && read32(ip) == read32(ip-int(offset1)) {
 						mlRep := count(b, ip+4, ip+4-int(offset1), iend) + 4
 						gain2 := mlRep * 3
@@ -430,7 +566,7 @@ func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint
 						}
 					}
 					{
-						ml2, ofbCandidate := rowFindBestMatch(ms, ip, iend, mls, rowLog)
+						ml2, ofbCandidate := searchMax(ms, ip, iend, mls, rowLog, method)
 						gain2 := ml2*4 - int(highbit32(ofbCandidate)) // raw approx
 						gain1 := matchLength*4 - int(highbit32(offBase)) + 4
 						if ml2 >= 4 && gain2 > gain1 {
@@ -442,6 +578,7 @@ func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint
 					// let's find an even better one
 					if depth == 2 && ip < ilimit {
 						ip++
+						// C: zstd_lazy.c:ZSTD_compressBlock_lazy_generic — `&` in C, `&&` here (same result).
 						if offBase != 0 && offset1 > 0 && read32(ip) == read32(ip-int(offset1)) {
 							mlRep := count(b, ip+4, ip+4-int(offset1), iend) + 4
 							gain2 := mlRep * 4
@@ -451,7 +588,7 @@ func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint
 							}
 						}
 						{
-							ml2, ofbCandidate := rowFindBestMatch(ms, ip, iend, mls, rowLog)
+							ml2, ofbCandidate := searchMax(ms, ip, iend, mls, rowLog, method)
 							gain2 := ml2*4 - int(highbit32(ofbCandidate)) // raw approx
 							gain1 := matchLength*4 - int(highbit32(offBase)) + 7
 							if ml2 >= 4 && gain2 > gain1 {
@@ -483,11 +620,14 @@ func compressBlockLazyGenericRow(ms *matchState, ss *seqStore, rep *[repNum]uint
 		if ms.lazySkipping {
 			// We've found a match, disable lazy skipping mode, and refill
 			// the hash cache.
-			rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+			if method == searchRowHash {
+				rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+			}
 			ms.lazySkipping = false
 		}
 
 		// check immediate repcode
+		// C: zstd_lazy.c:ZSTD_compressBlock_lazy_generic — `&` in C, `&&` here (same result).
 		for ip <= ilimit && offset2 > 0 && read32(ip) == read32(ip-int(offset2)) {
 			// store sequence
 			matchLength = count(b, ip+4, ip+4-int(offset2), iend) + 4

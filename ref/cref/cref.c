@@ -28,7 +28,7 @@
  *   Output: the zstd frame (raw bytes).
  *
  * compress-seq [common opts] -sizes N1,N2,... [-levels L1,L2,...]
- *              [-checksums C1,C2,...] [-window-logs W1,W2,...]
+ *              [-checksums C1,C2,...] [-window-logs W1,W2,...] [-salt-out FILE]
  *   Compresses consecutive pieces of stdin (sizes N1, N2, ..., which must sum
  *   to the input length; 0 is an empty piece) one after another through ONE
  *   ZSTD_CCtx, each with ZSTD_compress2 and a ZSTD_compressBound(Ni) output
@@ -38,8 +38,9 @@
  *   log of 0 restores the level default). A list shorter than the number of
  *   pieces leaves later steps unchanged. This reproduces a reused context:
  *   e.g. the row-based match finder (greedy..lazy2 with windowLog > 14)
- *   advances its hash salt on every context reset, so the Nth frame of a
- *   reused context can differ from a fresh context's.
+ *   advances its hash salt on every context reset; compress-seq reproduces
+ *   that state, and the output equals a fresh context's (verified: the salt
+ *   only relabels rows and tags, so it cannot change the frames).
  *   Output: for each frame, its length as a 4-byte little-endian integer,
  *   then the frame.
  *   -salt-out FILE: after each step, append a text line to FILE with the
