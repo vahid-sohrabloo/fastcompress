@@ -119,6 +119,59 @@ func period(p, n int) []byte {
 	return b
 }
 
+// litRLE is 8192 random 16-byte tokens followed by 7700 of them, shuffled,
+// each preceded by 'x'. At level 11 the second half's literals are mostly
+// 'x', which reaches the RLE literals section.
+func litRLE() []byte {
+	r := rand.New(rand.NewPCG(7, 4))
+	const nTok, tokLen, nRep = 8192, 16, 7700
+	b := make([]byte, nTok*tokLen, nTok*tokLen+nRep*(tokLen+1))
+	for i := range b {
+		b[i] = byte(r.Uint32())
+	}
+	for _, t := range r.Perm(nTok)[:nRep] {
+		b = append(b, 'x')
+		b = append(b, b[t*tokLen:(t+1)*tokLen]...)
+	}
+	return b
+}
+
+// litLong is 70000 random bytes then 60000 copies of one byte: a single
+// block whose first sequence has a literal length above 0xFFFF.
+func litLong() []byte {
+	b := random(45, 70000)
+	return append(b, bytes.Repeat([]byte{'z'}, 60000)...)
+}
+
+// nbSeqLong is a 128 KiB single block that level 1 cuts into more than
+// LONGNBSEQ (0x7F00) sequences, exercising the 3-byte nbSeq header: 9 random
+// bytes, a 64-byte copy of them at offset 9 (the match that sets up the
+// repcodes), then alternating 4-byte chunks that repeat the previous byte
+// (offset 1) and copy from 9 bytes back (offset 9). Each chunk mismatches
+// at its 5th byte, so fast's repcode loop stores one 4-byte match per chunk
+// with no literals. With these exact bytes `cref seqs -level 1` reports
+// 32749 sequences.
+func nbSeqLong() []byte {
+	const n, off = 128 * kib, 9
+	r := rand.New(rand.NewPCG(0, 3))
+	b := make([]byte, 0, n)
+	for range off {
+		b = append(b, byte(r.Uint32()))
+	}
+	for range 64 {
+		b = append(b, b[len(b)-off])
+	}
+	for d := 1; len(b)+4 <= n; d ^= 1 ^ off {
+		for range 4 {
+			b = append(b, b[len(b)-d])
+		}
+	}
+	for len(b) < n {
+		b = append(b, 0)
+	}
+	return b
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -132,7 +185,8 @@ func itoa(n int) string {
 
 // Inputs returns the deterministic input corpus for C-vs-Go comparisons: the
 // synthetic set (sizes 0, 1, 16KiB±1, 128KiB±1, 256KiB±1, window-size±1,
-// all-zero, single repeated byte, random, periods 2..8, text) plus the C
+// all-zero, single repeated byte, random, periods 2..8, text, and the
+// entropy edge cases litrle, litlong and nbseqlong) plus the C
 // repo's README/format spec (internal/creftest/testdata). Unless
 // testing.Short() it also includes inputs > 1 MiB and bench/corpus/silesia/*
 // when present.
@@ -173,6 +227,9 @@ func Inputs(t testing.TB) map[string][]byte {
 	for p := 2; p <= 8; p++ {
 		add("period"+itoa(p), period(p, 64*kib))
 	}
+	add("litrle", litRLE())
+	add("litlong", litLong())
+	add("nbseqlong", nbSeqLong())
 	for _, f := range []string{"zstd-README.md", "zstd-format.md"} {
 		b, err := os.ReadFile(filepath.Join(root(), "internal", "creftest", "testdata", f))
 		if err != nil {
