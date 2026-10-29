@@ -6,9 +6,12 @@ package zstd
 
 import (
 	"encoding/binary"
+	"errors"
+	"slices"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
 	"github.com/vahid-sohrabloo/fastzstd/internal/hist"
+	"github.com/vahid-sohrabloo/fastzstd/internal/xxhash"
 )
 
 // symbolEncodingTypeStats holds the finalized symbol encoding types and the
@@ -214,7 +217,10 @@ func entropyCompressSeqStoreWExtLitBuffer(dst []byte, literals []byte, blockSize
 		return 0, err
 	}
 
-	// Check compressibility
+	// Check compressibility. C computes this in size_t, which would wrap
+	// for blockSize < minGain(blockSize) = 2 (blocks of 0 or 1 byte);
+	// ZSTD_buildSeqStore never passes blocks that small here (it emits
+	// blocks under 7 bytes raw), so the Go int cannot go negative.
 	maxCSize := blockSize - minGain(blockSize, params.cParams.strategy)
 	if cSize >= maxCSize {
 		return 0, nil // block not compressed
@@ -231,4 +237,1025 @@ func entropyCompressSeqStoreWExtLitBuffer(dst []byte, literals []byte, blockSize
 func entropyCompressSeqStore(dst []byte, ss *seqStore, prev, next *entropyCTables,
 	params *cctxParams, srcSize int, wksp []byte, bmi2 bool) (int, error) {
 	return entropyCompressSeqStoreWExtLitBuffer(dst, ss.literals, srcSize, ss, prev, next, params, wksp, bmi2)
+}
+
+/*-*************************************
+*  Parameters
+***************************************/
+
+// cParamMode tells how parameter adjustment treats the dictionary size.
+// C: zstd_compress_internal.h:ZSTD_CParamMode_e
+type cParamMode int
+
+const (
+	cpmNoAttachDict cParamMode = iota // C: ZSTD_cpm_noAttachDict
+	cpmAttachDict                     // C: ZSTD_cpm_attachDict
+	cpmCreateCDict                    // C: ZSTD_cpm_createCDict
+	cpmUnknown                        // C: ZSTD_cpm_unknown
+)
+
+// rowMatchFinderSupported. C: zstd_compress.c:ZSTD_rowMatchFinderSupported
+func rowMatchFinderSupported(strat strategy) bool {
+	return strat >= zstdGreedy && strat <= zstdLazy2
+}
+
+// rowMatchFinderUsed. mode must be resolved (not psAuto).
+// C: zstd_compress.c:ZSTD_rowMatchFinderUsed
+func rowMatchFinderUsed(strat strategy, mode paramSwitch) bool {
+	return rowMatchFinderSupported(strat) && mode == psEnable
+}
+
+// resolveRowMatchFinderMode. C: zstd_compress.c:ZSTD_resolveRowMatchFinderMode
+func resolveRowMatchFinderMode(mode paramSwitch, cParams *compressionParameters) paramSwitch {
+	if mode != psAuto {
+		return mode
+	}
+	mode = psDisable
+	if !rowMatchFinderSupported(cParams.strategy) {
+		return mode
+	}
+	if cParams.windowLog > 14 {
+		mode = psEnable
+	}
+	return mode
+}
+
+// resolveBlockSplitterMode. C: zstd_compress.c:ZSTD_resolveBlockSplitterMode
+func resolveBlockSplitterMode(mode paramSwitch, cParams *compressionParameters) paramSwitch {
+	if mode != psAuto {
+		return mode
+	}
+	if cParams.strategy >= zstdBtopt && cParams.windowLog >= 17 {
+		return psEnable
+	}
+	return psDisable
+}
+
+// allocateChainTable. C: zstd_compress.c:ZSTD_allocateChainTable
+func allocateChainTable(strat strategy, useRowMatchFinder paramSwitch, forDDSDict bool) bool {
+	return forDDSDict || (strat != zstdFast && !rowMatchFinderUsed(strat, useRowMatchFinder))
+}
+
+// resolveMaxBlockSize. C: zstd_compress.c:ZSTD_resolveMaxBlockSize
+func resolveMaxBlockSize(maxBlockSize int) int {
+	if maxBlockSize == 0 {
+		return blockSizeMax
+	}
+	return maxBlockSize
+}
+
+// cycleLog. C: zstd_compress.c:ZSTD_cycleLog
+func cycleLog(hashLog uint32, strat strategy) uint32 {
+	var btScale uint32
+	if strat >= zstdBtlazy2 {
+		btScale = 1
+	}
+	return hashLog - btScale
+}
+
+// dictAndWindowLog returns a window log large enough to fit the source and
+// the dictionary. srcSize must not be contentSizeUnknown.
+// C: zstd_compress.c:ZSTD_dictAndWindowLog
+func dictAndWindowLog(windowLog uint32, srcSize, dictSize uint64) uint32 {
+	const maxWindowSize = uint64(1) << windowLogMax
+	// No dictionary ==> No change
+	if dictSize == 0 {
+		return windowLog
+	}
+	windowSize := uint64(1) << windowLog
+	dictAndWindowSize := dictSize + windowSize
+	// If the window size is already large enough to fit both the source and
+	// the dictionary then just use the window size. Otherwise adjust so
+	// that it fits the dictionary and the window.
+	switch {
+	case windowSize >= dictSize+srcSize:
+		return windowLog // Window size large enough already
+	case dictAndWindowSize >= maxWindowSize:
+		return windowLogMax // Larger than max window log
+	default:
+		return highbit32(uint32(dictAndWindowSize)-1) + 1
+	}
+}
+
+// adjustCParamsInternal optimizes cPar for the given source and dictionary
+// sizes: mostly downsizing to reduce memory and initialization latency.
+// srcSize may be contentSizeUnknown; srcSize == 0 means 0. cPar is presumed
+// valid. C: zstd_compress.c:ZSTD_adjustCParams_internal (no strategy is
+// excluded from this build, so the cascade at its top is a no-op).
+func adjustCParamsInternal(cPar compressionParameters, srcSize, dictSize uint64,
+	mode cParamMode, useRowMatchFinder paramSwitch) compressionParameters {
+	const minSrcSize = 513 // (1<<9) + 1
+	const maxWindowResize = uint64(1) << (windowLogMax - 1)
+
+	switch mode {
+	case cpmUnknown, cpmNoAttachDict:
+		// If we don't know the source size, don't make any assumptions
+		// about it. We will already have selected smaller parameters if a
+		// dictionary is in use.
+	case cpmCreateCDict:
+		// Assume a small source size when creating a dictionary with an
+		// unknown source size.
+		if dictSize != 0 && srcSize == contentSizeUnknown {
+			srcSize = minSrcSize
+		}
+	case cpmAttachDict:
+		// Dictionary has its own dedicated parameters which have already
+		// been selected. We are selecting parameters for only the source.
+		dictSize = 0
+	}
+
+	// resize windowLog if input is small enough, to use less memory
+	if srcSize <= maxWindowResize && dictSize <= maxWindowResize {
+		tSize := uint32(srcSize + dictSize)
+		const hashSizeMin = 1 << hashLogMin
+		srcLog := uint32(hashLogMin)
+		if tSize >= hashSizeMin {
+			srcLog = highbit32(tSize-1) + 1
+		}
+		if cPar.windowLog > srcLog {
+			cPar.windowLog = srcLog
+		}
+	}
+	if srcSize != contentSizeUnknown {
+		dictAndWindowLog := dictAndWindowLog(cPar.windowLog, srcSize, dictSize)
+		cycleLog := cycleLog(cPar.chainLog, cPar.strategy)
+		if cPar.hashLog > dictAndWindowLog+1 {
+			cPar.hashLog = dictAndWindowLog + 1
+		}
+		if cycleLog > dictAndWindowLog {
+			cPar.chainLog -= cycleLog - dictAndWindowLog
+		}
+	}
+
+	if cPar.windowLog < windowLogAbsoluteMin {
+		cPar.windowLog = windowLogAbsoluteMin // minimum wlog required for valid frame header
+	}
+
+	// We can't use more than 32 bits of hash in total, so that means that we
+	// require: (hashLog + 8) <= 32 && (chainLog + 8) <= 32
+	if mode == cpmCreateCDict && (cPar.strategy == zstdFast || cPar.strategy == zstdDfast) {
+		const maxShortCacheHashLog = 32 - 8 // C: 32 - ZSTD_SHORT_CACHE_TAG_BITS
+		cPar.hashLog = min(cPar.hashLog, maxShortCacheHashLog)
+		cPar.chainLog = min(cPar.chainLog, maxShortCacheHashLog)
+	}
+
+	// At this point, we aren't 100% sure if we are using the row match
+	// finder. Unless it is explicitly disabled, conservatively assume that
+	// it is enabled. In this case it will only be disabled for small
+	// sources, so shrinking the hash log a little bit shouldn't result in
+	// any ratio loss.
+	if useRowMatchFinder == psAuto {
+		useRowMatchFinder = psEnable
+	}
+
+	// We can't hash more than 32-bits in total. So that means that we
+	// require: (hashLog - rowLog + 8) <= 32
+	if rowMatchFinderUsed(cPar.strategy, useRowMatchFinder) {
+		// Switch to 32-entry rows if searchLog is 5 (or more)
+		rowLog := min(max(cPar.searchLog, 4), 6)
+		const maxRowHashLog = 32 - rowHashTagBits
+		maxHashLog := maxRowHashLog + rowLog
+		if cPar.hashLog > maxHashLog {
+			cPar.hashLog = maxHashLog
+		}
+	}
+	return cPar
+}
+
+// getCParamRowSize. C: zstd_compress.c:ZSTD_getCParamRowSize
+func getCParamRowSize(srcSizeHint uint64, dictSize uint64, mode cParamMode) uint64 {
+	if mode == cpmAttachDict {
+		dictSize = 0
+	}
+	unknown := srcSizeHint == contentSizeUnknown
+	var addedSize uint64
+	if unknown && dictSize > 0 {
+		addedSize = 500
+	}
+	if unknown && dictSize == 0 {
+		return contentSizeUnknown
+	}
+	return srcSizeHint + dictSize + addedSize
+}
+
+// getCParamsInternal returns the parameters of a compression level for a
+// source and dictionary size. srcSizeHint 0 means 0; use contentSizeUnknown
+// for unknown. C: zstd_compress.c:ZSTD_getCParams_internal
+func getCParamsInternal(level int, srcSizeHint uint64, dictSize uint64, mode cParamMode) compressionParameters {
+	rSize := getCParamRowSize(srcSizeHint, dictSize, mode)
+	var tableID int
+	for _, lim := range []uint64{256 << 10, 128 << 10, 16 << 10} {
+		if rSize <= lim {
+			tableID++
+		}
+	}
+	var row int
+	switch {
+	case level == 0:
+		row = clevelDefault // 0 == default
+	case level < 0:
+		row = 0 // entry 0 is baseline for fast mode
+	case level > maxCLevel:
+		row = maxCLevel
+	default:
+		row = level
+	}
+	cp := defaultCParameters[tableID][row]
+	// acceleration factor
+	if level < 0 {
+		cp.targetLength = uint32(-max(minCLevel, level))
+	}
+	// refine parameters based on srcSize & dictSize
+	return adjustCParamsInternal(cp, srcSizeHint, dictSize, mode, psAuto)
+}
+
+// getCParams returns the parameters of a compression level for a source of
+// srcSizeHint bytes (contentSizeUnknown if unknown) and a dictionary of
+// dictSize bytes, as a context without an attached dictionary uses them.
+// C: zstd_compress.c:ZSTD_getCParams_internal with ZSTD_cpm_noAttachDict.
+func getCParams(level int, srcSizeHint uint64, dictSize int) compressionParameters {
+	return getCParamsInternal(level, srcSizeHint, uint64(dictSize), cpmNoAttachDict)
+}
+
+// overrideCParams. C: zstd_compress.c:ZSTD_overrideCParams
+func overrideCParams(cParams *compressionParameters, overrides *compressionParameters) {
+	if overrides.windowLog != 0 {
+		cParams.windowLog = overrides.windowLog
+	}
+	if overrides.hashLog != 0 {
+		cParams.hashLog = overrides.hashLog
+	}
+	if overrides.chainLog != 0 {
+		cParams.chainLog = overrides.chainLog
+	}
+	if overrides.searchLog != 0 {
+		cParams.searchLog = overrides.searchLog
+	}
+	if overrides.minMatch != 0 {
+		cParams.minMatch = overrides.minMatch
+	}
+	if overrides.targetLength != 0 {
+		cParams.targetLength = overrides.targetLength
+	}
+	if overrides.strategy != 0 {
+		cParams.strategy = overrides.strategy
+	}
+}
+
+// getCParamsFromCCtxParams. srcSizeHint == 0 means 0.
+// C: zstd_compress.c:ZSTD_getCParamsFromCCtxParams (no srcSizeHint
+// parameter and no LDM yet: both keep their C defaults, 0 and disabled).
+func getCParamsFromCCtxParams(p *cctxParams, srcSizeHint uint64, dictSize uint64, mode cParamMode) compressionParameters {
+	cParams := getCParamsInternal(p.compressionLevel, srcSizeHint, dictSize, mode)
+	overrideCParams(&cParams, &p.cParams)
+	return adjustCParamsInternal(cParams, srcSizeHint, dictSize, mode, p.useRowMatchFinder)
+}
+
+// cctxParamsInit. C: zstd_compress.c:ZSTD_CCtxParams_init
+func cctxParamsInit(p *cctxParams, level int) {
+	*p = cctxParams{compressionLevel: level}
+	p.fParams.contentSizeFlag = true
+}
+
+// maxNbSeq. C: zstd_compress.c:ZSTD_maxNbSeq (no external sequence producer)
+func maxNbSeq(blockSize int, minMatch uint32) int {
+	divider := 4
+	if minMatch == 3 {
+		divider = 3
+	}
+	return blockSize / divider
+}
+
+/*-*************************************
+*  Context
+***************************************/
+
+// compressionStage. C: zstd_compress_internal.h:ZSTD_compressionStage_e
+type compressionStage int
+
+const (
+	csCreated compressionStage = iota
+	csInit
+	csOngoing
+	csEnding
+)
+
+// blockState. C: zstd_compress_internal.h:ZSTD_blockState_t
+type blockState struct {
+	prevCBlock *compressedBlockState
+	nextCBlock *compressedBlockState
+	matchState matchState
+}
+
+// cctx is a compression context. C: zstd_compress_internal.h:ZSTD_CCtx_s
+//
+// C carves every table and buffer out of one workspace (ZSTD_cwksp). Here
+// they are plain slices kept across compressions and regrown when too small.
+// That cannot change output: C's tables are either zeroed or hold indices
+// from earlier compressions, which are all below the new window's lowLimit
+// and so rejected exactly like zeros (see resetMatchState).
+type cctx struct {
+	requestedParams cctxParams
+	appliedParams   cctxParams
+
+	pledgedSrcSizePlusOne uint64 // this way, 0 (default) == unknown
+	consumedSrcSize       uint64
+	producedCSize         uint64
+	blockSizeMax          int
+	stage                 compressionStage
+	isFirstBlock          bool
+	initialized           bool
+	dictID                uint32
+
+	xxhState *xxhash.Digest
+
+	blockState blockState
+	cBlocks    [2]compressedBlockState
+	seqStore   seqStore
+
+	tmpWorkspace []byte // C: tmpWorkspace, used for entropy
+	bmi2         bool
+}
+
+// newCCtx returns a context with default parameters (level 3, content size
+// flag on, no checksum). C: zstd_compress.c:ZSTD_createCCtx
+func newCCtx() *cctx {
+	c := &cctx{xxhState: xxhash.New(0)}
+	cctxParamsInit(&c.requestedParams, clevelDefault)
+	c.blockState.prevCBlock = &c.cBlocks[0]
+	c.blockState.nextCBlock = &c.cBlocks[1]
+	return c
+}
+
+// setLevel sets the compression level; 0 means the default (3) and values
+// are clamped to [minCLevel, maxCLevel].
+// C: zstd_compress.c:ZSTD_CCtxParams_setParameter(ZSTD_c_compressionLevel)
+func (c *cctx) setLevel(level int) {
+	level = min(max(level, minCLevel), maxCLevel)
+	if level == 0 {
+		level = clevelDefault
+	}
+	c.requestedParams.compressionLevel = level
+}
+
+// setChecksum. C: ZSTD_CCtxParams_setParameter(ZSTD_c_checksumFlag)
+func (c *cctx) setChecksum(on bool) { c.requestedParams.fParams.checksumFlag = on }
+
+// setWindowLog overrides the level's window log; 0 restores the default.
+// C: ZSTD_CCtxParams_setParameter(ZSTD_c_windowLog)
+func (c *cctx) setWindowLog(windowLog uint32) error {
+	if windowLog != 0 && (windowLog < windowLogMin || windowLog > windowLogMax) {
+		return errors.New("zstd: window log out of range")
+	}
+	c.requestedParams.cParams.windowLog = windowLog
+	return nil
+}
+
+// setPledgedSrcSize declares the size of the next frame's content.
+// compress2 ignores it: like C's ZSTD_compress2 it pledges len(src).
+// C: zstd_compress.c:ZSTD_CCtx_setPledgedSrcSize
+func (c *cctx) setPledgedSrcSize(n uint64) { c.pledgedSrcSizePlusOne = n + 1 }
+
+// reset abandons the current frame, keeping the parameters.
+// C: zstd_compress.c:ZSTD_CCtx_reset(ZSTD_reset_session_only)
+func (c *cctx) reset() { c.pledgedSrcSizePlusOne = 0 }
+
+// compress2 compresses src into one frame appended to dst, with the
+// requested parameters and the content size pledged.
+// C: zstd_compress.c:ZSTD_compress2, via ZSTD_compressStream2(ZSTD_e_end):
+// ZSTD_CCtx_init_compressStream2, then ZSTD_compressStream_generic's
+// shortcut that compresses straight into the output buffer. Its capacity is
+// ZSTD_compressBound(len(src)), what a caller sizing dst with
+// ZSTD_compressBound gives C (output can depend on it only through
+// dstSize_tooSmall fallbacks, which this capacity rules out except where C
+// would hit them too).
+func (c *cctx) compress2(dst, src []byte) ([]byte, error) {
+	c.reset()
+	c.pledgedSrcSizePlusOne = uint64(len(src)) + 1 // auto-determine pledgedSrcSize
+	if err := c.initCompressStream2(); err != nil {
+		return dst, err
+	}
+	n0 := len(dst)
+	dst = slices.Grow(dst, compressBound(len(src)))
+	out := dst[n0 : n0+compressBound(len(src))]
+	n, err := c.compressEnd(out, src)
+	c.reset()
+	if err != nil {
+		return dst[:n0], err
+	}
+	return dst[:n0+n], nil
+}
+
+// initCompressStream2 resolves the parameters for the pledged size and
+// starts a frame. C: zstd_compress.c:ZSTD_CCtx_init_compressStream2 (no
+// dictionary, single-threaded).
+func (c *cctx) initCompressStream2() error {
+	params := c.requestedParams
+	pledgedSrcSize := c.pledgedSrcSizePlusOne - 1
+	params.cParams = getCParamsFromCCtxParams(&params, pledgedSrcSize, 0, cpmNoAttachDict)
+	params.postBlockSplitter = resolveBlockSplitterMode(params.postBlockSplitter, &params.cParams)
+	params.useRowMatchFinder = resolveRowMatchFinderMode(params.useRowMatchFinder, &params.cParams)
+	params.maxBlockSize = resolveMaxBlockSize(params.maxBlockSize)
+	return c.compressBeginInternal(&params, pledgedSrcSize)
+}
+
+// compressBeginInternal. C: zstd_compress.c:ZSTD_compressBegin_internal
+// (no dictionary: ZSTD_compress_insertDictionary returns dictID 0).
+func (c *cctx) compressBeginInternal(params *cctxParams, pledgedSrcSize uint64) error {
+	c.resetCCtxInternal(params, pledgedSrcSize, 0)
+	c.dictID = 0
+	return nil
+}
+
+// indexTooCloseToMax prefers clearing the tables over reducing indices when
+// reusing a context for many small inputs.
+// C: zstd_compress.c:ZSTD_indexTooCloseToMax
+func indexTooCloseToMax(w *window) bool {
+	return w.nextSrc > currentMax-indexOverflowMargin
+}
+
+// dictTooBig. C: zstd_compress.c:ZSTD_dictTooBig
+func dictTooBig(loadedDictSize int) bool { return loadedDictSize > chunkSizeMax }
+
+// resetCCtxInternal prepares the context for a new frame. params are
+// assumed fully validated. C: zstd_compress.c:ZSTD_resetCCtx_internal with
+// ZSTDcrp_makeClean.
+//
+// Deviation: C also restarts the indices (ZSTDirp_reset) whenever it
+// reallocates its workspace (too small, or oversized for too long). This
+// port grows its slices independently and restarts only for the other
+// reasons. That cannot change output: restarting or continuing shifts every
+// index of the new frame uniformly, all window arithmetic is relative, and
+// old table entries stay below lowLimit either way.
+func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, loadedDictSize int) {
+	c.isFirstBlock = true
+	c.appliedParams = *params
+	params = &c.appliedParams
+
+	windowSize := max(1, min(uint64(1)<<params.cParams.windowLog, pledgedSrcSize))
+	blockSize := min(params.maxBlockSize, int(windowSize))
+	nbSeq := maxNbSeq(blockSize, params.cParams.minMatch)
+
+	needsIndexReset := indexTooCloseToMax(&c.blockState.matchState.window) || dictTooBig(loadedDictSize) || !c.initialized
+
+	// init params
+	c.blockState.matchState.cParams = params.cParams
+	c.pledgedSrcSizePlusOne = pledgedSrcSize + 1
+	c.consumedSrcSize = 0
+	c.producedCSize = 0
+	if pledgedSrcSize == contentSizeUnknown {
+		c.appliedParams.fParams.contentSizeFlag = false
+	}
+	c.blockSizeMax = blockSize
+
+	c.xxhState.Reset()
+	c.stage = csInit
+	c.dictID = 0
+
+	resetCompressedBlockState(c.blockState.prevCBlock)
+	resetMatchState(&c.blockState.matchState, &params.cParams, params.useRowMatchFinder, needsIndexReset)
+
+	// sequences storage
+	ss := &c.seqStore
+	if cap(ss.sequences) < nbSeq {
+		ss.sequences = make([]seqDef, 0, nbSeq)
+		ss.llCode = make([]byte, nbSeq)
+		ss.mlCode = make([]byte, nbSeq)
+		ss.ofCode = make([]byte, nbSeq)
+	}
+	if cap(ss.literals) < blockSize {
+		ss.literals = make([]byte, 0, blockSize)
+	}
+	if c.tmpWorkspace == nil {
+		c.tmpWorkspace = make([]byte, entropyWorkspaceSize)
+	}
+	c.initialized = true
+}
+
+// resizeTable returns t with n entries, reusing its storage when possible.
+// Entries kept from an earlier use are stale indices below the window.
+func resizeTable(t []uint32, n int) []uint32 {
+	if cap(t) < n {
+		return make([]uint32, n)
+	}
+	return t[:n]
+}
+
+// resetMatchState. C: zstd_compress.c:ZSTD_reset_matchState for a CCtx
+// with ZSTDcrp_makeClean. C zeroes the tables when the indices restart
+// (ZSTDirp_reset marks them dirty, then cleans them) and otherwise leaves
+// whatever earlier compressions stored; so does this port. (Row-based
+// tag tables and optimal-parser space arrive with those strategies.)
+func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatchFinder paramSwitch, forceResetIndex bool) {
+	// disable chain table allocation for fast or row-based strategies
+	var chainSize int
+	if allocateChainTable(cParams.strategy, useRowMatchFinder, false) {
+		chainSize = 1 << cParams.chainLog
+	}
+	hSize := 1 << cParams.hashLog
+	var hashLog3 uint32
+	if cParams.minMatch == 3 {
+		hashLog3 = min(hashLog3Max, cParams.windowLog)
+	}
+	var h3Size int
+	if hashLog3 != 0 {
+		h3Size = 1 << hashLog3
+	}
+
+	if forceResetIndex {
+		windowInit(&ms.window)
+	}
+	ms.hashLog3 = hashLog3
+
+	// C: ZSTD_invalidateMatchState
+	windowClear(&ms.window)
+	ms.nextToUpdate = ms.window.dictLimit
+	ms.loadedDictEnd = 0
+
+	ms.hashTable = resizeTable(ms.hashTable, hSize)
+	ms.chainTable = resizeTable(ms.chainTable, chainSize)
+	ms.hashTable3 = resizeTable(ms.hashTable3, h3Size)
+	if forceResetIndex {
+		clear(ms.hashTable)
+		clear(ms.chainTable)
+		clear(ms.hashTable3)
+	}
+	ms.cParams = *cParams
+}
+
+/*-*************************************
+*  Index reduction
+***************************************/
+
+// reduceTable reduces table indexes by reducerValue, or squashes them to
+// zero. preserveMark preserves the "unsorted mark" of btlazy2.
+// C: zstd_compress.c:ZSTD_reduceTable_internal
+func reduceTable(table []uint32, reducerValue uint32, preserveMark bool) {
+	// Protect special index values < windowStartIndex.
+	reducerThreshold := reducerValue + windowStartIndex
+	for i, v := range table {
+		switch {
+		case preserveMark && v == dubtUnsortedMark:
+			// keep
+		case v < reducerThreshold:
+			table[i] = 0
+		default:
+			table[i] = v - reducerValue
+		}
+	}
+}
+
+// reduceIndex rescales all indexes to avoid future overflow.
+// C: zstd_compress.c:ZSTD_reduceIndex
+func reduceIndex(ms *matchState, params *cctxParams, reducerValue uint32) {
+	reduceTable(ms.hashTable, reducerValue, false)
+	if allocateChainTable(params.cParams.strategy, params.useRowMatchFinder, false) {
+		reduceTable(ms.chainTable, reducerValue, params.cParams.strategy == zstdBtlazy2)
+	}
+	if ms.hashLog3 != 0 {
+		reduceTable(ms.hashTable3, reducerValue, false)
+	}
+}
+
+// overflowCorrectIfNeeded. ipIdx and iendIdx are C's ip - base and iend -
+// base. C: zstd_compress.c:ZSTD_overflowCorrectIfNeeded
+func overflowCorrectIfNeeded(ms *matchState, params *cctxParams, ipIdx, iendIdx uint32) {
+	cycleLog := cycleLog(params.cParams.chainLog, params.cParams.strategy)
+	maxDist := uint32(1) << params.cParams.windowLog
+	if windowNeedOverflowCorrection(&ms.window, cycleLog, maxDist, ms.loadedDictEnd, ipIdx, iendIdx) {
+		correction := windowCorrectOverflow(&ms.window, cycleLog, maxDist, ipIdx)
+		reduceIndex(ms, params, correction)
+		if ms.nextToUpdate < correction {
+			ms.nextToUpdate = 0
+		} else {
+			ms.nextToUpdate -= correction
+		}
+		// invalidate dictionaries on overflow correction
+		ms.loadedDictEnd = 0
+	}
+}
+
+/*-*************************************
+*  Block compression
+***************************************/
+
+// blockCompressor finds the sequences of the block src, whose first byte is
+// at index srcIdx of ms.window, stores them into ss and returns the number
+// of trailing literals. rep holds the repcodes in and out.
+// C: zstd_compress_internal.h:ZSTD_BlockCompressor_f
+type blockCompressor func(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) (lastLLSize int)
+
+// selectBlockCompressor returns the match finder for a strategy, or nil for
+// strategies this port does not have yet.
+// C: zstd_compress.c:ZSTD_selectBlockCompressor
+func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) blockCompressor {
+	if mode == noDict && strat == zstdFast {
+		return compressBlockFast
+	}
+	return nil
+}
+
+var errStrategyUnsupported = errors.New("zstd: compression strategy not implemented")
+
+// buildSeqStore result. C: zstd_compress.c:ZSTD_buildSeqStore_e
+const (
+	bssCompress   = iota // C: ZSTDbss_compress
+	bssNoCompress        // C: ZSTDbss_noCompress
+)
+
+// buildSeqStore runs the match finder over the block src at srcIdx.
+// C: zstd_compress.c:ZSTD_buildSeqStore (no LDM, no external sequences)
+func (c *cctx) buildSeqStore(src []byte, srcIdx uint32) (int, error) {
+	ms := &c.blockState.matchState
+	// See C issue 3090. MIN_CBLOCK_SIZE was reduced from 3 to 2, so 1 is
+	// added to compensate. This guard also keeps the entropy stage's
+	// maxCSize positive (see entropyCompressSeqStoreWExtLitBuffer).
+	if len(src) < minCBlockSize+blockHeaderSize+1+1 {
+		return bssNoCompress, nil // don't even attempt compression below a certain srcSize
+	}
+	resetSeqStore(&c.seqStore)
+
+	// limited update after a very long match
+	curr := srcIdx
+	if curr > ms.nextToUpdate+384 {
+		ms.nextToUpdate = curr - min(192, curr-ms.nextToUpdate-384)
+	}
+
+	// select and store sequences
+	mode := matchStateDictMode(ms)
+	c.blockState.nextCBlock.rep = c.blockState.prevCBlock.rep
+	compressor := selectBlockCompressor(c.appliedParams.cParams.strategy,
+		rowMatchFinderUsed(c.appliedParams.cParams.strategy, c.appliedParams.useRowMatchFinder), mode)
+	if compressor == nil {
+		return 0, errStrategyUnsupported
+	}
+	lastLLSize := compressor(ms, &c.seqStore, &c.blockState.nextCBlock.rep, src, srcIdx)
+	// C: ZSTD_storeLastLiterals
+	c.seqStore.literals = append(c.seqStore.literals, src[len(src)-lastLLSize:]...)
+	return bssCompress, nil
+}
+
+// isRLE reports whether all bytes of src are equal. C: zstd_compress.c:ZSTD_isRLE
+func isRLE(src []byte) bool {
+	v := src[0]
+	for _, b := range src[1:] {
+		if b != v {
+			return false
+		}
+	}
+	return true
+}
+
+// confirmRepcodesAndEntropyTables makes the tables and repcodes the block
+// left behind current. C: ZSTD_blockState_confirmRepcodesAndEntropyTables
+func (bs *blockState) confirmRepcodesAndEntropyTables() {
+	bs.prevCBlock, bs.nextCBlock = bs.nextCBlock, bs.prevCBlock
+}
+
+// compressBlockInternal compresses the block src (at index srcIdx) into dst
+// without a block header. It returns 0 when the block should be stored raw
+// and 1 (dst[0] = the byte) for an RLE block.
+// C: zstd_compress.c:ZSTD_compressBlock_internal (no sequence collector)
+func (c *cctx) compressBlockInternal(dst, src []byte, srcIdx uint32, frame bool) (int, error) {
+	// This is an estimated upper bound for the length of an rle block. This
+	// isn't the actual upper bound. Finding the real threshold needs
+	// further investigation.
+	const rleMaxLength = 25
+	var cSize int
+
+	bss, err := c.buildSeqStore(src, srcIdx)
+	if err != nil {
+		return 0, err
+	}
+	if bss == bssCompress {
+		// encode sequences and literals
+		cSize, err = entropyCompressSeqStore(dst, &c.seqStore,
+			&c.blockState.prevCBlock.entropy, &c.blockState.nextCBlock.entropy,
+			&c.appliedParams, len(src), c.tmpWorkspace, c.bmi2)
+		if err != nil {
+			return 0, err
+		}
+		// We don't want to emit our first block as a RLE even if it
+		// qualifies because doing so will cause the decoder (cli only) to
+		// throw a "should consume all input error." This is only an issue
+		// for zstd <= v1.4.3
+		if frame && !c.isFirstBlock && cSize < rleMaxLength && isRLE(src) {
+			cSize = 1
+			dst[0] = src[0]
+		}
+	}
+
+	// C: out:
+	if cSize > 1 {
+		c.blockState.confirmRepcodesAndEntropyTables()
+	}
+	// We check that dictionaries have offset codes available for the first
+	// block. After the first block, the offcode table might not have large
+	// enough codes to represent the offsets in the data.
+	if c.blockState.prevCBlock.entropy.fse.offcodeRepeatMode == fseRepeatValid {
+		c.blockState.prevCBlock.entropy.fse.offcodeRepeatMode = fseRepeatCheck
+	}
+	return cSize, nil
+}
+
+// writeBlockHeader24 writes a 3-byte little-endian block header.
+func writeLE24(dst []byte, v uint32) {
+	dst[0] = byte(v)
+	dst[1] = byte(v >> 8)
+	dst[2] = byte(v >> 16)
+}
+
+// Block types. C: zstd_internal.h:blockType_e
+const (
+	btRaw        = 0
+	btRLE        = 1
+	btCompressed = 2
+)
+
+// noCompressBlock writes a raw block. C: zstd_compress_internal.h:ZSTD_noCompressBlock
+func noCompressBlock(dst, src []byte, lastBlock uint32) (int, error) {
+	if len(src)+blockHeaderSize > len(dst) {
+		return 0, errDstSizeTooSmall // dst buf too small for uncompressed block
+	}
+	writeLE24(dst, lastBlock+btRaw<<1+uint32(len(src))<<3)
+	copy(dst[blockHeaderSize:], src)
+	return blockHeaderSize + len(src), nil
+}
+
+// optimalBlockSize returns the size of the next block.
+// C: zstd_compress.c:ZSTD_optimalBlockSize — its pre-block splitter
+// (ZSTD_splitBlock) is ported in Task 9; until then, where C would call it
+// this returns a full block, so frames whose later full blocks C splits
+// differ from C.
+func optimalBlockSize(srcSize, blockSizeMax int, splitLevel int, savings int64) int {
+	// note: conservatively only split full blocks (128 KB) currently.
+	if srcSize < 128<<10 || blockSizeMax < 128<<10 {
+		return min(srcSize, blockSizeMax)
+	}
+	// do not split incompressible data though: require verified savings to
+	// allow pre-splitting. Note: as a consequence, the first full block is
+	// not split.
+	if savings < 3 {
+		return 128 << 10
+	}
+	if splitLevel == 1 {
+		return 128 << 10
+	}
+	return 128 << 10 // C: ZSTD_splitBlock(src, blockSizeMax, level, ...)
+}
+
+// compressFrameChunk compresses src into one or more blocks, consuming all
+// of it. The frame header is already written.
+// C: zstd_compress.c:ZSTD_compress_frameChunk (no targetCBlockSize, no
+// post-block splitter)
+func (c *cctx) compressFrameChunk(dst, src []byte, lastFrameChunk bool) (int, error) {
+	blockSizeMax := c.blockSizeMax
+	remaining := len(src)
+	ip := 0
+	op := 0
+	maxDist := uint32(1) << c.appliedParams.cParams.windowLog
+	savings := int64(c.consumedSrcSize) - int64(c.producedCSize)
+
+	if c.appliedParams.fParams.checksumFlag && len(src) > 0 {
+		c.xxhState.Write(src)
+	}
+	if c.appliedParams.postBlockSplitter == psEnable {
+		return 0, errStrategyUnsupported
+	}
+
+	for remaining > 0 {
+		ms := &c.blockState.matchState
+		blockSize := optimalBlockSize(remaining, blockSizeMax, c.appliedParams.preBlockSplitterLevel, savings)
+		var lastBlock uint32
+		if lastFrameChunk && blockSize == remaining {
+			lastBlock = 1
+		}
+
+		// See C issue 3090: 1 is added to MIN_CBLOCK_SIZE.
+		if len(dst)-op < blockHeaderSize+minCBlockSize+1 {
+			return 0, errDstSizeTooSmall // not enough space to store compressed block
+		}
+
+		// src ends at the window's nextSrc.
+		ipIdx := ms.window.nextSrc - uint32(remaining)
+		overflowCorrectIfNeeded(ms, &c.appliedParams, ipIdx, ipIdx+uint32(blockSize))
+		ipIdx = ms.window.nextSrc - uint32(remaining)
+		checkDictValidity(&ms.window, ipIdx+uint32(blockSize), maxDist, &ms.loadedDictEnd)
+		windowEnforceMaxDist(&ms.window, ipIdx, maxDist, &ms.loadedDictEnd)
+
+		// Ensure hash/chain table insertion resumes no sooner than lowlimit
+		if ms.nextToUpdate < ms.window.lowLimit {
+			ms.nextToUpdate = ms.window.lowLimit
+		}
+
+		block := src[ip : ip+blockSize]
+		cSize, err := c.compressBlockInternal(dst[op+blockHeaderSize:], block, ipIdx, true)
+		if err != nil {
+			return 0, err
+		}
+		if cSize == 0 { // block is not compressible
+			cSize, err = noCompressBlock(dst[op:], block, lastBlock)
+			if err != nil {
+				return 0, err
+			}
+		} else {
+			var cBlockHeader uint32
+			if cSize == 1 {
+				cBlockHeader = lastBlock + btRLE<<1 + uint32(blockSize)<<3
+			} else {
+				cBlockHeader = lastBlock + btCompressed<<1 + uint32(cSize)<<3
+			}
+			writeLE24(dst[op:], cBlockHeader)
+			cSize += blockHeaderSize
+		}
+
+		// savings ensures that splitting doesn't worsen expansion of
+		// incompressible data.
+		savings += int64(blockSize) - int64(cSize)
+
+		ip += blockSize
+		remaining -= blockSize
+		op += cSize
+		c.isFirstBlock = false
+	}
+
+	if lastFrameChunk && op > 0 {
+		c.stage = csEnding
+	}
+	return op, nil
+}
+
+// writeFrameHeader. C: zstd_compress.c:ZSTD_writeFrameHeader (format
+// ZSTD_f_zstd1)
+func writeFrameHeader(dst []byte, params *cctxParams, pledgedSrcSize uint64, dictID uint32) (int, error) {
+	var dictIDSizeCodeLength uint32
+	for _, lim := range []uint32{0, 255, 65535} {
+		if dictID > lim {
+			dictIDSizeCodeLength++
+		}
+	}
+	dictIDSizeCode := dictIDSizeCodeLength
+	if params.fParams.noDictIDFlag {
+		dictIDSizeCode = 0
+	}
+	var checksumFlag uint32
+	if params.fParams.checksumFlag {
+		checksumFlag = 1
+	}
+	windowSize := uint64(1) << params.cParams.windowLog
+	singleSegment := params.fParams.contentSizeFlag && windowSize >= pledgedSrcSize
+	windowLogByte := byte((params.cParams.windowLog - windowLogAbsoluteMin) << 3)
+	var fcsCode uint32
+	if params.fParams.contentSizeFlag {
+		for _, lim := range []uint64{256, 65536 + 256, 0xFFFFFFFF} {
+			if pledgedSrcSize >= lim {
+				fcsCode++
+			}
+		}
+	}
+	var ss uint32
+	if singleSegment {
+		ss = 1
+	}
+	fhd := byte(dictIDSizeCode + checksumFlag<<2 + ss<<5 + fcsCode<<6)
+
+	if len(dst) < frameHeaderSizeMax {
+		return 0, errDstSizeTooSmall // dst buf is too small to fit worst-case frame header size.
+	}
+	binary.LittleEndian.PutUint32(dst, magicNumber)
+	pos := 4
+	dst[pos] = fhd
+	pos++
+	if !singleSegment {
+		dst[pos] = windowLogByte
+		pos++
+	}
+	switch dictIDSizeCode {
+	case 1:
+		dst[pos] = byte(dictID)
+		pos++
+	case 2:
+		binary.LittleEndian.PutUint16(dst[pos:], uint16(dictID))
+		pos += 2
+	case 3:
+		binary.LittleEndian.PutUint32(dst[pos:], dictID)
+		pos += 4
+	}
+	switch fcsCode {
+	case 0:
+		if singleSegment {
+			dst[pos] = byte(pledgedSrcSize)
+			pos++
+		}
+	case 1:
+		binary.LittleEndian.PutUint16(dst[pos:], uint16(pledgedSrcSize-256))
+		pos += 2
+	case 2:
+		binary.LittleEndian.PutUint32(dst[pos:], uint32(pledgedSrcSize))
+		pos += 4
+	case 3:
+		binary.LittleEndian.PutUint64(dst[pos:], pledgedSrcSize)
+		pos += 8
+	}
+	return pos, nil
+}
+
+// compressContinueInternal. C: zstd_compress.c:ZSTD_compressContinue_internal
+// (frame mode only)
+func (c *cctx) compressContinueInternal(dst, src []byte, lastFrameChunk bool) (int, error) {
+	ms := &c.blockState.matchState
+	fhSize := 0
+	if c.stage == csCreated {
+		return 0, errors.New("zstd: missing init") // ERROR(stage_wrong)
+	}
+	if c.stage == csInit {
+		var err error
+		fhSize, err = writeFrameHeader(dst, &c.appliedParams, c.pledgedSrcSizePlusOne-1, c.dictID)
+		if err != nil {
+			return 0, err
+		}
+		dst = dst[fhSize:]
+		c.stage = csOngoing
+	}
+
+	if len(src) == 0 {
+		return fhSize, nil // do not generate an empty block if no input
+	}
+
+	if !windowUpdate(&ms.window, src, ms.forceNonContiguous) {
+		ms.forceNonContiguous = false
+		ms.nextToUpdate = ms.window.dictLimit
+	}
+
+	cSize, err := c.compressFrameChunk(dst, src, lastFrameChunk)
+	if err != nil {
+		return 0, err
+	}
+	c.consumedSrcSize += uint64(len(src))
+	c.producedCSize += uint64(cSize + fhSize)
+	if c.pledgedSrcSizePlusOne != 0 { // control src size
+		if c.consumedSrcSize+1 > c.pledgedSrcSizePlusOne {
+			return 0, errSrcSizeWrong
+		}
+	}
+	return cSize + fhSize, nil
+}
+
+// writeEpilogue ends the frame: an empty last block if none was written,
+// then the checksum. C: zstd_compress.c:ZSTD_writeEpilogue
+func (c *cctx) writeEpilogue(dst []byte) (int, error) {
+	op := 0
+	if c.stage == csCreated {
+		return 0, errors.New("zstd: init missing") // ERROR(stage_wrong)
+	}
+
+	// special case : empty frame
+	if c.stage == csInit {
+		fhSize, err := writeFrameHeader(dst, &c.appliedParams, 0, 0)
+		if err != nil {
+			return 0, err
+		}
+		op += fhSize
+		c.stage = csOngoing
+	}
+
+	if c.stage != csEnding {
+		// write one last empty block, make it the "last" block
+		if len(dst)-op < 3 {
+			return 0, errDstSizeTooSmall // no room for epilogue
+		}
+		writeLE24(dst[op:], 1+btRaw<<1)
+		op += blockHeaderSize
+	}
+
+	if c.appliedParams.fParams.checksumFlag {
+		checksum := uint32(c.xxhState.Sum64())
+		if len(dst)-op < 4 {
+			return 0, errDstSizeTooSmall // no room for checksum
+		}
+		binary.LittleEndian.PutUint32(dst[op:], checksum)
+		op += 4
+	}
+
+	c.stage = csCreated // return to "created but no init" status
+	return op, nil
+}
+
+// compressEnd compresses the last chunk of a frame and ends it.
+// C: zstd_compress.c:ZSTD_compressEnd_public
+func (c *cctx) compressEnd(dst, src []byte) (int, error) {
+	cSize, err := c.compressContinueInternal(dst, src, true)
+	if err != nil {
+		return 0, err
+	}
+	endResult, err := c.writeEpilogue(dst[cSize:])
+	if err != nil {
+		return 0, err
+	}
+	if c.pledgedSrcSizePlusOne != 0 { // control src size
+		if c.pledgedSrcSizePlusOne != c.consumedSrcSize+1 {
+			return 0, errSrcSizeWrong
+		}
+	}
+	return cSize + endResult, nil
 }

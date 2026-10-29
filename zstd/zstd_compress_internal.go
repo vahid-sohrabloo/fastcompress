@@ -1,7 +1,9 @@
 package zstd
 
 import (
+	"encoding/binary"
 	"errors"
+	"math/bits"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
 )
@@ -42,12 +44,28 @@ type compressionParameters struct {
 	strategy                                                        strategy
 }
 
-// cctxParams holds the applied compression parameters. C:
+// frameParameters. C: zstd.h:ZSTD_frameParameters
+type frameParameters struct {
+	contentSizeFlag bool // content size is written into the frame header when known
+	checksumFlag    bool // a 32-bit XXH64 checksum of the content ends the frame
+	noDictIDFlag    bool // no dictID is written into the frame header
+}
+
+// cctxParams holds the requested or applied compression parameters. C:
 // zstd_compress_internal.h:ZSTD_CCtx_params_s. Only the fields the ported
-// stages read are present; later stages add theirs.
+// stages read are present; later stages add theirs. The fields C has but
+// this port does not (format is always ZSTD_f_zstd1, no LDM, no external
+// sequence producer, no targetCBlockSize, no multithreading) keep their C
+// defaults implicitly.
 type cctxParams struct {
 	cParams                compressionParameters
+	fParams                frameParameters
+	compressionLevel       int
 	literalCompressionMode paramSwitch
+	useRowMatchFinder      paramSwitch
+	postBlockSplitter      paramSwitch
+	preBlockSplitterLevel  int
+	maxBlockSize           int // 0 = default (C: ZSTD_resolveMaxBlockSize)
 }
 
 // fseRepeat. C: fse.h:FSE_repeat
@@ -145,4 +163,409 @@ func literalsCompressionIsDisabled(p *cctxParams) bool {
 	default: // psAuto
 		return p.cParams.strategy == zstdFast && p.cParams.targetLength > 0
 	}
+}
+
+// Format and parameter limits. C: zstd.h, zstd_internal.h and
+// zstd_compress_internal.h. This port always uses the 64-bit values.
+const (
+	magicNumber          = 0xFD2FB528 // C: ZSTD_MAGICNUMBER
+	blockSizeLogMax      = 17         // C: ZSTD_BLOCKSIZELOG_MAX
+	blockSizeMax         = 1 << blockSizeLogMax
+	blockHeaderSize      = 3  // C: ZSTD_blockHeaderSize
+	minCBlockSize        = 2  // C: MIN_CBLOCK_SIZE (1 litCSize + 1 RLE or RAW)
+	frameHeaderSizeMax   = 18 // C: ZSTD_FRAMEHEADERSIZE_MAX
+	windowLogMax         = 31 // C: ZSTD_WINDOWLOG_MAX (64-bit)
+	windowLogMin         = 10 // C: ZSTD_WINDOWLOG_MIN
+	windowLogAbsoluteMin = 10 // C: ZSTD_WINDOWLOG_ABSOLUTEMIN
+	hashLogMin           = 6  // C: ZSTD_HASHLOG_MIN
+	targetLengthMax      = blockSizeMax
+	hashLog3Max          = 17                 // C: ZSTD_HASHLOG3_MAX
+	rowHashTagBits       = 8                  // C: ZSTD_ROW_HASH_TAG_BITS
+	minCLevel            = -targetLengthMax   // C: ZSTD_minCLevel
+	contentSizeUnknown   = ^uint64(0)         // C: ZSTD_CONTENTSIZE_UNKNOWN
+	maxInputSize         = 0xFF00FF00FF00FF00 // C: ZSTD_MAX_INPUT_SIZE (64-bit)
+
+	kSearchStrength = 8 // C: kSearchStrength
+	hashReadSize    = 8 // C: HASH_READ_SIZE
+
+	// windowStartIndex is the first valid index: indices below it are
+	// reserved. C: ZSTD_WINDOW_START_INDEX
+	windowStartIndex = 2
+	// currentMax is the largest index allowed before overflow correction
+	// (3500 MiB). C: ZSTD_CURRENT_MAX (64-bit)
+	currentMax = 3500 << 20
+	// chunkSizeMax is the most input that can be indexed without another
+	// overflow check. C: ZSTD_CHUNKSIZE_MAX
+	chunkSizeMax = 1<<32 - 1 - currentMax
+	// indexOverflowMargin. C: zstd_compress.c:ZSTD_INDEXOVERFLOW_MARGIN
+	indexOverflowMargin = 16 << 20
+	// windowOverflowCorrectFrequently. C: ZSTD_WINDOW_OVERFLOW_CORRECT_FREQUENTLY
+	// (0 outside fuzzing builds).
+	windowOverflowCorrectFrequently = false
+	// dubtUnsortedMark. C: ZSTD_DUBT_UNSORTED_MARK
+	dubtUnsortedMark = 1
+)
+
+// errSrcSizeWrong. C: ERROR(srcSize_wrong)
+var errSrcSizeWrong = errors.New("zstd: src size is incorrect")
+
+// repStartValue. C: zstd_internal.h:repStartValue
+var repStartValue = [repNum]uint32{1, 4, 8}
+
+// compressBound is the maximum compressed size of a single-pass frame of
+// srcSize bytes. C: zstd.h:ZSTD_COMPRESSBOUND
+func compressBound(srcSize int) int {
+	if uint64(srcSize) >= maxInputSize {
+		return 0
+	}
+	b := srcSize + srcSize>>8
+	if srcSize < 128<<10 {
+		b += (128<<10 - srcSize) >> 11
+	}
+	return b
+}
+
+// Offset-base helpers. C: zstd_compress_internal.h
+const repcode1ToOffBase = 1 // C: REPCODE1_TO_OFFBASE
+
+// offsetToOffBase. C: OFFSET_TO_OFFBASE
+func offsetToOffBase(o uint32) uint32 { return o + repNum }
+
+// compressedBlockState. C: zstd_compress_internal.h:ZSTD_compressedBlockState_t
+type compressedBlockState struct {
+	entropy entropyCTables
+	rep     [repNum]uint32
+}
+
+// resetCompressedBlockState. C: zstd_compress.c:ZSTD_reset_compressedBlockState
+func resetCompressedBlockState(bs *compressedBlockState) {
+	bs.rep = repStartValue
+	bs.entropy.huf.repeatMode = huf.RepeatNone
+	bs.entropy.fse.offcodeRepeatMode = fseRepeatNone
+	bs.entropy.fse.matchlengthRepeatMode = fseRepeatNone
+	bs.entropy.fse.litlengthRepeatMode = fseRepeatNone
+}
+
+// window tracks the indexed history. C: zstd_compress_internal.h:ZSTD_window_t
+//
+// Indices are uint32, exactly as in C. C's pointer base (all regular indices
+// are relative to it) may point before the buffer, which a Go slice cannot,
+// so it is represented by the buffer holding the current prefix segment plus
+// that buffer's first index: C's `base + idx` is base[idx-baseIdx], computed
+// with uint32 wrap-around like C's pointer arithmetic. dictBase/dictBaseIdx
+// represent C's dictBase the same way. nextSrc is C's nextSrc - base (the
+// index one past the last byte of the prefix).
+type window struct {
+	base                  []byte
+	baseIdx               uint32
+	dictBase              []byte
+	dictBaseIdx           uint32
+	nextSrc               uint32
+	dictLimit             uint32 // below that point, need extDict
+	lowLimit              uint32 // below that point, no more valid data
+	nbOverflowCorrections uint32
+}
+
+// at returns the position in w.base of index idx (C: base + idx).
+func (w *window) at(idx uint32) int { return int(idx - w.baseIdx) }
+
+// windowInit. C: zstd_compress_internal.h:ZSTD_window_init — C points base
+// and dictBase at a dummy string; nil can never compare equal to an input.
+func windowInit(w *window) {
+	*w = window{
+		dictLimit: windowStartIndex,
+		lowLimit:  windowStartIndex,
+		nextSrc:   windowStartIndex,
+	}
+}
+
+// windowClear empties the history. C: ZSTD_window_clear
+func windowClear(w *window) {
+	end := w.nextSrc
+	w.lowLimit = end
+	w.dictLimit = end
+}
+
+// windowHasExtDict. C: ZSTD_window_hasExtDict
+func windowHasExtDict(w *window) bool { return w.lowLimit < w.dictLimit }
+
+// windowCanOverflowCorrect. C: ZSTD_window_canOverflowCorrect. srcIdx is
+// C's src - window.base.
+func windowCanOverflowCorrect(w *window, cycleLog, maxDist, loadedDictEnd, srcIdx uint32) bool {
+	cycleSize := uint32(1) << cycleLog
+	curr := srcIdx
+	minIndexToOverflowCorrect := cycleSize + max(maxDist, cycleSize) + windowStartIndex
+	// Adjust the min index to backoff the overflow correction frequency, so
+	// we don't waste too much CPU in overflow correction. If this
+	// computation overflows we don't really care, we just need to make sure
+	// it is at least minIndexToOverflowCorrect.
+	adjustment := w.nbOverflowCorrections + 1
+	adjustedIndex := max(minIndexToOverflowCorrect*adjustment, minIndexToOverflowCorrect)
+	indexLargeEnough := curr > adjustedIndex
+	// Only overflow correct early if the dictionary is invalidated already,
+	// so we don't hurt compression ratio.
+	dictionaryInvalidated := curr > maxDist+loadedDictEnd
+	return indexLargeEnough && dictionaryInvalidated
+}
+
+// windowNeedOverflowCorrection. C: ZSTD_window_needOverflowCorrection.
+// srcIdx and srcEndIdx are C's src - base and srcEnd - base.
+func windowNeedOverflowCorrection(w *window, cycleLog, maxDist, loadedDictEnd, srcIdx, srcEndIdx uint32) bool {
+	curr := srcEndIdx
+	if windowOverflowCorrectFrequently {
+		if windowCanOverflowCorrect(w, cycleLog, maxDist, loadedDictEnd, srcIdx) {
+			return true
+		}
+	}
+	return curr > currentMax
+}
+
+// windowCorrectOverflow reduces the indices to protect from index overflow
+// and returns the correction, which must be applied to every stored index.
+// The least significant cycleLog bits of the indices remain the same; every
+// index up to maxDist in the past remains valid. srcIdx is C's src - base.
+// C: ZSTD_window_correctOverflow
+func windowCorrectOverflow(w *window, cycleLog, maxDist, srcIdx uint32) uint32 {
+	cycleSize := uint32(1) << cycleLog
+	cycleMask := cycleSize - 1
+	curr := srcIdx
+	currentCycle := curr & cycleMask
+	// Ensure newCurrent - maxDist >= windowStartIndex.
+	var currentCycleCorrection uint32
+	if currentCycle < windowStartIndex {
+		currentCycleCorrection = max(cycleSize, windowStartIndex)
+	}
+	newCurrent := currentCycle + currentCycleCorrection + max(maxDist, cycleSize)
+	correction := curr - newCurrent
+
+	// C: base += correction; dictBase += correction.
+	w.baseIdx -= correction
+	w.dictBaseIdx -= correction
+	w.nextSrc -= correction // C's nextSrc pointer is unchanged; its index moves
+	if w.lowLimit < correction+windowStartIndex {
+		w.lowLimit = windowStartIndex
+	} else {
+		w.lowLimit -= correction
+	}
+	if w.dictLimit < correction+windowStartIndex {
+		w.dictLimit = windowStartIndex
+	} else {
+		w.dictLimit -= correction
+	}
+	w.nbOverflowCorrections++
+	return correction
+}
+
+// windowEnforceMaxDist updates lowLimit so that blockEndIdx - lowLimit <=
+// maxDist + loadedDictEnd, and invalidates the dictionary once the input has
+// progressed beyond the window. loadedDictEnd may be nil (no dictionary).
+// blockEndIdx is C's blockEnd - base. C: ZSTD_window_enforceMaxDist (the
+// dictMatchState pointer arrives with dictionary support).
+func windowEnforceMaxDist(w *window, blockEndIdx, maxDist uint32, loadedDictEnd *uint32) {
+	var lde uint32
+	if loadedDictEnd != nil {
+		lde = *loadedDictEnd
+	}
+	if blockEndIdx > maxDist+lde {
+		newLowLimit := blockEndIdx - maxDist
+		if w.lowLimit < newLowLimit {
+			w.lowLimit = newLowLimit
+		}
+		if w.dictLimit < w.lowLimit {
+			w.dictLimit = w.lowLimit
+		}
+		// On reaching window size, dictionaries are invalidated
+		if loadedDictEnd != nil {
+			*loadedDictEnd = 0
+		}
+	}
+}
+
+// checkDictValidity invalidates the dictionary when the input progresses
+// beyond the window size or the window is no longer contiguous with it.
+// C: ZSTD_checkDictValidity (the dictMatchState pointer arrives with
+// dictionary support).
+func checkDictValidity(w *window, blockEndIdx, maxDist uint32, loadedDictEnd *uint32) {
+	if blockEndIdx > *loadedDictEnd+maxDist || *loadedDictEnd != w.dictLimit {
+		*loadedDictEnd = 0
+	}
+}
+
+// arrayEnd returns the address of the last element of b's backing array, which
+// identifies the array for slices that were not cut with a 3-index slice
+// expression.
+func arrayEnd(b []byte) *byte {
+	if cap(b) == 0 {
+		return nil
+	}
+	return &b[:cap(b)][cap(b)-1]
+}
+
+// windowUpdate appends src to the window. If src does not directly follow
+// the prefix, the prefix becomes the extDict and the old extDict is
+// forgotten. It reports whether src was contiguous. C: ZSTD_window_update
+//
+// C compares raw pointers. Here src continues the prefix when it starts at
+// the byte after the prefix in the same backing array; the overlap check
+// below likewise only applies to slices of one array (two arrays never
+// overlap).
+func windowUpdate(w *window, src []byte, forceNonContiguous bool) bool {
+	if len(src) == 0 {
+		return true
+	}
+	contiguous := true
+	next := w.at(w.nextSrc)
+	if forceNonContiguous || cap(w.base) < next+len(src) || &w.base[:next+1][next] != &src[0] {
+		// not contiguous
+		distanceFromBase := w.nextSrc
+		w.lowLimit = w.dictLimit
+		w.dictLimit = distanceFromBase
+		w.dictBase, w.dictBaseIdx = w.base, w.baseIdx
+		w.base, w.baseIdx = src, distanceFromBase // C: base = ip - distanceFromBase
+		if w.dictLimit-w.lowLimit < hashReadSize {
+			w.lowLimit = w.dictLimit // too small extDict
+		}
+		contiguous = false
+	} else {
+		w.base = w.base[:next+len(src)]
+	}
+	w.nextSrc += uint32(len(src))
+	// if input and dictionary overlap : reduce dictionary (area presumed modified by input)
+	if e := arrayEnd(src); e != nil && e == arrayEnd(w.dictBase) {
+		// Positions relative to the end of the shared array.
+		ip := -cap(src)
+		dictAt := func(idx uint32) int { return -cap(w.dictBase) + int(idx-w.dictBaseIdx) }
+		if ip+len(src) > dictAt(w.lowLimit) && ip < dictAt(w.dictLimit) {
+			highInputIdx := ip + len(src) - dictAt(0) // C: (ip + srcSize) - dictBase
+			lowLimitMax := w.dictLimit
+			if highInputIdx <= int(w.dictLimit) {
+				lowLimitMax = uint32(highInputIdx)
+			}
+			w.lowLimit = lowLimitMax
+		}
+	}
+	return contiguous
+}
+
+// dictMode. C: zstd_compress_internal.h:ZSTD_dictMode_e
+type dictMode int
+
+const (
+	noDict dictMode = iota
+	extDict
+	dictMatchState
+	dedicatedDictSearch
+)
+
+// matchState. C: zstd_compress_internal.h:ZSTD_MatchState_t (the fields the
+// ported strategies use; later strategies and dictionaries add theirs).
+type matchState struct {
+	window window
+	// loadedDictEnd is the index of the end of the dictionary, within the
+	// context's referential; 0 when no dictionary is in use.
+	loadedDictEnd uint32
+	// nextToUpdate is the index from which to continue table updates.
+	nextToUpdate uint32
+	hashLog3     uint32 // dispatch table for matches of len==3 : larger == faster, more memory
+
+	hashTable  []uint32
+	hashTable3 []uint32
+	chainTable []uint32
+
+	// forceNonContiguous makes the next windowUpdate start a new segment.
+	forceNonContiguous bool
+
+	cParams compressionParameters
+}
+
+// matchStateDictMode. C: ZSTD_matchState_dictMode (no dictMatchState yet).
+func matchStateDictMode(ms *matchState) dictMode {
+	if windowHasExtDict(&ms.window) {
+		return extDict
+	}
+	return noDict
+}
+
+// getLowestPrefixIndex returns the lowest allowed match index in the prefix.
+// C: ZSTD_getLowestPrefixIndex
+func getLowestPrefixIndex(ms *matchState, curr uint32, windowLog uint32) uint32 {
+	maxDistance := uint32(1) << windowLog
+	lowestValid := ms.window.dictLimit
+	withinWindow := lowestValid
+	if curr-lowestValid > maxDistance {
+		withinWindow = curr - maxDistance
+	}
+	isDictionary := ms.loadedDictEnd != 0
+	// When computing the lowest prefix index we need to take the dictionary
+	// into account to handle the edge case where the dictionary and the
+	// source are contiguous in memory.
+	if isDictionary {
+		return lowestValid
+	}
+	return withinWindow
+}
+
+// count returns the length of the common prefix of b[ip:] and b[match:],
+// stopping at iEnd (match < ip). C: zstd_compress_internal.h:ZSTD_count
+// (the result does not depend on C's word-at-a-time strategy).
+func count(b []byte, ip, match, iEnd int) int {
+	start := ip
+	for ip+8 <= iEnd {
+		diff := binary.LittleEndian.Uint64(b[match:]) ^ binary.LittleEndian.Uint64(b[ip:])
+		if diff != 0 {
+			return ip - start + bits.TrailingZeros64(diff)>>3
+		}
+		ip += 8
+		match += 8
+	}
+	for ip < iEnd && b[match] == b[ip] {
+		ip++
+		match++
+	}
+	return ip - start
+}
+
+// Hash primes. C: zstd_compress_internal.h
+const (
+	prime4bytes = 2654435761
+	prime5bytes = 889523592379
+	prime6bytes = 227718039650203
+	prime7bytes = 58295818150454627
+	prime8bytes = 0xCF1BBCDCB7A56463
+)
+
+// hashPtr hashes the first mls bytes at b[i:] to hBits bits.
+// C: zstd_compress_internal.h:ZSTD_hashPtr
+func hashPtr(b []byte, i int, hBits, mls uint32) uint32 {
+	switch mls {
+	default: // 4
+		return (binary.LittleEndian.Uint32(b[i:]) * prime4bytes) >> (32 - hBits)
+	case 5:
+		return uint32(((binary.LittleEndian.Uint64(b[i:]) << (64 - 40)) * prime5bytes) >> (64 - hBits))
+	case 6:
+		return uint32(((binary.LittleEndian.Uint64(b[i:]) << (64 - 48)) * prime6bytes) >> (64 - hBits))
+	case 7:
+		return uint32(((binary.LittleEndian.Uint64(b[i:]) << (64 - 56)) * prime7bytes) >> (64 - hBits))
+	case 8:
+		return uint32((binary.LittleEndian.Uint64(b[i:]) * prime8bytes) >> (64 - hBits))
+	}
+}
+
+// storeSeq stores a sequence (litLen literals from lits, then a match of
+// matchLength bytes at offBase) into ss. offBase is a repcode 1..3 or an
+// offset + repNum. matchLength must be >= minMatch.
+// C: zstd_compress_internal.h:ZSTD_storeSeq (+ ZSTD_storeSeqOnly)
+func storeSeq(ss *seqStore, litLen int, lits []byte, offBase uint32, matchLength int) {
+	ss.literals = append(ss.literals, lits[:litLen]...)
+	n := uint32(len(ss.sequences))
+	if litLen > 0xFFFF {
+		ss.longLengthType = lltLiteralLength
+		ss.longLengthPos = n
+	}
+	mlBase := matchLength - minMatch
+	if mlBase > 0xFFFF {
+		ss.longLengthType = lltMatchLength
+		ss.longLengthPos = n
+	}
+	ss.sequences = append(ss.sequences, seqDef{offBase: offBase, litLength: uint16(litLen), mlBase: uint16(mlBase)})
 }

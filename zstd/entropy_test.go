@@ -175,24 +175,31 @@ func TestEntropyBlockCref(t *testing.T) {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	for _, level := range []int{1, 3} {
-		// C: clevels.h:ZSTD_defaultCParameters. Levels 1 and 3 use ZSTD_fast
-		// and ZSTD_dfast respectively, with targetLength 0, in all four
-		// srcSize classes (> 256 KiB, <= 256 KiB, <= 128 KiB, <= 16 KiB), and
-		// ZSTD_adjustCParams_internal never changes the strategy, so these
-		// hold for every input size.
-		params := &cctxParams{
-			cParams: compressionParameters{strategy: zstdFast, targetLength: 0},
-			// C: zstd_compress.c:ZSTD_CCtxParams_init — literalCompressionMode
-			// is ZSTD_ps_auto, which ZSTD_literalsCompressionIsDisabled
-			// resolves to "enabled" here (targetLength == 0).
-			literalCompressionMode: psAuto,
-		}
-		if level == 3 {
-			params.cParams.strategy = zstdDfast
-		}
+	for _, level := range []int{1, 3, 7, 11} {
 		for _, name := range names {
 			src := inputs[name]
+			// The real strategy for this level and size. C:
+			// zstd_compress.c:ZSTD_CCtx_init_compressStream2 →
+			// ZSTD_getCParamsFromCCtxParams (pledged size = len(src), no dict).
+			//
+			// The entropy stage reads the strategy only through these
+			// comparisons (lib/compress v1.5.7): strat < ZSTD_lazy
+			// (ZSTD_compressLiterals' HUF_flags_preferRepeat and
+			// ZSTD_selectEncodingType's repeat/basic heuristics), strat >=
+			// ZSTD_btultra (ZSTD_minGain, HUF_flags_optimalDepth) and
+			// MIN(9-strat, 3) in ZSTD_minLiteralsToCompress, which first
+			// differs at ZSTD_btopt. So lazy, lazy2 and btlazy2 behave
+			// identically here, but btopt does not: level 11 is btopt for
+			// inputs <= 16 KiB (clevels.h), so the strategy must come from
+			// getCParams rather than being fixed per level.
+			cp := getCParams(level, uint64(len(src)), 0)
+			params := &cctxParams{
+				cParams: cp,
+				// C: zstd_compress.c:ZSTD_CCtxParams_init — literalCompressionMode
+				// is ZSTD_ps_auto, which ZSTD_literalsCompressionIsDisabled
+				// resolves to "enabled" here (targetLength == 0 for fast).
+				literalCompressionMode: psAuto,
+			}
 			t.Run("L"+strconv.Itoa(level)+"/"+name, func(t *testing.T) {
 				t.Parallel()
 				testEntropyReplay(t, src, level, params)
