@@ -1,0 +1,5 @@
+ref/zstd/
+ref/cref/cref
+bench/corpus/
+*.prof
+.superpowers/
