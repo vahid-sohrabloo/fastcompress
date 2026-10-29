@@ -135,3 +135,28 @@ func TestConcurrentBlocks(t *testing.T) {
 		t.Fatal("changing WithConcurrentBlocks on reset must fail")
 	}
 }
+
+// A closed zip entry must not expose the pooled Encoder through promoted
+// methods (Flush, ReadFrom, ...), which would nil-panic or write into an
+// encoder already handed to another entry.
+func TestZipWriterAfterClose(t *testing.T) {
+	w, err := ZipCompressor()(io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := w.(interface{ Flush() error }); ok {
+		t.Fatal("zip entry writer exposes Flush")
+	}
+	if _, ok := w.(io.ReaderFrom); ok {
+		t.Fatal("zip entry writer exposes ReadFrom")
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal("second Close:", err)
+	}
+	if _, err := w.Write([]byte("x")); err == nil {
+		t.Fatal("Write after Close succeeded")
+	}
+}

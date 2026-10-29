@@ -36,32 +36,34 @@ func ZipCompressor(opts ...EOption) func(w io.Writer) (io.WriteCloser, error) {
 		} else {
 			e.Reset(w)
 		}
-		return &zipWriter{Encoder: e, pool: &pool}, nil
+		return &zipWriter{enc: e, pool: &pool}, nil
 	}
 }
 
-// zipWriter hands its Encoder back to the pool when closed.
+// zipWriter hands its Encoder back to the pool when closed. The Encoder is a
+// named field so that no other Encoder method (Flush, ReadFrom, ...) is
+// promoted: after Close it would act on a nil or re-pooled Encoder.
 type zipWriter struct {
-	*Encoder
+	enc  *Encoder
 	pool *sync.Pool
 }
 
 func (z *zipWriter) Close() error {
-	if z.Encoder == nil {
+	if z.enc == nil {
 		return nil
 	}
-	err := z.Encoder.Close()
-	z.Encoder.Reset(nil) // do not keep the entry's writer alive
-	z.pool.Put(z.Encoder)
-	z.Encoder = nil
+	err := z.enc.Close()
+	z.enc.Reset(nil) // do not keep the entry's writer alive
+	z.pool.Put(z.enc)
+	z.enc = nil
 	return err
 }
 
 func (z *zipWriter) Write(p []byte) (int, error) {
-	if z.Encoder == nil {
+	if z.enc == nil {
 		return 0, errZipClosed
 	}
-	return z.Encoder.Write(p)
+	return z.enc.Write(p)
 }
 
 var errZipClosed = errors.New("zstd: write to closed zip entry")
