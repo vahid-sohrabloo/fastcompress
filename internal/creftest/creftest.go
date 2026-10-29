@@ -258,6 +258,13 @@ func Inputs(t testing.TB) map[string][]byte {
 	}{{100, 302}, {113, 302}, {135, 303}} {
 		add("step4-"+itoa(int(v.seed))+"-"+itoa(v.p), stepFour(v.seed, v.p))
 	}
+	for _, f := range []string{"zstd-README.md", "zstd-format.md"} {
+		b, err := os.ReadFile(filepath.Join(root(), "internal", "creftest", "testdata", f))
+		if err != nil {
+			t.Fatalf("read testdata %s: %v", f, err)
+		}
+		add(f, b)
+	}
 
 	if testing.Short() {
 		return m
