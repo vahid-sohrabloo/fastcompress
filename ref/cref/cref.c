@@ -10,7 +10,13 @@
  *                   0: content size is UNKNOWN (ZSTD_CONTENTSIZE_UNKNOWN); the
  *                   frame header carries no content size.
  *   -window-log W   ZSTD_c_windowLog (default 0 = level default)
- *   -dict FILE      dictionary file (ZSTD_dct_auto unless -raw-dict 1)
+ *   -dict FILE      dictionary file (ZSTD_dct_auto unless -raw-dict 1), loaded
+ *                   once into the context with ZSTD_CCtx_loadDictionary_advanced
+ *                   (ZSTD_dlm_byCopy): C digests it into a local CDict from the
+ *                   context's parameters at the first frame (ZSTD_initLocalDict)
+ *                   and attaches or copies that CDict for every frame, as
+ *                   fastzstd's WithEncoderDict / WithEncoderDictRaw. A raw
+ *                   dictionary has ID 0 (C cannot write another ID).
  *   -raw-dict 0|1   1: load the dictionary as ZSTD_dct_rawContent
  *   -lit-mode M     ZSTD_c_literalCompressionMode: 0 auto (default),
  *                   1 ZSTD_ps_enable, 2 ZSTD_ps_disable

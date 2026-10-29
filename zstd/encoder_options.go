@@ -1,6 +1,9 @@
 package zstd
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/bits"
 	"runtime"
@@ -37,6 +40,11 @@ const (
 //	                             empty frame or nothing
 //	WithEncoderPadding           none; a skippable frame after C's frame
 //	                             (after Close's frame for the Writer)
+//	WithEncoderDict              ZSTD_CCtx_loadDictionary_advanced(dict,
+//	                             ZSTD_dlm_byCopy, ZSTD_dct_fullDict)
+//	WithEncoderDictRaw           ZSTD_CCtx_loadDictionary_advanced(content,
+//	                             ZSTD_dlm_byCopy, ZSTD_dct_rawContent), but
+//	                             the frame header carries the given ID
 type EOption func(*encoderOptions) error
 
 // encoderOptions holds the options an Encoder was created with.
@@ -49,6 +57,10 @@ type encoderOptions struct {
 	pad           int // 0 or 1 = no padding
 	noEntropy     bool
 	allLitEntropy bool
+	lowerMem      bool   // stored only, to reject a change in ResetWithOptions
+	dict          []byte // dictionary (private copy); nil = none
+	dictRaw       bool   // dict is raw content (WithEncoderDictRaw)
+	dictID        uint32 // WithEncoderDictRaw: the ID written into frame headers
 }
 
 func (o *encoderOptions) setDefault() {
@@ -304,5 +316,60 @@ func WithSingleSegment(b bool) EOption {
 //
 // C: no equivalent. Accepted and ignored; it would not change output.
 func WithLowerEncoderMem(b bool) EOption {
-	return func(o *encoderOptions) error { return nil }
+	return func(o *encoderOptions) error { o.lowerMem = b; return nil }
+}
+
+// WithEncoderDict allows to register a dictionary that will be used for the encode.
+//
+// The slice dict must be in the [dictionary format] produced by
+// "zstd --train" from the Zstandard reference implementation.
+//
+// The encoder *may* choose to use no dictionary instead for certain payloads.
+// Can be changed with ResetWithOptions.
+//
+// C: ZSTD_CCtx_loadDictionary_advanced(dict, ZSTD_dlm_byCopy,
+// ZSTD_dct_fullDict): C digests the dictionary into a CDict with the
+// context's parameters at the first frame and then starts every frame from
+// it (attaching or copying its tables). The Encoder makes that CDict once
+// and shares it between its contexts. dict is copied. A dict that is not a
+// valid zstd dictionary (no magic number, corrupted entropy tables, invalid
+// repcodes) returns an error, as C's ZSTD_dictionary_wrong and
+// ZSTD_dictionary_corrupted.
+//
+// [dictionary format]: https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#dictionary-format
+func WithEncoderDict(dict []byte) EOption {
+	return func(o *encoderOptions) error {
+		if len(dict) < 8 || binary.LittleEndian.Uint32(dict) != dictMagic {
+			return errDictionaryWrong
+		}
+		var bs compressedBlockState
+		if _, err := loadCEntropy(&bs, dict); err != nil {
+			return err
+		}
+		o.dict, o.dictRaw, o.dictID = bytes.Clone(dict), false, 0
+		return nil
+	}
+}
+
+// WithEncoderDictRaw registers a dictionary that may be used by the encoder.
+//
+// The slice content may contain arbitrary data. It will be used as an initial
+// history.
+// Can be changed with ResetWithOptions.
+//
+// C: ZSTD_CCtx_loadDictionary_advanced(content, ZSTD_dlm_byCopy,
+// ZSTD_dct_rawContent), see WithEncoderDict. C gives raw content the
+// dictionary ID 0, so its frame headers carry no ID; here they carry id
+// (none if id is 0), as the option requires. That changes only the frame
+// header: everything after the ID field is C's output. content is copied;
+// empty content returns an error (C would compress without a dictionary,
+// leaving no history to refer to).
+func WithEncoderDictRaw(id uint32, content []byte) EOption {
+	return func(o *encoderOptions) error {
+		if len(content) == 0 {
+			return errors.New("zstd: empty raw dictionary content")
+		}
+		o.dict, o.dictRaw, o.dictID = bytes.Clone(content), true, id
+		return nil
+	}
 }

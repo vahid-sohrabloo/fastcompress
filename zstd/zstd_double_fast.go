@@ -15,17 +15,22 @@ const (
 
 // fillDoubleHashTable inserts the positions of the data up to end (an index
 // into ms.window.base) into the long (hashTable) and short (chainTable) hash
-// tables, from ms.nextToUpdate. This is the ZSTD_tfp_forCCtx variant;
-// ZSTD_fillDoubleHashTableForCDict (tagged entries) comes with the CDict
-// support.
-// C: zstd_double_fast.c:ZSTD_fillDoubleHashTable (ZSTD_fillDoubleHashTableForCCtx)
-func fillDoubleHashTable(ms *matchState, end uint32, dtlm dictTableLoadMethod) {
+// tables, from ms.nextToUpdate: every third position into both, and with
+// dtlmFull the others into the long table if their entry is empty. A
+// CDict's entries are tagged (see writeTaggedIndex).
+// C: zstd_double_fast.c:ZSTD_fillDoubleHashTable
+// (ZSTD_fillDoubleHashTableForCDict and ZSTD_fillDoubleHashTableForCCtx)
+func fillDoubleHashTable(ms *matchState, end uint32, dtlm dictTableLoadMethod, tfp tableFillPurpose) {
 	cParams := &ms.cParams
 	hashLarge := ms.hashTable
 	hBitsL := cParams.hashLog
 	mls := cParams.minMatch
 	hashSmall := ms.chainTable
 	hBitsS := cParams.chainLog
+	if tfp == tfpForCDict {
+		hBitsL += shortCacheTagBits
+		hBitsS += shortCacheTagBits
+	}
 	b := ms.window.base
 	baseIdx := ms.window.baseIdx
 	const fastHashFillStep = 3
@@ -41,11 +46,20 @@ func fillDoubleHashTable(ms *matchState, end uint32, dtlm dictTableLoadMethod) {
 		for i := 0; i < fastHashFillStep; i++ {
 			smHash := hashPtr(b, ip+i, hBitsS, mls)
 			lgHash := hashPtr(b, ip+i, hBitsL, 8)
-			if i == 0 {
-				hashSmall[smHash] = curr + uint32(i)
-			}
-			if i == 0 || hashLarge[lgHash] == 0 {
-				hashLarge[lgHash] = curr + uint32(i)
+			if tfp == tfpForCDict {
+				if i == 0 {
+					writeTaggedIndex(hashSmall, smHash, curr+uint32(i))
+				}
+				if i == 0 || hashLarge[lgHash>>shortCacheTagBits] == 0 {
+					writeTaggedIndex(hashLarge, lgHash, curr+uint32(i))
+				}
+			} else {
+				if i == 0 {
+					hashSmall[smHash] = curr + uint32(i)
+				}
+				if i == 0 || hashLarge[lgHash] == 0 {
+					hashLarge[lgHash] = curr + uint32(i)
+				}
 			}
 			// Only load extra positions for dtlmFull
 			if dtlm == dtlmFast {
@@ -507,6 +521,276 @@ func compressBlockDoubleFastExtDictGeneric(ms *matchState, ss *seqStore, rep *[r
 			}
 		}
 	}
+
+	// save reps for next block
+	rep[0] = offset1
+	rep[1] = offset2
+
+	// Return the last literals size
+	return iend - anchor
+}
+
+// compressBlockDoubleFastDictMatchState is the ZSTD_dfast match finder
+// searching an attached CDict too.
+// C: zstd_double_fast.c:ZSTD_compressBlock_doubleFast_dictMatchState (mls
+// as in compressBlockDoubleFast)
+func compressBlockDoubleFastDictMatchState(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	mls := ms.cParams.minMatch
+	if mls < 4 || mls > 7 {
+		mls = 4 // includes case 3
+	}
+	return compressBlockDoubleFastDictMatchStateGeneric(ms, ss, rep, src, srcIdx, mls)
+}
+
+// compressBlockDoubleFastDictMatchStateGeneric.
+// C: zstd_double_fast.c:ZSTD_compressBlock_doubleFast_dictMatchState_generic
+//
+// Pointers become positions in the prefix ms.window.base (b) or the
+// dictionary dms.window.base (d); see compressBlockFastDictMatchStateGeneric.
+// C's gotos are the found switch (_search_next_long, _match_found,
+// _match_stored). C's prefetch of the dictionary's tables is a cache hint
+// only.
+func compressBlockDoubleFastDictMatchStateGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, mls uint32) int {
+	if dictMatchStateHook != nil {
+		dictMatchStateHook("dfast")
+	}
+	cParams := &ms.cParams
+	hashLong := ms.hashTable
+	hBitsL := cParams.hashLog
+	hashSmall := ms.chainTable
+	hBitsS := cParams.chainLog
+	b, baseIdx := ms.window.base, ms.window.baseIdx
+	istart := int(srcIdx - baseIdx)
+	ip := istart
+	anchor := istart
+	endIndex := srcIdx + uint32(len(src))
+	// presumes that, if there is a dictionary, it must be using Attach mode
+	prefixLowestIndex := getLowestPrefixIndex(ms, endIndex, cParams.windowLog)
+	prefixLowest := int(prefixLowestIndex - baseIdx)
+	iend := istart + len(src)
+	ilimit := iend - hashReadSize
+	offset1, offset2 := rep[0], rep[1]
+
+	dms := ms.dictMatchState
+	dictCParams := &dms.cParams
+	dictHashLong := dms.hashTable
+	dictHashSmall := dms.chainTable
+	dictStartIndex := dms.window.dictLimit
+	d, dictBaseIdx := dms.window.base, dms.window.baseIdx
+	dictStart := int(dictStartIndex - dictBaseIdx)
+	dictEndIdx := dms.window.nextSrc // C: dictEnd - dictBase
+	dictEnd := int(dictEndIdx - dictBaseIdx)
+	dictIndexDelta := prefixLowestIndex - dictEndIdx
+	dictHBitsL := dictCParams.hashLog + shortCacheTagBits
+	dictHBitsS := dictCParams.chainLog + shortCacheTagBits
+	dictAndPrefixLength := uint32(ip-prefixLowest) + uint32(dictEnd-dictStart)
+
+	read32 := func(s []byte, p int) uint32 { return binary.LittleEndian.Uint32(s[p:]) }
+	read64 := func(s []byte, p int) uint64 { return binary.LittleEndian.Uint64(s[p:]) }
+	idx := func(p int) uint32 { return uint32(p) + baseIdx }
+	// repAt returns the segment, position and segment end of the repcode
+	// match at index repIndex (C: repMatch and repMatchEnd).
+	repAt := func(repIndex uint32) ([]byte, int, int) {
+		if repIndex < prefixLowestIndex {
+			return d, int(repIndex - dictIndexDelta - dictBaseIdx), dictEnd
+		}
+		return b, int(repIndex - baseIdx), iend
+	}
+
+	// init
+	if dictAndPrefixLength == 0 {
+		ip++
+	}
+
+	// Main Search Loop
+	for ip < ilimit { // < instead of <=, because repcode check at (ip+1)
+		var mLength int
+		var offset uint32
+		h2 := hashPtr(b, ip, hBitsL, 8)
+		h := hashPtr(b, ip, hBitsS, mls)
+		dictHashAndTagL := hashPtr(b, ip, dictHBitsL, 8)
+		dictHashAndTagS := hashPtr(b, ip, dictHBitsS, mls)
+		dictMatchIndexAndTagL := dictHashLong[dictHashAndTagL>>shortCacheTagBits]
+		dictMatchIndexAndTagS := dictHashSmall[dictHashAndTagS>>shortCacheTagBits]
+		dictTagsMatchL := comparePackedTags(dictMatchIndexAndTagL, dictHashAndTagL)
+		dictTagsMatchS := comparePackedTags(dictMatchIndexAndTagS, dictHashAndTagS)
+		curr := idx(ip)
+		matchIndexL := hashLong[h2]
+		matchIndexS := hashSmall[h]
+		matchLong := int(matchIndexL - baseIdx)
+		matchSeg, match := b, int(matchIndexS-baseIdx)
+		repIndex := curr + 1 - offset1
+		repBase, repPos, repMatchEnd := repAt(repIndex)
+		hashLong[h2] = curr // update hash tables
+		hashSmall[h] = curr
+
+		const (
+			searchNextLong = iota + 1 // C: _search_next_long
+			matchFound                // C: _match_found
+			matchStored               // C: _match_stored
+		)
+		next := 0 // 0: no match, C's `continue`
+
+		// check repcode
+		if indexOverlapCheck(prefixLowestIndex, repIndex) && read32(repBase, repPos) == read32(b, ip+1) {
+			mLength = count2Segments(b, ip+1+4, repBase, repPos+4, iend, repMatchEnd, prefixLowest) + 4
+			ip++
+			storeSeq(ss, ip-anchor, b[anchor:], repcode1ToOffBase, mLength)
+			next = matchStored
+		}
+
+		if next == 0 {
+			if matchIndexL >= prefixLowestIndex && read64(b, matchLong) == read64(b, ip) {
+				// check prefix long match
+				mLength = count(b, ip+8, matchLong+8, iend) + 8
+				offset = uint32(ip - matchLong)
+				for ip > anchor && matchLong > prefixLowest && b[ip-1] == b[matchLong-1] {
+					ip--
+					matchLong--
+					mLength++
+				} // catch up
+				next = matchFound
+			} else if dictTagsMatchL {
+				// check dictMatchState long match
+				dictMatchIndexL := dictMatchIndexAndTagL >> shortCacheTagBits
+				dictMatchL := int(dictMatchIndexL - dictBaseIdx)
+				if dictMatchIndexL > dictStartIndex && read64(d, dictMatchL) == read64(b, ip) { // C: dictMatchL > dictStart
+					mLength = count2Segments(b, ip+8, d, dictMatchL+8, iend, dictEnd, prefixLowest) + 8
+					offset = curr - dictMatchIndexL - dictIndexDelta
+					for ip > anchor && dictMatchL > dictStart && b[ip-1] == d[dictMatchL-1] {
+						ip--
+						dictMatchL--
+						mLength++
+					} // catch up
+					next = matchFound
+				}
+			}
+		}
+
+		if next == 0 {
+			if matchIndexS > prefixLowestIndex {
+				// short match candidate
+				if read32(b, match) == read32(b, ip) {
+					next = searchNextLong
+				}
+			} else if dictTagsMatchS {
+				// check dictMatchState short match
+				dictMatchIndexS := dictMatchIndexAndTagS >> shortCacheTagBits
+				matchSeg, match = d, int(dictMatchIndexS-dictBaseIdx)
+				matchIndexS = dictMatchIndexS + dictIndexDelta
+
+				if dictMatchIndexS > dictStartIndex && read32(d, match) == read32(b, ip) { // C: match > dictStart
+					next = searchNextLong
+				}
+			}
+		}
+
+		if next == 0 {
+			ip += (ip-anchor)>>kSearchStrength + 1
+			continue
+		}
+
+		if next == searchNextLong { // C: _search_next_long
+			hl3 := hashPtr(b, ip+1, hBitsL, 8)
+			dictHashAndTagL3 := hashPtr(b, ip+1, dictHBitsL, 8)
+			matchIndexL3 := hashLong[hl3]
+			dictMatchIndexAndTagL3 := dictHashLong[dictHashAndTagL3>>shortCacheTagBits]
+			dictTagsMatchL3 := comparePackedTags(dictMatchIndexAndTagL3, dictHashAndTagL3)
+			matchL3 := int(matchIndexL3 - baseIdx)
+			hashLong[hl3] = curr + 1
+
+			// check prefix long +1 match
+			if matchIndexL3 >= prefixLowestIndex && read64(b, matchL3) == read64(b, ip+1) {
+				mLength = count(b, ip+9, matchL3+8, iend) + 8
+				ip++
+				offset = uint32(ip - matchL3)
+				for ip > anchor && matchL3 > prefixLowest && b[ip-1] == b[matchL3-1] {
+					ip--
+					matchL3--
+					mLength++
+				} // catch up
+				next = matchFound
+			} else if dictTagsMatchL3 {
+				// check dict long +1 match
+				dictMatchIndexL3 := dictMatchIndexAndTagL3 >> shortCacheTagBits
+				dictMatchL3 := int(dictMatchIndexL3 - dictBaseIdx)
+				if dictMatchIndexL3 > dictStartIndex && read64(d, dictMatchL3) == read64(b, ip+1) { // C: dictMatchL3 > dictStart
+					mLength = count2Segments(b, ip+1+8, d, dictMatchL3+8, iend, dictEnd, prefixLowest) + 8
+					ip++
+					offset = curr + 1 - dictMatchIndexL3 - dictIndexDelta
+					for ip > anchor && dictMatchL3 > dictStart && b[ip-1] == d[dictMatchL3-1] {
+						ip--
+						dictMatchL3--
+						mLength++
+					} // catch up
+					next = matchFound
+				}
+			}
+		}
+
+		if next == searchNextLong {
+			// if no long +1 match, explore the short match we found
+			if matchIndexS < prefixLowestIndex {
+				mLength = count2Segments(b, ip+4, matchSeg, match+4, iend, dictEnd, prefixLowest) + 4
+				offset = curr - matchIndexS
+				for ip > anchor && match > dictStart && b[ip-1] == matchSeg[match-1] {
+					ip--
+					match--
+					mLength++
+				} // catch up
+			} else {
+				mLength = count(b, ip+4, match+4, iend) + 4
+				offset = uint32(ip - match)
+				for ip > anchor && match > prefixLowest && b[ip-1] == b[match-1] {
+					ip--
+					match--
+					mLength++
+				} // catch up
+			}
+			next = matchFound
+		}
+
+		if next == matchFound { // C: _match_found
+			offset2 = offset1
+			offset1 = offset
+			storeSeq(ss, ip-anchor, b[anchor:], offsetToOffBase(offset), mLength)
+		}
+
+		// C: _match_stored
+		// match found
+		ip += mLength
+		anchor = ip
+
+		if ip <= ilimit {
+			// Complementary insertion
+			// done after iLimit test, as candidates could be > iend-8
+			{
+				indexToInsert := curr + 2
+				hashLong[hashPtr(b, int(indexToInsert-baseIdx), hBitsL, 8)] = indexToInsert
+				hashLong[hashPtr(b, ip-2, hBitsL, 8)] = idx(ip - 2)
+				hashSmall[hashPtr(b, int(indexToInsert-baseIdx), hBitsS, mls)] = indexToInsert
+				hashSmall[hashPtr(b, ip-1, hBitsS, mls)] = idx(ip - 1)
+			}
+
+			// check immediate repcode
+			for ip <= ilimit {
+				current2 := idx(ip)
+				repIndex2 := current2 - offset2
+				repBase2, repPos2, repEnd2 := repAt(repIndex2)
+				if indexOverlapCheck(prefixLowestIndex, repIndex2) && read32(repBase2, repPos2) == read32(b, ip) {
+					repLength2 := count2Segments(b, ip+4, repBase2, repPos2+4, iend, repEnd2, prefixLowest) + 4
+					offset2, offset1 = offset1, offset2 // swap offset_2 <=> offset_1
+					storeSeq(ss, 0, b[anchor:], repcode1ToOffBase, repLength2)
+					hashSmall[hashPtr(b, ip, hBitsS, mls)] = current2
+					hashLong[hashPtr(b, ip, hBitsL, 8)] = current2
+					ip += repLength2
+					anchor = ip
+					continue
+				}
+				break
+			}
+		}
+	} // while (ip < ilimit)
 
 	// save reps for next block
 	rep[0] = offset1

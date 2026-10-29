@@ -571,6 +571,11 @@ type cctx struct {
 
 	xxhState *xxhash.Digest
 
+	// Dictionary. C: localDict and cdict (no prefix dictionary: the
+	// referenced-prefix API is not exposed).
+	localDict localDict
+	cdict     *cdict
+
 	blockState blockState
 	cBlocks    [2]compressedBlockState
 	seqStore   seqStore
@@ -688,18 +693,29 @@ func (c *cctx) compress2(dst, src []byte) ([]byte, error) {
 // buffered selects the streaming buffers (C: ZSTD_bm_buffered in and out
 // buffer modes); compress2 compresses straight from and into the caller's
 // buffers (C: ZSTD_compress2 sets both modes to ZSTD_bm_stable).
-// C: zstd_compress.c:ZSTD_CCtx_init_compressStream2 (no dictionary,
-// single-threaded). LDM stays disabled: ZSTD_resolveEnableLdm enables it
-// only for strategy >= btopt with windowLog >= 27, which levels 1, 3, 7
-// and 11 never reach (btopt is selected only for a pledged size <= 16 KiB,
-// which caps windowLog at 14).
+// C: zstd_compress.c:ZSTD_CCtx_init_compressStream2 (single-threaded, no
+// prefix dictionary). The CDict is always the local dictionary's, so C's
+// override of the level by the CDict's does not apply. LDM stays disabled:
+// ZSTD_resolveEnableLdm enables it only for strategy >= btopt with
+// windowLog >= 27, which levels 1, 3, 7 and 11 never reach (btopt is
+// selected only for a pledged size <= 16 KiB, which caps windowLog at 14).
 func (c *cctx) initCompressStream2(endOp endDirective, inSize int, buffered bool) error {
 	params := c.requestedParams
+	if err := c.initLocalDict(); err != nil { // Init the local dict if present.
+		return err
+	}
 	if endOp == eEnd {
 		c.pledgedSrcSizePlusOne = uint64(inSize) + 1 // auto-determine pledgedSrcSize
 	}
 	pledgedSrcSize := c.pledgedSrcSizePlusOne - 1
-	params.cParams = getCParamsFromCCtxParams(&params, pledgedSrcSize, 0, cpmNoAttachDict)
+	{
+		var dictSize uint64
+		if c.cdict != nil {
+			dictSize = uint64(c.cdict.dictContentSize)
+		}
+		mode := getCParamMode(c.cdict, pledgedSrcSize)
+		params.cParams = getCParamsFromCCtxParams(&params, pledgedSrcSize, dictSize, mode)
+	}
 	params.postBlockSplitter = resolveBlockSplitterMode(params.postBlockSplitter, &params.cParams)
 	params.useRowMatchFinder = resolveRowMatchFinderMode(params.useRowMatchFinder, &params.cParams)
 	params.maxBlockSize = resolveMaxBlockSize(params.maxBlockSize)
@@ -724,11 +740,22 @@ func (c *cctx) initCompressStream2(endOp endDirective, inSize int, buffered bool
 	return nil
 }
 
-// compressBeginInternal. C: zstd_compress.c:ZSTD_compressBegin_internal
-// (no dictionary: ZSTD_compress_insertDictionary returns dictID 0).
+// compressBeginInternal starts a frame, from c.cdict if set.
+// C: zstd_compress.c:ZSTD_compressBegin_internal with the context's cdict
+// and no raw dict. C starts from the CDict (ZSTD_resetCCtx_usingCDict)
+// when its content is not empty and the source is small or of unknown size
+// or the CDict has no compression level. CDicts here always come from
+// ZSTD_initLocalDict, whose CDicts have no level (ZSTD_NO_CLEVEL), and are
+// only created for non-empty dictionaries, so every frame with a dictionary
+// starts from the CDict: C's other path, loading the dictionary content
+// into the context (ZSTD_dtlm_fast, ZSTD_tfp_forCCtx), is unreachable.
 func (c *cctx) compressBeginInternal(params *cctxParams, pledgedSrcSize uint64, buffered bool) error {
+	if cd := c.cdict; cd != nil {
+		c.resetCCtxUsingCDict(cd, params, pledgedSrcSize, buffered)
+		return nil
+	}
 	c.resetCCtxInternal(params, pledgedSrcSize, 0, buffered)
-	c.dictID = 0
+	c.dictID = 0 // C: ZSTD_compress_insertDictionary of no dictionary
 	return nil
 }
 
@@ -805,7 +832,7 @@ func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, load
 	c.dictID = 0
 
 	resetCompressedBlockState(c.blockState.prevCBlock)
-	resetMatchState(&c.blockState.matchState, &params.cParams, params.useRowMatchFinder, needsIndexReset)
+	resetMatchState(&c.blockState.matchState, &params.cParams, params.useRowMatchFinder, needsIndexReset, resetTargetCCtx)
 
 	// sequences storage
 	ss := &c.seqStore
@@ -859,22 +886,33 @@ func resizeTable(t []uint32, n int) []uint32 {
 	return t[:n]
 }
 
-// resetMatchState. C: zstd_compress.c:ZSTD_reset_matchState for a CCtx
-// with ZSTDcrp_makeClean. C zeroes the tables when the indices restart
-// (ZSTDirp_reset marks them dirty, then cleans them) and otherwise leaves
-// whatever earlier compressions stored; so does this port. The row match
-// finder's tag table is never cleaned (see resizeTagTable) and its hash
-// salt advances on every reset. The optimal parser's tables are allocated
-// for strategies >= btopt and its statistics restart on every reset.
-func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatchFinder paramSwitch, forceResetIndex bool) {
+// resetTarget. C: zstd_compress.c:ZSTD_resetTarget_e
+type resetTarget int
+
+const (
+	resetTargetCDict resetTarget = iota // C: ZSTD_resetTarget_CDict
+	resetTargetCCtx                     // C: ZSTD_resetTarget_CCtx
+)
+
+// resetMatchState. C: zstd_compress.c:ZSTD_reset_matchState with
+// ZSTDcrp_makeClean (C's ZSTDcrp_leaveDirty, for a context the CDict's
+// tables are then copied into, only skips cleaning). C zeroes the tables
+// when the indices restart (ZSTDirp_reset marks them dirty, then cleans
+// them) and otherwise leaves whatever earlier compressions stored; so does
+// this port. For a context, the row match finder's tag table is never
+// cleaned (see resizeTagTable) and its hash salt advances on every reset;
+// for a CDict, the tag table is zeroed and the salt is 0. The optimal
+// parser's tables are allocated for contexts with strategies >= btopt and
+// its statistics restart on every reset.
+func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatchFinder paramSwitch, forceResetIndex bool, forWho resetTarget) {
 	// disable chain table allocation for fast or row-based strategies
 	var chainSize int
-	if allocateChainTable(cParams.strategy, useRowMatchFinder, false) {
+	if allocateChainTable(cParams.strategy, useRowMatchFinder, false) { // dedicated dictionary search is never enabled
 		chainSize = 1 << cParams.chainLog
 	}
 	hSize := 1 << cParams.hashLog
 	var hashLog3 uint32
-	if cParams.minMatch == 3 {
+	if forWho == resetTargetCCtx && cParams.minMatch == 3 {
 		hashLog3 = min(hashLog3Max, cParams.windowLog)
 	}
 	var h3Size int
@@ -893,6 +931,7 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 	ms.nextToUpdate = ms.window.dictLimit
 	ms.loadedDictEnd = 0
 	ms.opt.litLengthSum = 0 // force reset of btopt stats
+	ms.dictMatchState = nil
 
 	ms.hashTable = resizeTable(ms.hashTable, hSize)
 	ms.chainTable = resizeTable(ms.chainTable, chainSize)
@@ -904,16 +943,24 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 	}
 
 	if rowMatchFinderUsed(cParams.strategy, useRowMatchFinder) {
-		// Row match finder needs an additional table of hashes ("tags")
-		ms.tagTable = resizeTagTable(ms.tagTable, hSize)
-		advanceHashSalt(ms)
+		// Row match finder needs an additional table of hashes ("tags").
+		// We want to generate a new salt in case we reset a Cctx, but we
+		// always want to use 0 when we reset a Cdict.
+		if forWho == resetTargetCCtx {
+			ms.tagTable = resizeTagTable(ms.tagTable, hSize)
+			advanceHashSalt(ms)
+		} else {
+			// When we are not salting we want to always memset the memory
+			ms.tagTable = make([]byte, hSize)
+			ms.hashSalt = 0
+		}
 		// Switch to 32-entry rows if searchLog is 5 (or more)
 		rowLog := min(max(cParams.searchLog, 4), 6)
 		ms.rowHashLog = cParams.hashLog - rowLog
 	}
 
 	// opt parser space
-	if cParams.strategy >= zstdBtopt && ms.opt.priceTable == nil {
+	if forWho == resetTargetCCtx && cParams.strategy >= zstdBtopt && ms.opt.priceTable == nil {
 		ms.opt.matchTable = new([optSize]optMatch)
 		ms.opt.priceTable = new([optSize]optimal)
 	}
@@ -969,6 +1016,7 @@ func overflowCorrectIfNeeded(ms *matchState, params *cctxParams, ipIdx, iendIdx 
 		}
 		// invalidate dictionaries on overflow correction
 		ms.loadedDictEnd = 0
+		ms.dictMatchState = nil
 	}
 }
 
@@ -1006,6 +1054,34 @@ func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) b
 			case zstdLazy2:
 				return compressBlockLazy2ExtDictRow
 			}
+		case dictMatchState:
+			switch strat {
+			case zstdGreedy:
+				return compressBlockGreedyDictMatchStateRow
+			case zstdLazy:
+				return compressBlockLazyDictMatchStateRow
+			case zstdLazy2:
+				return compressBlockLazy2DictMatchStateRow
+			}
+		}
+		return nil
+	}
+	if mode == dictMatchState {
+		switch strat {
+		case zstdFast:
+			return compressBlockFastDictMatchState
+		case zstdDfast:
+			return compressBlockDoubleFastDictMatchState
+		case zstdGreedy:
+			return compressBlockGreedyDictMatchState
+		case zstdLazy:
+			return compressBlockLazyDictMatchState
+		case zstdLazy2:
+			return compressBlockLazy2DictMatchState
+		case zstdBtlazy2:
+			return compressBlockBtlazy2DictMatchState
+		case zstdBtopt:
+			return compressBlockBtoptDictMatchState
 		}
 		return nil
 	}
@@ -1248,8 +1324,8 @@ func (c *cctx) compressFrameChunk(dst, src []byte, lastFrameChunk bool) (int, er
 		ipIdx := ms.window.nextSrc - uint32(remaining)
 		overflowCorrectIfNeeded(ms, &c.appliedParams, ipIdx, ipIdx+uint32(blockSize))
 		ipIdx = ms.window.nextSrc - uint32(remaining)
-		checkDictValidity(&ms.window, ipIdx+uint32(blockSize), maxDist, &ms.loadedDictEnd)
-		windowEnforceMaxDist(&ms.window, ipIdx, maxDist, &ms.loadedDictEnd)
+		checkDictValidity(&ms.window, ipIdx+uint32(blockSize), maxDist, &ms.loadedDictEnd, &ms.dictMatchState)
+		windowEnforceMaxDist(&ms.window, ipIdx, maxDist, &ms.loadedDictEnd, &ms.dictMatchState)
 
 		// Ensure hash/chain table insertion resumes no sooner than lowlimit
 		if ms.nextToUpdate < ms.window.lowLimit {

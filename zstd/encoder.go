@@ -25,9 +25,11 @@ import (
 // and where Close falls, do matter). A Write of no bytes makes no call; a
 // stream with nothing written produces no output unless WithZeroFrames is
 // set. An Encoder must not be used for streaming from several goroutines
-// at once, nor be reset while EncodeAll calls are running.
+// at once, and ResetWithOptions must not run while EncodeAll calls are
+// running.
 type Encoder struct {
 	o     encoderOptions
+	cd    *cdict    // the dictionary of o, digested; shared by all contexts
 	cctxs sync.Pool // *cctx configured from o; one per concurrent EncodeAll
 	s     encStream
 }
@@ -62,7 +64,43 @@ func NewWriter(w io.Writer, opts ...EOption) (*Encoder, error) {
 	e.cctxs.New = func() any { return e.newCCtx() }
 	e.s.w = w
 	e.s.pledged = -1
+	if err := e.makeCDict(); err != nil {
+		return nil, err
+	}
 	return e, nil
+}
+
+// makeCDict digests the dictionary of e.o (if any) into e.cd, as C's
+// ZSTD_initLocalDict does at a context's first frame: from the context's
+// requested parameters, which depend only on the level and window size,
+// neither of which ResetWithOptions can change.
+func (e *Encoder) makeCDict() error {
+	e.cd = nil
+	if e.o.dict == nil {
+		return nil
+	}
+	c := newCCtx()
+	e.configure(c)
+	cd, err := createCDictAdvanced2(e.o.dict, e.dictContentType(), &c.requestedParams)
+	if err != nil {
+		return err
+	}
+	if e.o.dictRaw {
+		// C: zstd_compress.c:ZSTD_compress_insertDictionary — raw content
+		// has dictID 0 in C; WithEncoderDictRaw's ID goes into the frame
+		// header instead (it is used nowhere else).
+		cd.dictID = e.o.dictID
+	}
+	e.cd = cd
+	return nil
+}
+
+// dictContentType is the C content type of e.o.dict.
+func (e *Encoder) dictContentType() dictContentType {
+	if e.o.dictRaw {
+		return dctRawContent
+	}
+	return dctFullDict
 }
 
 // newCCtx returns a compression context with the Encoder's C parameters.
@@ -78,6 +116,11 @@ func (e *Encoder) configure(c *cctx) {
 	c.setChecksum(e.o.crc)
 	_ = c.setWindowLog(e.o.windowLog) // in range: validated by WithWindowSize
 	c.requestedParams.literalCompressionMode = e.o.literalCompressionMode()
+	if e.cd != nil {
+		c.setLocalDict(e.o.dict, e.dictContentType(), e.cd)
+	} else {
+		c.clearAllDicts()
+	}
 }
 
 // EncodeAll will encode all input in src and append it to dst.
@@ -318,9 +361,10 @@ func (e *Encoder) ResetContentSize(w io.Writer, size int64) {
 // Options are applied on top of the existing options.
 // Some options cannot be changed on reset and will return an error.
 //
-// WithEncoderLevel, WithWindowSize and WithEncoderConcurrency cannot change
-// (passing their current value is allowed); on error nothing is reset. The
-// new options apply to the next stream and to EncodeAll.
+// WithEncoderLevel, WithWindowSize, WithEncoderConcurrency and
+// WithLowerEncoderMem cannot change (passing their current value is
+// allowed); on error nothing is reset. The new options apply to the next
+// stream and to EncodeAll. A new dictionary is digested here.
 func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
 	o := e.o
 	for _, opt := range opts {
@@ -328,10 +372,17 @@ func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
 			return err
 		}
 	}
-	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.concurrent != e.o.concurrent {
-		return errors.New("zstd: WithEncoderLevel, WithWindowSize and WithEncoderConcurrency cannot be changed with ResetWithOptions")
+	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.concurrent != e.o.concurrent || o.lowerMem != e.o.lowerMem {
+		return errors.New("zstd: WithEncoderLevel, WithWindowSize, WithEncoderConcurrency and WithLowerEncoderMem cannot be changed with ResetWithOptions")
 	}
+	newDict := len(o.dict) != len(e.o.dict) || len(o.dict) > 0 && &o.dict[0] != &e.o.dict[0] ||
+		o.dictRaw != e.o.dictRaw || o.dictID != e.o.dictID
 	e.o = o
+	if newDict {
+		if err := e.makeCDict(); err != nil {
+			return err // unreachable: the options validated the dictionary
+		}
+	}
 	e.Reset(w)
 	return nil
 }

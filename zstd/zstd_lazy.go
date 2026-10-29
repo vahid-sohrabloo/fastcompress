@@ -1595,3 +1595,727 @@ func compressBlockLazyExtDictGeneric(ms *matchState, ss *seqStore, rep *[repNum]
 	// Return the last literals size
 	return iend - anchor
 }
+
+/*-*******************************
+*  dictMatchState variants
+*********************************/
+
+// The dictMatchState variants below follow C's dictMode ==
+// ZSTD_dictMatchState branches: the context's own tables cover the prefix
+// (window.base, as in noDict), then the attached CDict's tables
+// (ms.dictMatchState, read-only) are searched. A CDict index i is the
+// position i - dms.window.baseIdx of the dictionary content (C: dictBase +
+// i) and stands for the context index i + dictIndexDelta, just below the
+// prefix.
+
+// insertAndFindFirstIndex inserts the positions up to ip into the hash
+// chain; used to fill a CDict's tables (with the CDict's unbounded
+// minMatch, as C). C: zstd_lazy.c:ZSTD_insertAndFindFirstIndex
+func insertAndFindFirstIndex(ms *matchState, ip int) uint32 {
+	return insertAndFindFirstIndexInternal(ms, ip, ms.cParams.minMatch, false)
+}
+
+// hcFindBestMatchDictMatchState. C: zstd_lazy.c:ZSTD_HcFindBestMatch with
+// dictMode ZSTD_dictMatchState; see hcFindBestMatch.
+func hcFindBestMatchDictMatchState(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
+	cParams := &ms.cParams
+	chainTable := ms.chainTable
+	chainSize := uint32(1) << cParams.chainLog
+	chainMask := chainSize - 1
+	b := ms.window.base
+	baseIdx := ms.window.baseIdx
+	dictLimit := ms.window.dictLimit
+	prefixStart := int(dictLimit - baseIdx)
+	curr := uint32(ip) + baseIdx
+	maxDistance := uint32(1) << cParams.windowLog
+	lowestValid := ms.window.lowLimit
+	withinMaxDistance := lowestValid
+	if curr-lowestValid > maxDistance {
+		withinMaxDistance = curr - maxDistance
+	}
+	isDictionary := ms.loadedDictEnd != 0
+	lowLimit := withinMaxDistance
+	if isDictionary {
+		lowLimit = lowestValid
+	}
+	var minChain uint32
+	if curr > chainSize {
+		minChain = curr - chainSize
+	}
+	nbAttempts := uint32(1) << cParams.searchLog
+	ml := 4 - 1
+	offBase := uint32(offBaseNotFound)
+	dms := ms.dictMatchState
+
+	// HC4 match finder
+	matchIndex := insertAndFindFirstIndexInternal(ms, ip, mls, ms.lazySkipping)
+
+	// C: `&` of the two conditions; && is equivalent (no side effects).
+	for ; matchIndex >= lowLimit && nbAttempts > 0; nbAttempts-- {
+		currentMl := 0
+		match := int(matchIndex - baseIdx)
+		// read 4B starting from (match + ml + 1 - sizeof(U32))
+		if binary.LittleEndian.Uint32(b[match+ml-3:]) == binary.LittleEndian.Uint32(b[ip+ml-3:]) { // potentially better
+			currentMl = count(b, ip, match, iLimit)
+		}
+
+		// save best solution
+		if currentMl > ml {
+			ml = currentMl
+			offBase = offsetToOffBase(curr - matchIndex)
+			if ip+currentMl == iLimit {
+				break // best possible, avoids read overflow on next attempt
+			}
+		}
+
+		if matchIndex <= minChain {
+			break
+		}
+		matchIndex = chainTable[matchIndex&chainMask] // C: NEXT_IN_CHAIN(matchIndex, chainMask)
+	}
+
+	{
+		dmsChainTable := dms.chainTable
+		dmsChainSize := uint32(1) << dms.cParams.chainLog
+		dmsChainMask := dmsChainSize - 1
+		dmsLowestIndex := dms.window.dictLimit
+		d, dmsBaseIdx := dms.window.base, dms.window.baseIdx
+		dmsSize := dms.window.nextSrc // C: dmsEnd - dmsBase
+		dmsEnd := int(dmsSize - dmsBaseIdx)
+		dmsIndexDelta := dictLimit - dmsSize
+		var dmsMinChain uint32
+		if dmsSize > dmsChainSize {
+			dmsMinChain = dmsSize - dmsChainSize
+		}
+
+		matchIndex = dms.hashTable[hashPtr(b, ip, dms.cParams.hashLog, mls)]
+
+		for ; matchIndex >= dmsLowestIndex && nbAttempts > 0; nbAttempts-- {
+			currentMl := 0
+			match := int(matchIndex - dmsBaseIdx)
+			if binary.LittleEndian.Uint32(d[match:]) == binary.LittleEndian.Uint32(b[ip:]) { // assumption : matchIndex <= dictLimit-4 (by table construction)
+				currentMl = count2Segments(b, ip+4, d, match+4, iLimit, dmsEnd, prefixStart) + 4
+			}
+
+			// save best solution
+			if currentMl > ml {
+				ml = currentMl
+				offBase = offsetToOffBase(curr - (matchIndex + dmsIndexDelta))
+				if ip+currentMl == iLimit {
+					break // best possible, avoids read overflow on next attempt
+				}
+			}
+
+			if matchIndex <= dmsMinChain {
+				break
+			}
+
+			matchIndex = dmsChainTable[matchIndex&dmsChainMask]
+		}
+	}
+	return ml, offBase
+}
+
+// rowFindBestMatchDictMatchState. C: zstd_lazy.c:ZSTD_RowFindBestMatch with
+// dictMode ZSTD_dictMatchState; see rowFindBestMatch. The CDict's rows are
+// hashed without salt (its salt is 0), with the context's rowLog.
+func rowFindBestMatchDictMatchState(ms *matchState, ip, iLimit int, mls, rowLog uint32) (int, uint32) {
+	hashTable := ms.hashTable
+	tagTable := ms.tagTable
+	hashLog := ms.rowHashLog
+	cParams := &ms.cParams
+	b := ms.window.base
+	baseIdx := ms.window.baseIdx
+	dictLimit := ms.window.dictLimit
+	prefixStart := int(dictLimit - baseIdx)
+	curr := uint32(ip) + baseIdx
+	maxDistance := uint32(1) << cParams.windowLog
+	lowestValid := ms.window.lowLimit
+	withinMaxDistance := lowestValid
+	if curr-lowestValid > maxDistance {
+		withinMaxDistance = curr - maxDistance
+	}
+	isDictionary := ms.loadedDictEnd != 0
+	lowLimit := withinMaxDistance
+	if isDictionary {
+		lowLimit = lowestValid
+	}
+	rowEntries := uint32(1) << rowLog
+	rowMask := rowEntries - 1
+	cappedSearchLog := min(cParams.searchLog, rowLog) // nb of searches is capped at nb entries per row
+	hashSalt := ms.hashSalt
+	nbAttempts := uint32(1) << cappedSearchLog
+	ml := 4 - 1
+	offBase := uint32(offBaseNotFound)
+	var hash uint32
+
+	// DMS rows (C prefetches them here)
+	dms := ms.dictMatchState
+	dmsHash := hashPtr(b, ip, dms.rowHashLog+rowHashTagBits, mls)
+	dmsRelRow := (dmsHash >> rowHashTagBits) << rowLog
+	dmsTag := dmsHash & rowHashTagMask
+	dmsTagRow := dms.tagTable[dmsRelRow : dmsRelRow+rowEntries]
+	dmsRow := dms.hashTable[dmsRelRow : dmsRelRow+rowEntries]
+
+	// Update the hashTable and tagTable up to (but not including) ip
+	if !ms.lazySkipping {
+		rowUpdateInternal(ms, ip, mls, rowLog, rowMask, true)
+		hash = rowNextCachedHash(&ms.hashCache, b, baseIdx, curr, hashLog, mls, hashSalt)
+	} else {
+		// Stop inserting every position when in the lazy skipping mode.
+		// The hash cache is also not kept up to date in this mode.
+		hash = hashPtrSalted(b, ip, hashLog+rowHashTagBits, mls, hashSalt)
+		ms.nextToUpdate = curr
+	}
+	ms.hashSaltEntropy += hash // collect salt entropy
+
+	{
+		// Get the hash for ip, compute the appropriate row
+		relRow := (hash >> rowHashTagBits) << rowLog
+		tag := hash & rowHashTagMask
+		row := hashTable[relRow : relRow+rowEntries]
+		tagRow := tagTable[relRow : relRow+rowEntries]
+		headGrouped := uint32(tagRow[0]) & rowMask
+		var matchBuffer [rowHashMaxEntries]uint32
+		numMatches := 0
+		matches := rowGetMatchMask(tagRow, byte(tag), headGrouped, rowEntries)
+
+		// Cycle through the matches
+		for ; matches > 0 && nbAttempts > 0; matches &= matches - 1 {
+			matchPos := (headGrouped + rowVecMaskNext(matches)) & rowMask
+			matchIndex := row[matchPos]
+			if matchPos == 0 {
+				continue
+			}
+			if matchIndex < lowLimit {
+				break
+			}
+			matchBuffer[numMatches] = matchIndex
+			numMatches++
+			nbAttempts--
+		}
+
+		// Speed opt: insert current byte into hashtable too. This allows
+		// us to avoid one iteration of the loop in rowUpdateInternal() at
+		// the next search.
+		{
+			pos := rowNextIndex(tagRow, rowMask)
+			tagRow[pos] = byte(tag)
+			row[pos] = ms.nextToUpdate
+			ms.nextToUpdate++
+		}
+
+		// Return the longest match
+		for _, matchIndex := range matchBuffer[:numMatches] {
+			currentMl := 0
+			match := int(matchIndex - baseIdx)
+			// read 4B starting from (match + ml + 1 - sizeof(U32))
+			if binary.LittleEndian.Uint32(b[match+ml-3:]) == binary.LittleEndian.Uint32(b[ip+ml-3:]) { // potentially better
+				currentMl = count(b, ip, match, iLimit)
+			}
+			// Save best solution
+			if currentMl > ml {
+				ml = currentMl
+				offBase = offsetToOffBase(curr - matchIndex)
+				if ip+currentMl == iLimit {
+					break // best possible, avoids read overflow on next attempt
+				}
+			}
+		}
+	}
+
+	{
+		dmsLowestIndex := dms.window.dictLimit
+		d, dmsBaseIdx := dms.window.base, dms.window.baseIdx
+		dmsSize := dms.window.nextSrc // C: dmsEnd - dmsBase
+		dmsEnd := int(dmsSize - dmsBaseIdx)
+		dmsIndexDelta := dictLimit - dmsSize
+
+		headGrouped := uint32(dmsTagRow[0]) & rowMask
+		var matchBuffer [rowHashMaxEntries]uint32
+		numMatches := 0
+		matches := rowGetMatchMask(dmsTagRow, byte(dmsTag), headGrouped, rowEntries)
+
+		for ; matches > 0 && nbAttempts > 0; matches &= matches - 1 {
+			matchPos := (headGrouped + rowVecMaskNext(matches)) & rowMask
+			matchIndex := dmsRow[matchPos]
+			if matchPos == 0 {
+				continue
+			}
+			if matchIndex < dmsLowestIndex {
+				break
+			}
+			matchBuffer[numMatches] = matchIndex
+			numMatches++
+			nbAttempts--
+		}
+
+		// Return the longest match
+		for _, matchIndex := range matchBuffer[:numMatches] {
+			currentMl := 0
+			match := int(matchIndex - dmsBaseIdx)
+			if binary.LittleEndian.Uint32(d[match:]) == binary.LittleEndian.Uint32(b[ip:]) {
+				currentMl = count2Segments(b, ip+4, d, match+4, iLimit, dmsEnd, prefixStart) + 4
+			}
+
+			if currentMl > ml {
+				ml = currentMl
+				offBase = offsetToOffBase(curr - (matchIndex + dmsIndexDelta))
+				if ip+currentMl == iLimit {
+					break
+				}
+			}
+		}
+	}
+	return ml, offBase
+}
+
+// dubtFindBetterDictMatch searches the attached CDict's binary tree (built
+// fully sorted by updateTree) for a better match than bestLength at ip,
+// with the remaining nbCompares. C: zstd_lazy.c:ZSTD_DUBT_findBetterDictMatch
+func dubtFindBetterDictMatch(ms *matchState, ip, iend int, offBase *uint32, bestLength int, nbCompares, mls uint32) int {
+	dms := ms.dictMatchState
+	dmsCParams := &dms.cParams
+	dictHashTable := dms.hashTable
+	hashLog := dmsCParams.hashLog
+	b, baseIdx := ms.window.base, ms.window.baseIdx
+	h := hashPtr(b, ip, hashLog, mls)
+	dictMatchIndex := dictHashTable[h]
+
+	prefixStart := int(ms.window.dictLimit - baseIdx)
+	curr := uint32(ip) + baseIdx
+	d, dictBaseIdx := dms.window.base, dms.window.baseIdx
+	dictHighLimit := dms.window.nextSrc // C: dms->window.nextSrc - dms->window.base
+	dictEnd := int(dictHighLimit - dictBaseIdx)
+	dictLowLimit := dms.window.lowLimit
+	dictIndexDelta := ms.window.lowLimit - dictHighLimit
+
+	dictBt := dms.chainTable
+	btLog := dmsCParams.chainLog - 1
+	btMask := uint32(1)<<btLog - 1
+	btLow := dictLowLimit
+	if btMask < dictHighLimit-dictLowLimit {
+		btLow = dictHighLimit - btMask
+	}
+
+	var commonLengthSmaller, commonLengthLarger int
+
+	for ; nbCompares > 0 && dictMatchIndex > dictLowLimit; nbCompares-- {
+		nextPtr := dictBt[2*(dictMatchIndex&btMask):][:2]
+		matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes
+		match := int(dictMatchIndex - dictBaseIdx)
+		matchLength += count2Segments(b, ip+matchLength, d, match+matchLength, iend, dictEnd, prefixStart)
+		// C: match = base + dictMatchIndex + dictIndexDelta when the match
+		// crossed into the prefix, to prepare for next usage of
+		// match[matchLength]
+		mByte := func() byte { // C: match[matchLength]
+			if dictMatchIndex+uint32(matchLength) >= dictHighLimit {
+				return b[int(dictMatchIndex+dictIndexDelta+uint32(matchLength)-baseIdx)]
+			}
+			return d[match+matchLength]
+		}
+
+		if matchLength > bestLength {
+			matchIndex := dictMatchIndex + dictIndexDelta
+			if 4*(matchLength-bestLength) > int(highbit32(curr-matchIndex+1))-int(highbit32(*offBase+1)) {
+				bestLength, *offBase = matchLength, offsetToOffBase(curr-matchIndex)
+			}
+			if ip+matchLength == iend { // reached end of input : ip[matchLength] is not valid, no way to know if it's larger or smaller than match
+				break // drop, to guarantee consistency (miss a little bit of compression)
+			}
+		}
+
+		if mByte() < b[ip+matchLength] {
+			if dictMatchIndex <= btLow {
+				break // beyond tree size, stop the search
+			}
+			commonLengthSmaller = matchLength // all smaller will now have at least this guaranteed common length
+			dictMatchIndex = nextPtr[1]       // new matchIndex larger than previous (closer to current)
+		} else {
+			// match is larger than current
+			if dictMatchIndex <= btLow {
+				break // beyond tree size, stop the search
+			}
+			commonLengthLarger = matchLength
+			dictMatchIndex = nextPtr[0]
+		}
+	}
+	return bestLength
+}
+
+// dubtFindBestMatchDictMatchState. C: zstd_lazy.c:ZSTD_DUBT_findBestMatch
+// with dictMode ZSTD_dictMatchState; see dubtFindBestMatch. The context's
+// candidates are all in the prefix (insertDUBT1 is the noDict one, as in
+// C), then the CDict's tree is searched with the comparisons left.
+func dubtFindBestMatchDictMatchState(ms *matchState, ip, iend int, mls uint32) (int, uint32) {
+	cParams := &ms.cParams
+	hashTable := ms.hashTable
+	hashLog := cParams.hashLog
+	b := ms.window.base
+	h := hashPtr(b, ip, hashLog, mls)
+	matchIndex := hashTable[h]
+
+	baseIdx := ms.window.baseIdx
+	curr := uint32(ip) + baseIdx
+	windowLow := getLowestMatchIndex(ms, curr, cParams.windowLog)
+
+	bt := ms.chainTable
+	btLog := cParams.chainLog - 1
+	btMask := uint32(1)<<btLog - 1
+	var btLow uint32
+	if btMask < curr {
+		btLow = curr - btMask
+	}
+	unsortLimit := max(btLow, windowLow)
+
+	nextCandidate := 2 * (matchIndex & btMask) // C: nextCandidate; unsortedMark is the next entry
+	nbCompares := uint32(1) << cParams.searchLog
+	nbCandidates := nbCompares
+	var previousCandidate uint32
+	offBase := uint32(offBaseNotFound)
+
+	// reach end of unsorted candidates list
+	for matchIndex > unsortLimit && bt[nextCandidate+1] == dubtUnsortedMark && nbCandidates > 1 {
+		bt[nextCandidate+1] = previousCandidate // the unsortedMark becomes a reversed chain, to move up back to original position
+		previousCandidate = matchIndex
+		matchIndex = bt[nextCandidate]
+		nextCandidate = 2 * (matchIndex & btMask)
+		nbCandidates--
+	}
+
+	// nullify last candidate if it's still unsorted
+	// simplification, detrimental to compression ratio, beneficial for speed
+	if matchIndex > unsortLimit && bt[nextCandidate+1] == dubtUnsortedMark {
+		bt[nextCandidate] = 0
+		bt[nextCandidate+1] = 0
+	}
+
+	// batch sort stacked candidates
+	matchIndex = previousCandidate
+	for matchIndex != 0 { // will end on matchIndex == 0
+		nextCandidateIdx := bt[2*(matchIndex&btMask)+1]
+		insertDUBT1(ms, matchIndex, iend, nbCandidates, unsortLimit)
+		matchIndex = nextCandidateIdx
+		nbCandidates++
+	}
+
+	// find longest match
+	var commonLengthSmaller, commonLengthLarger int
+	smallerPtr := &bt[2*(curr&btMask)]
+	largerPtr := &bt[2*(curr&btMask)+1]
+	matchEndIdx := curr + 8 + 1
+	var dummy32 uint32 // to be nullified at the end
+	bestLength := 0
+
+	matchIndex = hashTable[h]
+	hashTable[h] = curr // Update Hash Table
+
+	for ; nbCompares > 0 && matchIndex > windowLow; nbCompares-- {
+		nextPtr := bt[2*(matchIndex&btMask):][:2]
+		matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes
+		match := int(matchIndex - baseIdx)
+		matchLength += count(b, ip+matchLength, match+matchLength, iend)
+
+		if matchLength > bestLength {
+			if uint32(matchLength) > matchEndIdx-matchIndex {
+				matchEndIdx = matchIndex + uint32(matchLength)
+			}
+			if 4*(matchLength-bestLength) > int(highbit32(curr-matchIndex+1))-int(highbit32(offBase)) {
+				bestLength, offBase = matchLength, offsetToOffBase(curr-matchIndex)
+			}
+			if ip+matchLength == iend { // equal : no way to know if inf or sup
+				// in addition to avoiding checking any further in this
+				// loop, make sure we skip checking in the dictionary.
+				nbCompares = 0
+				break // drop, to guarantee consistency (miss a little bit of compression)
+			}
+		}
+
+		if b[match+matchLength] < b[ip+matchLength] {
+			// match is smaller than current
+			*smallerPtr = matchIndex          // update smaller idx
+			commonLengthSmaller = matchLength // all smaller will now have at least this guaranteed common length
+			if matchIndex <= btLow {          // beyond tree size, stop the search
+				smallerPtr = &dummy32
+				break
+			}
+			smallerPtr = &nextPtr[1] // new "smaller" => larger of match
+			matchIndex = nextPtr[1]  // new matchIndex larger than previous (closer to current)
+		} else {
+			// match is larger than current
+			*largerPtr = matchIndex
+			commonLengthLarger = matchLength
+			if matchIndex <= btLow { // beyond tree size, stop the search
+				largerPtr = &dummy32
+				break
+			}
+			largerPtr = &nextPtr[0]
+			matchIndex = nextPtr[0]
+		}
+	}
+
+	*largerPtr = 0
+	*smallerPtr = 0
+
+	if nbCompares > 0 {
+		bestLength = dubtFindBetterDictMatch(ms, ip, iend, &offBase, bestLength, nbCompares, mls)
+	}
+
+	ms.nextToUpdate = matchEndIdx - 8 // skip repetitive patterns
+	return bestLength, offBase
+}
+
+// btFindBestMatchDictMatchState. C: zstd_lazy.c:ZSTD_BtFindBestMatch with
+// dictMode ZSTD_dictMatchState.
+func btFindBestMatchDictMatchState(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
+	if uint32(ip)+ms.window.baseIdx < ms.nextToUpdate {
+		return 0, offBaseNotFound // skipped area
+	}
+	updateDUBT(ms, ip, mls)
+	return dubtFindBestMatchDictMatchState(ms, ip, iLimit, mls)
+}
+
+// searchMaxDictMatchState. C: zstd_lazy.c:ZSTD_searchMax with dictMode
+// ZSTD_dictMatchState.
+func searchMaxDictMatchState(ms *matchState, ip, iLimit int, mls, rowLog uint32, method searchMethod) (int, uint32) {
+	if method == searchRowHash {
+		return rowFindBestMatchDictMatchState(ms, ip, iLimit, mls, rowLog)
+	}
+	if method == searchBinaryTree {
+		return btFindBestMatchDictMatchState(ms, ip, iLimit, mls)
+	}
+	return hcFindBestMatchDictMatchState(ms, ip, iLimit, mls)
+}
+
+// compressBlockGreedyDictMatchState. C: zstd_lazy.c:ZSTD_compressBlock_greedy_dictMatchState
+func compressBlockGreedyDictMatchState(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyDictMatchStateGeneric(ms, ss, rep, src, srcIdx, searchHashChain, 0)
+}
+
+// compressBlockLazyDictMatchState. C: zstd_lazy.c:ZSTD_compressBlock_lazy_dictMatchState
+func compressBlockLazyDictMatchState(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyDictMatchStateGeneric(ms, ss, rep, src, srcIdx, searchHashChain, 1)
+}
+
+// compressBlockLazy2DictMatchState. C: zstd_lazy.c:ZSTD_compressBlock_lazy2_dictMatchState
+func compressBlockLazy2DictMatchState(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyDictMatchStateGeneric(ms, ss, rep, src, srcIdx, searchHashChain, 2)
+}
+
+// compressBlockGreedyDictMatchStateRow. C: zstd_lazy.c:ZSTD_compressBlock_greedy_dictMatchState_row
+func compressBlockGreedyDictMatchStateRow(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyDictMatchStateGeneric(ms, ss, rep, src, srcIdx, searchRowHash, 0)
+}
+
+// compressBlockLazyDictMatchStateRow. C: zstd_lazy.c:ZSTD_compressBlock_lazy_dictMatchState_row
+func compressBlockLazyDictMatchStateRow(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyDictMatchStateGeneric(ms, ss, rep, src, srcIdx, searchRowHash, 1)
+}
+
+// compressBlockLazy2DictMatchStateRow. C: zstd_lazy.c:ZSTD_compressBlock_lazy2_dictMatchState_row
+func compressBlockLazy2DictMatchStateRow(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyDictMatchStateGeneric(ms, ss, rep, src, srcIdx, searchRowHash, 2)
+}
+
+// compressBlockBtlazy2DictMatchState. C: zstd_lazy.c:ZSTD_compressBlock_btlazy2_dictMatchState
+func compressBlockBtlazy2DictMatchState(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	return compressBlockLazyDictMatchStateGeneric(ms, ss, rep, src, srcIdx, searchBinaryTree, 2)
+}
+
+// compressBlockLazyDictMatchStateGeneric is the lazy parser searching an
+// attached CDict too; see compressBlockLazyGeneric.
+// C: zstd_lazy.c:ZSTD_compressBlock_lazy_generic with dictMode
+// ZSTD_dictMatchState; C's `goto _storeSequence` is the store flag, its
+// repcode checks are repMatchLength.
+func compressBlockLazyDictMatchStateGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, method searchMethod, depth int) int {
+	if dictMatchStateHook != nil {
+		dictMatchStateHook(lazyExtDictNames[method][depth])
+	}
+	b := ms.window.base
+	baseIdx := ms.window.baseIdx
+	istart := int(srcIdx - baseIdx)
+	ip := istart
+	anchor := istart
+	iend := istart + len(src)
+	ilimit := iend - 8
+	if method == searchRowHash {
+		ilimit -= rowHashCacheSize
+	}
+	prefixLowestIndex := ms.window.dictLimit
+	prefixLowest := int(prefixLowestIndex - baseIdx)
+	mls := min(max(ms.cParams.minMatch, 4), 6)
+	rowLog := min(max(ms.cParams.searchLog, 4), 6)
+
+	offset1, offset2 := rep[0], rep[1]
+
+	dms := ms.dictMatchState
+	dictLowestIndex := dms.window.dictLimit
+	d, dictBaseIdx := dms.window.base, dms.window.baseIdx
+	dictLowest := int(dictLowestIndex - dictBaseIdx)
+	dictEndIdx := dms.window.nextSrc // C: dictEnd - dictBase
+	dictEnd := int(dictEndIdx - dictBaseIdx)
+	dictIndexDelta := prefixLowestIndex - dictEndIdx
+	dictAndPrefixLength := uint32(ip-prefixLowest) + uint32(dictEnd-dictLowest)
+
+	idx := func(p int) uint32 { return uint32(p) + baseIdx }
+	// seg returns the segment holding index i and i's position in it.
+	seg := func(i uint32) ([]byte, int) {
+		if i < prefixLowestIndex {
+			return d, int(i - dictIndexDelta - dictBaseIdx)
+		}
+		return b, int(i - baseIdx)
+	}
+	// repMatchLength returns the length of the repcode match at position p
+	// (index cur) with offset off, or 0 if there is none (C: the isDxS
+	// "check repCode" blocks).
+	repMatchLength := func(p int, cur, off uint32) int {
+		repIndex := cur - off
+		if indexOverlapCheck(prefixLowestIndex, repIndex) {
+			repBase, rp := seg(repIndex)
+			if binary.LittleEndian.Uint32(repBase[rp:]) == binary.LittleEndian.Uint32(b[p:]) {
+				repMatchEnd := iend
+				if repIndex < prefixLowestIndex {
+					repMatchEnd = dictEnd
+				}
+				return count2Segments(b, p+4, repBase, rp+4, iend, repMatchEnd, prefixLowest) + 4
+			}
+		}
+		return 0
+	}
+
+	if dictAndPrefixLength == 0 {
+		ip++
+	}
+
+	// Reset the lazy skipping state
+	ms.lazySkipping = false
+
+	if method == searchRowHash {
+		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+	}
+
+	// Match Loop
+	for ip < ilimit {
+		matchLength := 0
+		offBase := uint32(repcode1ToOffBase)
+		start := ip + 1
+		store := false // C: goto _storeSequence
+
+		// check repCode
+		if rl := repMatchLength(ip+1, idx(ip)+1, offset1); rl > 0 {
+			matchLength = rl
+			store = depth == 0
+		}
+
+		if !store {
+			// first search (depth 0)
+			if ml2, offbaseFound := searchMaxDictMatchState(ms, ip, iend, mls, rowLog, method); ml2 > matchLength {
+				matchLength, start, offBase = ml2, ip, offbaseFound
+			}
+
+			if matchLength < 4 {
+				step := (ip-anchor)>>kSearchStrength + 1 // jump faster over incompressible sections
+				ip += step
+				// Enter the lazy skipping mode once we are skipping more
+				// than 8 bytes at a time (see compressBlockLazyGeneric).
+				ms.lazySkipping = step > kLazySkippingStep
+				continue
+			}
+
+			// let's try to find a better solution
+			if depth >= 1 {
+				for ip < ilimit {
+					ip++
+					if mlRep := repMatchLength(ip, idx(ip), offset1); mlRep > 0 {
+						gain2 := mlRep * 3
+						gain1 := matchLength*3 - int(highbit32(offBase)) + 1
+						if mlRep >= 4 && gain2 > gain1 {
+							matchLength, offBase, start = mlRep, repcode1ToOffBase, ip
+						}
+					}
+					{
+						ml2, ofbCandidate := searchMaxDictMatchState(ms, ip, iend, mls, rowLog, method)
+						gain2 := ml2*4 - int(highbit32(ofbCandidate)) // raw approx
+						gain1 := matchLength*4 - int(highbit32(offBase)) + 4
+						if ml2 >= 4 && gain2 > gain1 {
+							matchLength, offBase, start = ml2, ofbCandidate, ip
+							continue // search a better one
+						}
+					}
+
+					// let's find an even better one
+					if depth == 2 && ip < ilimit {
+						ip++
+						if mlRep := repMatchLength(ip, idx(ip), offset1); mlRep > 0 {
+							gain2 := mlRep * 4
+							gain1 := matchLength*4 - int(highbit32(offBase)) + 1
+							if mlRep >= 4 && gain2 > gain1 {
+								matchLength, offBase, start = mlRep, repcode1ToOffBase, ip
+							}
+						}
+						{
+							ml2, ofbCandidate := searchMaxDictMatchState(ms, ip, iend, mls, rowLog, method)
+							gain2 := ml2*4 - int(highbit32(ofbCandidate)) // raw approx
+							gain1 := matchLength*4 - int(highbit32(offBase)) + 7
+							if ml2 >= 4 && gain2 > gain1 {
+								matchLength, offBase, start = ml2, ofbCandidate, ip
+								continue
+							}
+						}
+					}
+					break // nothing found : store previous solution
+				}
+			}
+
+			// catch up
+			if offBase > repNum { // C: OFFBASE_IS_OFFSET
+				matchIndex := idx(start) - (offBase - repNum)
+				match, mp := seg(matchIndex)
+				mStart := prefixLowest
+				if matchIndex < prefixLowestIndex {
+					mStart = dictLowest
+				}
+				for start > anchor && mp > mStart && b[start-1] == match[mp-1] { // catch up
+					start--
+					mp--
+					matchLength++
+				}
+				offset2 = offset1
+				offset1 = offBase - repNum
+			}
+		}
+
+		// C: _storeSequence
+		storeSeq(ss, start-anchor, b[anchor:], offBase, matchLength)
+		ip = start + matchLength
+		anchor = ip
+		if ms.lazySkipping {
+			// We've found a match, disable lazy skipping mode, and refill
+			// the hash cache.
+			if method == searchRowHash {
+				rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+			}
+			ms.lazySkipping = false
+		}
+
+		// check immediate repcode
+		for ip <= ilimit {
+			ml := repMatchLength(ip, idx(ip), offset2)
+			if ml == 0 {
+				break
+			}
+			matchLength = ml
+			offset2, offset1 = offset1, offset2 // swap offset_2 <=> offset_1
+			storeSeq(ss, 0, b[anchor:], repcode1ToOffBase, matchLength)
+			ip += matchLength
+			anchor = ip
+		}
+	}
+
+	// save reps for next block (C's offsetSaved values stay 0 in this mode)
+	rep[0] = offset1
+	rep[1] = offset2
+
+	// Return the last literals size
+	return iend - anchor
+}

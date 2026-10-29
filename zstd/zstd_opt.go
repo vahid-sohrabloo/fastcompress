@@ -428,7 +428,8 @@ func insertBt1(ms *matchState, ip, iend int, target, mls uint32) uint32 {
 
 // updateTreeInternal inserts the positions from ms.nextToUpdate up to ip
 // (excluded) into the tree; ext selects dictMode ZSTD_extDict (else
-// ZSTD_noDict). C: zstd_opt.c:ZSTD_updateTree_internal
+// ZSTD_noDict or ZSTD_dictMatchState, which insert alike).
+// C: zstd_opt.c:ZSTD_updateTree_internal
 func updateTreeInternal(ms *matchState, ip, iend int, mls uint32, ext bool) {
 	baseIdx := ms.window.baseIdx
 	target := uint32(ip) + baseIdx
@@ -443,6 +444,12 @@ func updateTreeInternal(ms *matchState, ip, iend int, mls uint32, ext bool) {
 		idx += forward
 	}
 	ms.nextToUpdate = target
+}
+
+// updateTree fills the tree up to ip; used to fill a CDict's tables (with
+// the CDict's unbounded minMatch, as C). C: zstd_opt.c:ZSTD_updateTree
+func updateTree(ms *matchState, ip, iend int) {
+	updateTreeInternal(ms, ip, iend, ms.cParams.minMatch, false)
 }
 
 // insertBtAndGetAllMatches inserts ip into the tree and stores into matches
@@ -859,18 +866,21 @@ func insertBtAndGetAllMatchesExtDict(matches *[optSize]optMatch, ms *matchState,
 }
 
 // btGetAllMatches updates the tree up to ip, then inserts ip and finds its
-// matches (none in an area skipped after a long match). ext selects
-// dictMode ZSTD_extDict (else ZSTD_noDict).
+// matches (none in an area skipped after a long match), for dictMode mode
+// (noDict, extDict or dictMatchState).
 // C: zstd_opt.c:ZSTD_btGetAllMatches_internal; C specialises it for each
 // dictMode and mls (ZSTD_selectBtGetAllMatches), here both are parameters.
 func btGetAllMatches(matches *[optSize]optMatch, ms *matchState, nextToUpdate3 *uint32, ip, iHighLimit int,
-	rep *[repNum]uint32, ll0 bool, lengthToBeat, mls uint32, ext bool) uint32 {
+	rep *[repNum]uint32, ll0 bool, lengthToBeat, mls uint32, mode dictMode) uint32 {
 	if uint32(ip)+ms.window.baseIdx < ms.nextToUpdate {
 		return 0 // skipped area
 	}
-	updateTreeInternal(ms, ip, iHighLimit, mls, ext)
-	if ext {
+	updateTreeInternal(ms, ip, iHighLimit, mls, mode == extDict)
+	switch mode {
+	case extDict:
 		return insertBtAndGetAllMatchesExtDict(matches, ms, nextToUpdate3, ip, iHighLimit, rep, ll0, lengthToBeat, mls)
+	case dictMatchState:
+		return insertBtAndGetAllMatchesDictMatchState(matches, ms, nextToUpdate3, ip, iHighLimit, rep, ll0, lengthToBeat, mls)
 	}
 	return insertBtAndGetAllMatches(matches, ms, nextToUpdate3, ip, iHighLimit, rep, ll0, lengthToBeat, mls)
 }
@@ -881,7 +891,7 @@ func btGetAllMatches(matches *[optSize]optMatch, ms *matchState, nextToUpdate3 *
 
 // compressBlockBtopt. C: zstd_opt.c:ZSTD_compressBlock_btopt
 func compressBlockBtopt(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
-	return compressBlockOptGeneric(ms, ss, rep, src, srcIdx, false)
+	return compressBlockOptGeneric(ms, ss, rep, src, srcIdx, noDict)
 }
 
 // compressBlockBtoptExtDict. C: zstd_opt.c:ZSTD_compressBlock_btopt_extDict
@@ -889,17 +899,24 @@ func compressBlockBtoptExtDict(ms *matchState, ss *seqStore, rep *[repNum]uint32
 	if extDictHook != nil {
 		extDictHook("btopt")
 	}
-	return compressBlockOptGeneric(ms, ss, rep, src, srcIdx, true)
+	return compressBlockOptGeneric(ms, ss, rep, src, srcIdx, extDict)
+}
+
+// compressBlockBtoptDictMatchState. C: zstd_opt.c:ZSTD_compressBlock_btopt_dictMatchState
+func compressBlockBtoptDictMatchState(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32) int {
+	if dictMatchStateHook != nil {
+		dictMatchStateHook("btopt")
+	}
+	return compressBlockOptGeneric(ms, ss, rep, src, srcIdx, dictMatchState)
 }
 
 // compressBlockOptGeneric is the optimal parser: from each position with a
 // match it prices every reachable position (up to optNum ahead) through
 // literals and matches, then stores the cheapest path.
 // C: zstd_opt.c:ZSTD_compressBlock_opt_generic with optLevel 0 (via
-// ZSTD_compressBlock_opt0) and dictMode ZSTD_extDict if ext, else
-// ZSTD_noDict. The optLevel >= 1 "match + 1 literal" check is omitted;
+// ZSTD_compressBlock_opt0) and dictMode mode. The optLevel >= 1 "match + 1 literal" check is omitted;
 // C's `goto _shortestPath` is kept.
-func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, ext bool) int {
+func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, mode dictMode) int {
 	optStatePtr := &ms.opt
 	b := ms.window.base
 	baseIdx := ms.window.baseIdx
@@ -938,7 +955,7 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 		{
 			litlen := uint32(ip - anchor)
 			ll0 := litlen == 0
-			nbMatches := btGetAllMatches(matches, ms, &nextToUpdate3, ip, iend, rep, ll0, minML, mls, ext)
+			nbMatches := btGetAllMatches(matches, ms, &nextToUpdate3, ip, iend, rep, ll0, minML, mls, mode)
 			if nbMatches == 0 {
 				ip++
 				continue
@@ -1041,7 +1058,7 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 				ll0 := opt[cur].litlen == 0
 				previousPrice := opt[cur].price
 				basePrice := previousPrice + llPrice(0, optStatePtr)
-				nbMatches := btGetAllMatches(matches, ms, &nextToUpdate3, inr, iend, &opt[cur].rep, ll0, minML, mls, ext)
+				nbMatches := btGetAllMatches(matches, ms, &nextToUpdate3, inr, iend, &opt[cur].rep, ll0, minML, mls, mode)
 
 				if nbMatches == 0 {
 					continue
@@ -1167,4 +1184,225 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 
 	// Return the last literals size
 	return iend - anchor
+}
+
+// insertBtAndGetAllMatchesDictMatchState. C: zstd_opt.c:ZSTD_insertBtAndGetAllMatches
+// with dictMode ZSTD_dictMatchState; see insertBtAndGetAllMatches. Repcodes
+// below the prefix and the CDict's tree (fully sorted, read-only) are
+// searched in the dictionary; CDict index i stands for context index i +
+// dmsIndexDelta.
+func insertBtAndGetAllMatchesDictMatchState(matches *[optSize]optMatch, ms *matchState, nextToUpdate3 *uint32, ip, iLimit int,
+	rep *[repNum]uint32, ll0 bool, lengthToBeat, mls uint32) uint32 {
+	cParams := &ms.cParams
+	sufficientLen := min(cParams.targetLength, optNum-1)
+	b := ms.window.base
+	baseIdx := ms.window.baseIdx
+	curr := uint32(ip) + baseIdx
+	hashLog := cParams.hashLog
+	minML := uint32(4) // C: minMatch
+	if mls == 3 {
+		minML = 3
+	}
+	hashTable := ms.hashTable
+	h := hashPtr(b, ip, hashLog, mls)
+	matchIndex := hashTable[h]
+	bt := ms.chainTable
+	btLog := cParams.chainLog - 1
+	btMask := uint32(1)<<btLog - 1
+	var commonLengthSmaller, commonLengthLarger int
+	dictLimit := ms.window.dictLimit
+	prefixStart := int(dictLimit - baseIdx)
+	var btLow uint32
+	if btMask < curr {
+		btLow = curr - btMask
+	}
+	windowLow := getLowestMatchIndex(ms, curr, cParams.windowLog)
+	matchLow := windowLow
+	if matchLow == 0 {
+		matchLow = 1
+	}
+	smallerPtr := &bt[2*(curr&btMask)]
+	largerPtr := &bt[2*(curr&btMask)+1]
+	matchEndIdx := curr + 8 + 1 // farthest referenced position of any match => detects repetitive patterns
+	var dummy32 uint32          // to be nullified at the end
+	var mnum uint32
+	nbCompares := uint32(1) << cParams.searchLog
+
+	dms := ms.dictMatchState
+	dmsCParams := &dms.cParams
+	d, dmsBaseIdx := dms.window.base, dms.window.baseIdx
+	dmsHighLimit := dms.window.nextSrc // C: dmsEnd - dmsBase
+	dmsEnd := int(dmsHighLimit - dmsBaseIdx)
+	dmsLowLimit := dms.window.lowLimit
+	dmsIndexDelta := windowLow - dmsHighLimit
+	dmsHashLog := dmsCParams.hashLog
+	dmsBtLog := dmsCParams.chainLog - 1
+	dmsBtMask := uint32(1)<<dmsBtLog - 1
+	dmsBtLow := dmsLowLimit
+	if dmsBtMask < dmsHighLimit-dmsLowLimit {
+		dmsBtLow = dmsHighLimit - dmsBtMask
+	}
+
+	bestLength := int(lengthToBeat - 1)
+
+	// check repCode
+	{
+		var ll0u uint32
+		if ll0 {
+			ll0u = 1
+		}
+		lastR := repNum + ll0u
+		for repCode := ll0u; repCode < lastR; repCode++ {
+			repOffset := rep[0] - 1
+			if repCode != repNum {
+				repOffset = rep[repCode]
+			}
+			repIndex := curr - repOffset
+			var repLen uint32
+			if repOffset-1 < curr-dictLimit { // intentional overflow, discards 0 and -1; equivalent to `curr > repIndex >= dictLimit`
+				// We must validate the repcode offset because when we're
+				// using a dictionary the valid offset range shrinks when
+				// the dictionary goes out of bounds.
+				if repIndex >= windowLow && readMINMATCH(b, ip, minML) == readMINMATCH(b, ip-int(repOffset), minML) {
+					repLen = uint32(count(b, ip+int(minML), ip+int(minML)-int(repOffset), iLimit)) + minML
+				}
+			} else { // repIndex < dictLimit || repIndex >= curr
+				// C: `&` of the conditions; && is equivalent and keeps the
+				// dictionary read in bounds.
+				if repOffset-1 < curr-(dmsLowLimit+dmsIndexDelta) && // intentional overflow; equivalent to `curr > repIndex >= dmsLowLimit`
+					indexOverlapCheck(dictLimit, repIndex) {
+					repMatch := int(repIndex - dmsIndexDelta - dmsBaseIdx)
+					if readMINMATCH(b, ip, minML) == readMINMATCH(d, repMatch, minML) {
+						repLen = uint32(count2Segments(b, ip+int(minML), d, repMatch+int(minML), iLimit, dmsEnd, prefixStart)) + minML
+					}
+				}
+			}
+
+			// save longer solution
+			if int(repLen) > bestLength {
+				bestLength = int(repLen)
+				matches[mnum] = optMatch{off: repCode - ll0u + 1, len: repLen} // C: REPCODE_TO_OFFBASE: expect value between 1 and 3
+				mnum++
+				if repLen > sufficientLen || ip+int(repLen) == iLimit { // best possible
+					return mnum
+				}
+			}
+		}
+	}
+
+	// HC3 match finder
+	if mls == 3 && bestLength < int(mls) {
+		matchIndex3 := insertAndFindFirstIndexHash3(ms, nextToUpdate3, ip)
+		if matchIndex3 >= matchLow && curr-matchIndex3 < 1<<18 { // heuristic : longer distance likely too expensive
+			mlen := count(b, ip, int(matchIndex3-baseIdx), iLimit)
+
+			// save best solution
+			if mlen >= int(mls) { // == 3 > bestLength
+				bestLength = mlen
+				matches[0] = optMatch{off: offsetToOffBase(curr - matchIndex3), len: uint32(mlen)}
+				mnum = 1
+				if uint32(mlen) > sufficientLen || ip+mlen == iLimit { // best possible length
+					ms.nextToUpdate = curr + 1 // skip insertion
+					return 1
+				}
+			}
+		}
+		// no dictMatchState lookup: dicts don't have a populated HC3 table
+	}
+
+	hashTable[h] = curr // Update Hash Table
+
+	for ; nbCompares > 0 && matchIndex >= matchLow; nbCompares-- {
+		nextPtr := bt[2*(matchIndex&btMask):][:2]
+		matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes
+		match := int(matchIndex - baseIdx)
+		matchLength += count(b, ip+matchLength, match+matchLength, iLimit)
+
+		if matchLength > bestLength {
+			if uint32(matchLength) > matchEndIdx-matchIndex {
+				matchEndIdx = matchIndex + uint32(matchLength)
+			}
+			bestLength = matchLength
+			matches[mnum] = optMatch{off: offsetToOffBase(curr - matchIndex), len: uint32(matchLength)}
+			mnum++
+			if matchLength > optNum || ip+matchLength == iLimit { // equal : no way to know if inf or sup
+				nbCompares = 0 // break should also skip searching dms
+				break          // drop, to preserve bt consistency (miss a little bit of compression)
+			}
+		}
+
+		if b[match+matchLength] < b[ip+matchLength] {
+			// match smaller than current
+			*smallerPtr = matchIndex          // update smaller idx
+			commonLengthSmaller = matchLength // all smaller will now have at least this guaranteed common length
+			if matchIndex <= btLow {          // beyond tree size, stop the search
+				smallerPtr = &dummy32
+				break
+			}
+			smallerPtr = &nextPtr[1] // new candidate => larger than match, which was smaller than current
+			matchIndex = nextPtr[1]  // new matchIndex, larger than previous, closer to current
+		} else {
+			*largerPtr = matchIndex
+			commonLengthLarger = matchLength
+			if matchIndex <= btLow { // beyond tree size, stop the search
+				largerPtr = &dummy32
+				break
+			}
+			largerPtr = &nextPtr[0]
+			matchIndex = nextPtr[0]
+		}
+	}
+
+	*largerPtr = 0
+	*smallerPtr = 0
+
+	if nbCompares > 0 {
+		dmsH := hashPtr(b, ip, dmsHashLog, mls)
+		dictMatchIndex := dms.hashTable[dmsH]
+		dmsBt := dms.chainTable
+		commonLengthSmaller, commonLengthLarger = 0, 0
+		for ; nbCompares > 0 && dictMatchIndex > dmsLowLimit; nbCompares-- {
+			nextPtr := dmsBt[2*(dictMatchIndex&dmsBtMask):][:2]
+			matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes
+			match := int(dictMatchIndex - dmsBaseIdx)
+			matchLength += count2Segments(b, ip+matchLength, d, match+matchLength, iLimit, dmsEnd, prefixStart)
+			// C: match = base + dictMatchIndex + dmsIndexDelta when the
+			// match crossed into the prefix, to prepare for next usage of
+			// match[matchLength]
+			mByte := func() byte { // C: match[matchLength]
+				if dictMatchIndex+uint32(matchLength) >= dmsHighLimit {
+					return b[int(dictMatchIndex+dmsIndexDelta+uint32(matchLength)-baseIdx)]
+				}
+				return d[match+matchLength]
+			}
+
+			if matchLength > bestLength {
+				matchIndex = dictMatchIndex + dmsIndexDelta
+				if uint32(matchLength) > matchEndIdx-matchIndex {
+					matchEndIdx = matchIndex + uint32(matchLength)
+				}
+				bestLength = matchLength
+				matches[mnum] = optMatch{off: offsetToOffBase(curr - matchIndex), len: uint32(matchLength)}
+				mnum++
+				if matchLength > optNum || ip+matchLength == iLimit { // equal : no way to know if inf or sup
+					break // drop, to guarantee consistency (miss a little bit of compression)
+				}
+			}
+
+			if dictMatchIndex <= dmsBtLow {
+				break // beyond tree size, stop the search
+			}
+			if mByte() < b[ip+matchLength] {
+				commonLengthSmaller = matchLength // all smaller will now have at least this guaranteed common length
+				dictMatchIndex = nextPtr[1]       // new matchIndex larger than previous (closer to current)
+			} else {
+				// match is larger than current
+				commonLengthLarger = matchLength
+				dictMatchIndex = nextPtr[0]
+			}
+		}
+	}
+
+	ms.nextToUpdate = matchEndIdx - 8 // skip repetitive patterns
+	return mnum
 }

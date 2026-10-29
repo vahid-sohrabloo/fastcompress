@@ -358,10 +358,10 @@ func windowCorrectOverflow(w *window, cycleLog, maxDist, srcIdx uint32) uint32 {
 
 // windowEnforceMaxDist updates lowLimit so that blockEndIdx - lowLimit <=
 // maxDist + loadedDictEnd, and invalidates the dictionary once the input has
-// progressed beyond the window. loadedDictEnd may be nil (no dictionary).
-// blockEndIdx is C's blockEnd - base. C: ZSTD_window_enforceMaxDist (the
-// dictMatchState pointer arrives with dictionary support).
-func windowEnforceMaxDist(w *window, blockEndIdx, maxDist uint32, loadedDictEnd *uint32) {
+// progressed beyond the window. loadedDictEnd and dms may be nil (no
+// dictionary). blockEndIdx is C's blockEnd - base.
+// C: ZSTD_window_enforceMaxDist
+func windowEnforceMaxDist(w *window, blockEndIdx, maxDist uint32, loadedDictEnd *uint32, dms **matchState) {
 	var lde uint32
 	if loadedDictEnd != nil {
 		lde = *loadedDictEnd
@@ -378,16 +378,26 @@ func windowEnforceMaxDist(w *window, blockEndIdx, maxDist uint32, loadedDictEnd 
 		if loadedDictEnd != nil {
 			*loadedDictEnd = 0
 		}
+		if dms != nil {
+			*dms = nil
+		}
 	}
 }
 
 // checkDictValidity invalidates the dictionary when the input progresses
 // beyond the window size or the window is no longer contiguous with it.
-// C: ZSTD_checkDictValidity (the dictMatchState pointer arrives with
-// dictionary support).
-func checkDictValidity(w *window, blockEndIdx, maxDist uint32, loadedDictEnd *uint32) {
+// C: ZSTD_checkDictValidity
+func checkDictValidity(w *window, blockEndIdx, maxDist uint32, loadedDictEnd *uint32, dms **matchState) {
 	if blockEndIdx > *loadedDictEnd+maxDist || *loadedDictEnd != w.dictLimit {
+		// On reaching window size, dictionaries are invalidated. For
+		// simplification, if window size is reached anywhere within next
+		// block, the dictionary is invalidated for the full block.
+		//
+		// We also have to invalidate the dictionary if windowUpdate() has
+		// detected non-contiguous segments, which means that
+		// loadedDictEnd != window.dictLimit.
 		*loadedDictEnd = 0
+		*dms = nil
 	}
 }
 
@@ -572,15 +582,23 @@ type matchState struct {
 	// forceNonContiguous makes the next windowUpdate start a new segment.
 	forceNonContiguous bool
 
+	// dictMatchState is the attached CDict's match state, searched in
+	// place (read-only), or nil.
+	dictMatchState *matchState
+
 	opt optState // optimal parser state
 
 	cParams compressionParameters
 }
 
-// matchStateDictMode. C: ZSTD_matchState_dictMode (no dictMatchState yet).
+// matchStateDictMode. C: ZSTD_matchState_dictMode (dedicated dictionary
+// search is never enabled).
 func matchStateDictMode(ms *matchState) dictMode {
 	if windowHasExtDict(&ms.window) {
 		return extDict
+	}
+	if ms.dictMatchState != nil {
+		return dictMatchState
 	}
 	return noDict
 }
