@@ -1,7 +1,7 @@
 // Port of libzstd v1.5.7 lib/compress/huf_compress.c (Copyright (c) Meta
 // Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the Huffman
-// stream writer, always compiled; on amd64 huf_compress_amd64.s has an
-// equivalent encoder.
+// stream writer, always compiled; huf_compress_amd64.s and
+// huf_compress_arm64.s have an equivalent encoder.
 
 package huf
 
