@@ -85,6 +85,9 @@ func TestAsmEquiv(t *testing.T) {
 		return
 	}
 	run("asm=on", true)
+	if !cpu.X86.HasBMI2 {
+		return // asm=on already ran the baseline variants (always so off amd64)
+	}
 	restore := cpu.DisableBMI2()
 	defer restore()
 	run("asm=on,bmi2=off", true)
