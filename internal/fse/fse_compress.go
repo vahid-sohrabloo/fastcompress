@@ -138,16 +138,15 @@ func BuildCTable(ct CTable, norm []int16, maxSymbol, tableLog uint, wksp []byte)
 	}
 
 	// Build table: u16 sorted by symbol order, gives next state value.
-	for u := uint32(0); u < tableSize; u++ {
-		s := tableSymbol[u]
-		i := cumul[s]
-		cumul[s]++
-		v := tableSize + u
-		if i&1 == 0 {
-			stateTable[i>>1] = stateTable[i>>1]&0xFFFF0000 | v
-		} else {
-			stateTable[i>>1] = stateTable[i>>1]&0x0000FFFF | v<<16
-		}
+	// C stores the u16s straight into the table; here they go to a local
+	// array first and are packed two per word after, so there is no
+	// (unpredictable) branch on which half a state lands in.
+	if tableLog <= 9 { // the sequence tables (and HUF weights)
+		var states [1 << 9]uint16
+		buildStates(stateTable, tableSymbol, &cumul, tableSize, states[:])
+	} else {
+		var states [1 << MaxTableLog]uint16
+		buildStates(stateTable, tableSymbol, &cumul, tableSize, states[:])
 	}
 
 	// Build symbol transformation table. Entry s: [2s]=deltaFindState, [2s+1]=deltaNbBits.
@@ -170,6 +169,22 @@ func BuildCTable(ct CTable, norm []int16, maxSymbol, tableLog uint, wksp []byte)
 		}
 	}
 	return nil
+}
+
+// buildStates is BuildCTable's state table step: states[cumul[s]++] =
+// tableSize + u for each u, then stateTable holds states two per word (the
+// even one in the low half). len(states) >= tableSize >= 2.
+func buildStates(stateTable []uint32, tableSymbol []byte, cumul *[258]uint16, tableSize uint32, states []uint16) {
+	tableSymbol = tableSymbol[:tableSize]
+	for u, s := range tableSymbol {
+		states[cumul[s]] = uint16(tableSize + uint32(u))
+		cumul[s]++
+	}
+	states = states[:tableSize]
+	stateTable = stateTable[:tableSize/2]
+	for i := range stateTable {
+		stateTable[i] = uint32(states[2*i]) | uint32(states[2*i+1])<<16
+	}
 }
 
 // NCountWriteBound is the worst-case header size.
