@@ -752,22 +752,23 @@ func hash3Ptr(b []byte, i int, h uint32) uint32 {
 	return ((binary.LittleEndian.Uint32(b[i:]) << (32 - 24)) * prime3bytes) >> (32 - h)
 }
 
-// hashPtr hashes the first mls bytes at b[i:] to hBits bits.
-// C: zstd_compress_internal.h:ZSTD_hashPtr
+// hashPtr hashes the first mls bytes at b[i:] to hBits bits; mls other
+// than 5..8 hashes 4 bytes (and reads only those).
+// C: zstd_compress_internal.h:ZSTD_hashPtr. Mls 5..8 share one form,
+// ((le64 << (64 - 8*mls)) * prime) >> (64 - hBits), taken from a table so
+// the function is small enough to inline (a switch is not).
 func hashPtr(b []byte, i int, hBits, mls uint32) uint32 {
-	switch mls {
-	default: // 4
+	if mls-5 > 3 {
 		return (binary.LittleEndian.Uint32(b[i:]) * prime4bytes) >> (32 - hBits)
-	case 5:
-		return uint32(((binary.LittleEndian.Uint64(b[i:]) << (64 - 40)) * prime5bytes) >> (64 - hBits))
-	case 6:
-		return uint32(((binary.LittleEndian.Uint64(b[i:]) << (64 - 48)) * prime6bytes) >> (64 - hBits))
-	case 7:
-		return uint32(((binary.LittleEndian.Uint64(b[i:]) << (64 - 56)) * prime7bytes) >> (64 - hBits))
-	case 8:
-		return uint32((binary.LittleEndian.Uint64(b[i:]) * prime8bytes) >> (64 - hBits))
 	}
+	return uint32(((binary.LittleEndian.Uint64(b[i:]) << hashPtrShift[mls&7]) * hashPtrPrime[mls&7]) >> (64 - hBits))
 }
+
+// Parameters of hashPtr for mls 5..8, indexed by mls & 7.
+var (
+	hashPtrShift = [8]uint8{5: 64 - 40, 6: 64 - 48, 7: 64 - 56, 0: 0}
+	hashPtrPrime = [8]uint64{5: prime5bytes, 6: prime6bytes, 7: prime7bytes, 0: prime8bytes}
+)
 
 // storeSeq stores a sequence (litLen literals from lits, then a match of
 // matchLength bytes at offBase) into ss. offBase is a repcode 1..3 or an

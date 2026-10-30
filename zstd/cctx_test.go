@@ -283,13 +283,13 @@ func TestHashPtr(t *testing.T) {
 	for i := range b {
 		b[i] = byte(r.Uint32())
 	}
-	for mls := uint32(4); mls <= 8; mls++ {
+	for mls := uint32(3); mls <= 9; mls++ { // 3 and 9 hash 4 bytes, as C's default case
 		for hBits := uint32(6); hBits <= 30; hBits++ {
 			for i := 0; i+8 <= len(b); i++ {
 				var want uint32
 				u := binary.LittleEndian.Uint64(b[i:])
 				switch mls {
-				case 4:
+				case 3, 4, 9:
 					want = (uint32(u) * 2654435761) >> (32 - hBits)
 				case 8:
 					want = uint32((u * 0xCF1BBCDCB7A56463) >> (64 - hBits))
@@ -300,7 +300,7 @@ func TestHashPtr(t *testing.T) {
 				if got := hashPtr(b, i, hBits, mls); got != want {
 					t.Fatalf("hashPtr(mls=%d, hBits=%d) = %d, want %d", mls, hBits, got, want)
 				}
-				if mls <= 7 {
+				if mls >= 4 && mls <= 7 {
 					sh, prime := fastHashParams(mls)
 					if got := uint32(((u << sh) * prime) >> (64 - hBits)); got != want {
 						t.Fatalf("fast hash (mls=%d, hBits=%d) = %d, want %d", mls, hBits, got, want)
