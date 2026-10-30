@@ -39,7 +39,10 @@
 // Mirrors compressBlockDoubleFastNoDictGeneric's outer loop (C:
 // zstd_double_fast.c:ZSTD_compressBlock_doubleFast_noDict_generic).
 //
-// Registers: SI b, DI hashLong, R15 hashSmall, R8 ip, R9 ip1, R10 step,
+// Registers: SI b, DI hashLong, R15 hashSmall, R8 ip, R9 ip1,
+// R10 b - baseIdx (so an index addresses b directly; reloaded at outer, as
+// the helpers clobber it; no calls in the search loop, so the GC never sees
+// it), step in STEP,
 // R11 nextStep, R12 hl0, R13 idxl0, R14 offset1; AX/BX/CX/DX scratch.
 // offset2, anchor, nSeq and nLits live in their argument/result slots.
 // For a match: R8 ip, DX match position, AX mLength, R12 offBase.
@@ -64,7 +67,10 @@ TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $88-160
 	MOVQ AX, PRIMES
 
 outer:
-	MOVL $1, R10            // step
+	MOVQ $1, STEP
+	MOVL baseIdx+76(FP), AX
+	MOVQ SI, R10
+	SUBQ AX, R10
 	LEAQ 256(R8), R11       // nextStep = ip + kStepIncr
 	LEAQ 1(R8), R9          // ip1
 	CMPQ R9, ILIMIT
@@ -109,18 +115,24 @@ norep:
 	HASHL(R9, BX)
 	MOVL BX, HL1
 
-	// long match at ip
-	CMPL R13, prefixLowestIndex+72(FP)
-	JB   nolong
+	// long match at ip, without a branch on the index (C selects with
+	// ZSTD_selectAddr): every entry is below curr (else bad), so with
+	// idxl0 >= prefixLowestIndex >= baseIdx, matchl0 lies in b[:ip]. For
+	// idxl0 < prefixLowestIndex, idxl0 becomes curr, so ip itself is read,
+	// and the carry from the index compare is added, so the compare fails
+	// (C's zstd_fast.c uses read32(ip0) ^ 1 the same way).
+	MOVL    CURR, CX            // kept for the short check
+	CMPL    R13, CX
+	JAE     bad
+	CMPL    R13, prefixLowestIndex+72(FP)
+	CMOVLCS CX, R13
+	MOVQ    (R10)(R13*1), AX
+	ADCQ    $0, AX
+	CMPQ    AX, (SI)(R8*1)
+	JNE     nolong
 	MOVL R13, DX
-	SUBL baseIdx+76(FP), DX
-	CMPQ DX, R8
-	JAE  bad
-	MOVQ (SI)(DX*1), AX
-	CMPQ AX, (SI)(R8*1)
-	JNE  nolong
+	SUBL baseIdx+76(FP), DX  // matchl0
 	MOVQ R9, IP1
-	MOVQ R10, STEP
 	// mLength = count(b, ip+8, matchl0+8, iend) + 8
 	LEAQ 8(SI)(R8*1), R9
 	LEAQ 8(SI)(DX*1), R10
@@ -137,26 +149,26 @@ nolong:
 	MOVL (DI)(BX*4), AX
 	MOVL AX, IDXL1          // idxl1 = hashLong[hl1]
 
-	// short match at ip
-	MOVL IDXS0, DX
-	CMPL DX, prefixLowestIndex+72(FP)
-	JB   noshort
-	SUBL baseIdx+76(FP), DX
-	CMPQ DX, R8
-	JAE  bad
-	MOVL (SI)(DX*1), AX
-	CMPL AX, (SI)(R8*1)
-	JEQ  searchlong
+	// short match at ip, branchless on the index as the long one
+	MOVL    IDXS0, BX
+	CMPL    BX, CX
+	JAE     bad
+	CMPL    BX, prefixLowestIndex+72(FP)
+	CMOVLCS CX, BX
+	MOVL    (R10)(BX*1), AX
+	ADCL    $0, AX
+	CMPL    AX, (SI)(R8*1)
+	JEQ     searchlong
 
 noshort:
 	CMPQ R9, R11
 	JLT  nostep
-	INCQ R10
+	INCQ STEP
 	ADDQ $256, R11
 
 nostep:
 	MOVQ R9, R8             // ip = ip1
-	ADDQ R10, R9            // ip1 += step
+	ADDQ STEP, R9           // ip1 += step
 	MOVL HL1, R12           // hl0 = hl1
 	MOVL IDXL1, R13         // idxl0 = idxl1
 	CMPQ R9, ILIMIT
@@ -164,9 +176,10 @@ nostep:
 	JMP  inner
 
 searchlong:
-	// C: _search_next_long. DX = matchs0.
+	// C: _search_next_long.
+	MOVL BX, DX
+	SUBL baseIdx+76(FP), DX // matchs0
 	MOVQ R9, IP1
-	MOVQ R10, STEP
 	LEAQ 4(SI)(R8*1), R9
 	LEAQ 4(SI)(DX*1), R10
 	MOVQ iend+56(FP), R13

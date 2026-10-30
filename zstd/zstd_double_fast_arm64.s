@@ -103,13 +103,17 @@ inner:
 norep:
 	HASHL(R4, R11)              // hl1
 
-	// long match at ip
-	CMPW  R22, R8
-	BLO   nolong
-	SUBW  R21, R8, R14
-	CMP   R3, R14
+	// long match at ip, branchless on the index as on amd64: every
+	// entry is below curr (else bad); for idxl0 < prefixLowestIndex,
+	// idxl0 becomes curr, so ip itself is read and incremented, and the
+	// compare fails.
+	CMPW  R10, R8
 	BHS   bad
+	CMPW  R22, R8
+	CSELW LO, R10, R8, R8
+	SUBW  R21, R8, R14          // matchl0
 	MOVD  (R0)(R14), R15
+	CINC  LO, R15, R15
 	MOVD  (R0)(R3), R16
 	CMP   R15, R16
 	BNE   nolong
@@ -130,14 +134,15 @@ norep:
 nolong:
 	MOVWU (R1)(R11<<2), R12     // idxl1 = hashLong[hl1]
 
-	// short match at ip
-	MOVWU IDXS0, R14
-	CMPW  R22, R14
-	BLO   noshort
-	SUBW  R21, R14, R14
-	CMP   R3, R14
+	// short match at ip, branchless on the index as the long one
+	MOVWU IDXS0, R20
+	CMPW  R10, R20
 	BHS   bad
+	CMPW  R22, R20
+	CSELW LO, R10, R20, R20
+	SUBW  R21, R20, R14         // matchs0
 	MOVWU (R0)(R14), R15
+	CINCW LO, R15, R15
 	MOVWU (R0)(R3), R16
 	CMPW  R15, R16
 	BEQ   searchlong

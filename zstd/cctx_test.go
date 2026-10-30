@@ -417,6 +417,28 @@ func TestCompress2ReuseMultiBlock(t *testing.T) {
 	runSeq(t, steps)
 }
 
+// TestCompress2ReuseSmallFrames reuses one context for small frames of
+// short repeats at levels 1 and 3. Every frame starts with the previous
+// frames' table entries, all below its window, so the fast and double-fast
+// finders see many stale candidates (rejected without a branch on the
+// index in their assembly) whose bytes often equal the bytes at ip.
+func TestCompress2ReuseSmallFrames(t *testing.T) {
+	pat := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0xe2, 0xb4}
+	rng := rand.New(rand.NewPCG(7, 11))
+	var steps []seqStep
+	for i := range 8 {
+		var src []byte
+		for len(src) < 20000+i*3001 {
+			src = append(src, pat[:4+rng.IntN(7)]...)
+			for range rng.IntN(4) {
+				src = append(src, byte(rng.Uint32()))
+			}
+		}
+		steps = append(steps, seqStep{"small" + strconv.Itoa(i), compress2Case{level: 1 + 2*(i%2)}, src})
+	}
+	runSeq(t, steps)
+}
+
 // TestCompress2OverflowCorrectionBtlazy2 starts a btlazy2 frame (level 11,
 // 128 KiB blocks) just below currentMax, so overflow correction
 // (ZSTD_reduceIndex with ZSTD_reduceTable_btlazy2) runs between blocks while
