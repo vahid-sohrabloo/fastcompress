@@ -603,6 +603,11 @@ func compressBlockLazyGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32,
 	if method == searchRowHash {
 		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
 		rowAsmSetup(ms, mls, rowLog, iend)
+		if ms.rowAsm.ok {
+			// The whole match loop in assembly; the Go loop below then
+			// has nothing left to do (ip >= ilimit).
+			ip, anchor, offset1, offset2, _ = lazyRowRun(ms, ss, ip, anchor, iend, ilimit, prefixLowest, offset1, offset2, depth, mls, rowLog)
+		}
 	}
 
 	// Match Loop
@@ -1285,7 +1290,6 @@ func compressBlockLazyExtDictGeneric(ms *matchState, ss *seqStore, rep *[repNum]
 	}
 	if method == searchRowHash {
 		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
-		rowAsmSetup(ms, mls, rowLog, iend)
 	}
 
 	// Match Loop
@@ -2033,7 +2037,6 @@ func compressBlockLazyDictMatchStateGeneric(ms *matchState, ss *seqStore, rep *[
 
 	if method == searchRowHash {
 		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
-		rowAsmSetup(ms, mls, rowLog, iend)
 	}
 
 	// Match Loop

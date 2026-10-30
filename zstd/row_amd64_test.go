@@ -33,6 +33,8 @@ func TestRowAsmParamsLayout(t *testing.T) {
 		{"isDictionary", unsafe.Offsetof(p.isDictionary), 104},
 		{"pfHash2", unsafe.Offsetof(p.pfHash2), 120},
 		{"pfTag2", unsafe.Offsetof(p.pfTag2), 128},
+		{"iLimit", unsafe.Offsetof(p.iLimit), 136},
+		{"skip", unsafe.Offsetof(p.skip), 144},
 	} {
 		if c.got != c.want {
 			t.Errorf("rowAsmParams.%s at offset %d, row_amd64.s expects %d", c.name, c.got, c.want)

@@ -355,3 +355,30 @@ loop (compressBlockLazyGeneric) into the same assembly to remove the
 per-search call and parameter reloads; then re-measure the L11 LLC excess,
 which needs a finer split (e.g. `mem_load_retired.l3_miss` per load
 address) to attribute.
+
+## Row lazy parser in assembly, specialised per (mls, rowLog)
+
+Targets from the perf table above: level 7's ~30% instruction excess in the
+row update helper (parameter reloads) and the Go lazy loop. Commit "perf(row):
+lazy parser and row finder in asm, specialised per (mls, rowLog)":
+gen_row_amd64.go generates row_lazy_amd64.s with nine copies (mls 4-6 x
+rowLog 4-6) of the lazy match loop, the row search and the row update, with
+the hash shift and prime, rowLog, rowMask and prefetch offsets as immediates;
+the lazy loop calls the search directly (no Go dispatch, no per-search
+parameter reloads).
+
+perf stat, dickens, `gobench -secs 4`, CPU 2 (per input byte; C from the
+table above):
+
+| level | build | MB/s | cycles/B | instr/B | IPC | LLC miss/B | dTLB miss/B |
+|---|---|---|---|---|---|---|---|
+| 7 | before (4dbadc3) | 51.6 | 73.4 | 228.7 | 3.11 | 0.041 | 0.022 |
+| 7 | after | 58.3 | 65.0 | 176.1 | 2.71 | 0.037 | 0.023 |
+| 7 | C | 68.2 | 56.7 | 178.4 | 3.15 | 0.04 | 0.04 |
+| 11 | before (4dbadc3) | 16.3 | 232.5 | 578.4 | 2.49 | 1.69 | 1.44 |
+| 11 | after | 17.3 | 219.2 | 511.2 | 2.33 | 1.64 | 1.47 |
+| 11 | C | 25.6 | 152.2 | 474.7 | 3.12 | 1.00 | 1.43 |
+
+Level 7 now executes as many instructions per byte as C (176 vs 178); the
+rest of the gap is IPC (2.71 vs 3.15). Level 11 keeps its 1.6-1.7x LLC
+misses per byte, which the specialisation did not change.

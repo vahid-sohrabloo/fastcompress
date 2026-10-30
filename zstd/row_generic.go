@@ -124,4 +124,6 @@ type rowAsmParams struct {
 	bLen         int                       // 112: positions up to bLen-16 may be searched
 	pfHash2      uint64                    // 120: 64 if a hash row spans a second cache line (rowLog >= 5), else 0
 	pfTag2       uint64                    // 128: 32 if a tag row spans a second line (rowLog == 6), else 0
+	iLimit       int                       // 136: the end of the input, for the searches' ZSTD_count
+	skip         uint32                    // 144: lazySkipping, while lazyRow* runs
 }
