@@ -73,10 +73,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $15, R10
-	JNE   pos
-	MOVL  $15, R10
-
-pos:
+	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -215,8 +212,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $15, R10      // headGrouped
@@ -240,6 +239,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -249,11 +249,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -263,10 +267,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $15, CX
-	JNE     ins
-	MOVL    $15, CX
-
-ins:
+	CMOVLEQ rowMask15<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -278,7 +279,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -286,9 +289,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -765,10 +766,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $31, R10
-	JNE   pos
-	MOVL  $31, R10
-
-pos:
+	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -909,8 +907,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $31, R10      // headGrouped
@@ -938,6 +938,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -947,11 +948,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -961,10 +966,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $31, CX
-	JNE     ins
-	MOVL    $31, CX
-
-ins:
+	CMOVLEQ rowMask31<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -976,7 +978,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -984,9 +988,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -1465,10 +1467,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $63, R10
-	JNE   pos
-	MOVL  $63, R10
-
-pos:
+	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -1611,8 +1610,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $63, R10      // headGrouped
@@ -1650,6 +1651,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -1659,11 +1661,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -1673,10 +1679,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $63, CX
-	JNE     ins
-	MOVL    $63, CX
-
-ins:
+	CMOVLEQ rowMask63<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -1688,7 +1691,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -1696,9 +1701,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -2176,10 +2179,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $15, R10
-	JNE   pos
-	MOVL  $15, R10
-
-pos:
+	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -2318,8 +2318,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $15, R10      // headGrouped
@@ -2343,6 +2345,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -2352,11 +2355,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -2366,10 +2373,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $15, CX
-	JNE     ins
-	MOVL    $15, CX
-
-ins:
+	CMOVLEQ rowMask15<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -2381,7 +2385,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -2389,9 +2395,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -2868,10 +2872,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $31, R10
-	JNE   pos
-	MOVL  $31, R10
-
-pos:
+	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -3012,8 +3013,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $31, R10      // headGrouped
@@ -3041,6 +3044,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -3050,11 +3054,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -3064,10 +3072,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $31, CX
-	JNE     ins
-	MOVL    $31, CX
-
-ins:
+	CMOVLEQ rowMask31<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -3079,7 +3084,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -3087,9 +3094,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -3568,10 +3573,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $63, R10
-	JNE   pos
-	MOVL  $63, R10
-
-pos:
+	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -3714,8 +3716,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $63, R10      // headGrouped
@@ -3753,6 +3757,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -3762,11 +3767,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -3776,10 +3785,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $63, CX
-	JNE     ins
-	MOVL    $63, CX
-
-ins:
+	CMOVLEQ rowMask63<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -3791,7 +3797,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -3799,9 +3807,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -4279,10 +4285,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $15, R10
-	JNE   pos
-	MOVL  $15, R10
-
-pos:
+	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -4421,8 +4424,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $15, R10      // headGrouped
@@ -4446,6 +4451,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -4455,11 +4461,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -4469,10 +4479,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $15, CX
-	JNE     ins
-	MOVL    $15, CX
-
-ins:
+	CMOVLEQ rowMask15<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -4484,7 +4491,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -4492,9 +4501,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -4971,10 +4978,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $31, R10
-	JNE   pos
-	MOVL  $31, R10
-
-pos:
+	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -5115,8 +5119,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $31, R10      // headGrouped
@@ -5144,6 +5150,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -5153,11 +5160,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -5167,10 +5178,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $31, CX
-	JNE     ins
-	MOVL    $31, CX
-
-ins:
+	CMOVLEQ rowMask31<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -5182,7 +5190,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -5190,9 +5200,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -5671,10 +5679,7 @@ loop:
 	MOVBLZX (BX)(R13*1), R10
 	DECL  R10
 	ANDL  $63, R10
-	JNE   pos
-	MOVL  $63, R10
-
-pos:
+	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
 	MOVB  CX, (BX)(R13*1)
@@ -5817,8 +5822,10 @@ havehash:
 	MOVQ P_HASHTABLE, AX
 	LEAQ (AX)(BX*4), AX     // row
 	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVQ P_ILIMIT, R8
 	MOVL P_BASEIDX, R9
+	NEGQ R9
+	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
+	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
 	MOVL P_ATTEMPTS, R14
 	MOVBLZX (BX), R10
 	ANDL $63, R10      // headGrouped
@@ -5856,6 +5863,7 @@ gather:
 	JEQ   insert
 	TESTL R14, R14
 	JEQ   insert
+	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
@@ -5865,11 +5873,15 @@ gather:
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
-	MOVL  DX, CX
-	SUBL  R9, CX
-	CMPQ  CX, DI
+	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+	// checks lowestValid >= baseIdx; curr - maxDistance is above
+	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// compare and count below read only b[DX-baseIdx:] up to the
+	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
+	// read, and every one passed this check, so the compare loop needs none.
+	CMPL  DX, DI
 	JAE   bad
-	PREFETCHT0 (SI)(CX*1)
+	PREFETCHT0 (R9)(DX*1)
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
@@ -5879,10 +5891,7 @@ insert:
 	MOVBLZX (BX), CX
 	DECL    CX
 	ANDL    $63, CX
-	JNE     ins
-	MOVL    $63, CX
-
-ins:
+	CMOVLEQ rowMask63<>(SB), CX
 	MOVB    CX, (BX)
 	MOVL    S_TAG, DX
 	MOVB    DX, (BX)(CX*1)
@@ -5894,7 +5903,9 @@ ins:
 	MOVL $3, R10
 	XORL R11, R11
 	XORL R12, R12
+	MOVQ S_IP, DI
 	LEAQ (SI)(DI*1), BX
+	MOVQ P_ILIMIT, R8
 	SUBQ DI, R8             // iLimit - ip
 
 cmp:
@@ -5902,9 +5913,7 @@ cmp:
 	JAE  done
 	MOVL 0(SP)(R12*4), DX
 	INCQ R12
-	MOVL DX, CX
-	SUBL R9, CX
-	LEAQ (SI)(CX*1), AX
+	LEAQ (R9)(DX*1), AX
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
@@ -6344,3 +6353,10 @@ finish:
 bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
+
+DATA rowMask15<>+0(SB)/4, $15
+GLOBL rowMask15<>(SB), RODATA|NOPTR, $4
+DATA rowMask31<>+0(SB)/4, $31
+GLOBL rowMask31<>(SB), RODATA|NOPTR, $4
+DATA rowMask63<>+0(SB)/4, $63
+GLOBL rowMask63<>(SB), RODATA|NOPTR, $4
