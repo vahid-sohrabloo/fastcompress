@@ -382,3 +382,15 @@ table above):
 Level 7 now executes as many instructions per byte as C (176 vs 178); the
 rest of the gap is IPC (2.71 vs 3.15). Level 11 keeps its 1.6-1.7x LLC
 misses per byte, which the specialisation did not change.
+
+Where level 11's extra LLC misses come from: precise sampling of demand
+loads that miss L3 (`cpu_core/mem_load_retired.l3_miss/pp`, period 2000,
+dickens) gives about the same count per byte on both sides (~0.007-0.008
+per byte in the row search), split between the row-entry load
+(`row[matchPos]`: C 68%, Go 49%) and the first compare of a candidate
+(C ~30%, Go 49%). So demand misses are not the difference; the extra
+`cache-misses` (LLC references that miss, including prefetches) are, which
+points at prefetches that arrive late or are evicted before use rather than
+at extra data being touched. The instruction sequence around them is the
+same as C's, and the remaining level-11 gap is mostly lower IPC in the same
+loop (2.33 vs 3.12).
