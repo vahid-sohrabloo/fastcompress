@@ -1,7 +1,7 @@
 // Port of libzstd v1.5.7 lib/compress/zstd_lazy.c (Copyright (c) Meta
 // Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the binary-tree
-// (DUBT) insertion and search loops, always compiled; on amd64
-// dubt_amd64.s has equivalent ones.
+// (DUBT) insertion and search loops, always compiled; dubt_amd64.s
+// and dubt_arm64.s have equivalent ones.
 
 package zstd
 
