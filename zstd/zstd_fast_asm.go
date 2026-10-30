@@ -25,7 +25,9 @@ func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 	istart := int(srcIdx - baseIdx)
 	iend := istart + len(src)
 	nLits, nSeqs := len(ss.literals), len(ss.sequences)
-	if len(ms.hashTable) < 1<<hlog || iend > len(b) || prefixStart > istart ||
+	// prefixStartIndex >= baseIdx is checked explicitly (the assembly
+	// addresses b with b - baseIdx + index for indices >= prefixStartIndex).
+	if len(ms.hashTable) < 1<<hlog || iend > len(b) || prefixStartIndex < baseIdx || prefixStart > istart ||
 		cap(ss.literals)-nLits < len(src) || cap(ss.sequences)-nSeqs < len(src)/4 {
 		return compressBlockFastNoDictGeneric(ms, ss, rep, src, srcIdx, mls)
 	}
