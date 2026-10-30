@@ -3,7 +3,8 @@
 #include "textflag.h"
 
 // HASHL(pos, dst): long hash, (le64(b[pos:]) * prime8bytes) >> hShiftL.
-// HASHS(pos, dst): short hash, ((le64(b[pos:]) << shiftS) * primeS) >> hShiftS.
+// HASHS(pos, dst): short hash, ((le64(b[pos:]) << shiftS) * primeS) >> hShiftS,
+// computed as (le64 * PRIMES) >> hShiftS with PRIMES = primeS << shiftS.
 // Both clobber CX.
 #define HASHL(pos, dst) \
 	MOVQ  (SI)(pos*1), dst; \
@@ -14,9 +15,7 @@
 
 #define HASHS(pos, dst) \
 	MOVQ  (SI)(pos*1), dst; \
-	MOVQ  shiftS+96(FP), CX; \
-	SHLQ  CX, dst; \
-	IMULQ primeS+112(FP), dst; \
+	IMULQ PRIMES, dst; \
 	MOVQ  hShiftS+104(FP), CX; \
 	SHRQ  CX, dst
 
@@ -31,6 +30,7 @@
 #define ILIMIT 56(SP)
 #define MLEN 64(SP)
 #define MATCHL1 72(SP)
+#define PRIMES 80(SP)
 
 // func compressBlockDoubleFastAsm(hashLong, hashSmall *uint32, b *byte, seqs *seqDef, lits *byte,
 //	ip, istart, iend, prefixLowest int, prefixLowestIndex, baseIdx, rep1, rep2 uint32,
@@ -43,7 +43,7 @@
 // R11 nextStep, R12 hl0, R13 idxl0, R14 offset1; AX/BX/CX/DX scratch.
 // offset2, anchor, nSeq and nLits live in their argument/result slots.
 // For a match: R8 ip, DX match position, AX mLength, R12 offBase.
-TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $80-160
+TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $88-160
 	MOVQ hashLong+0(FP), DI
 	MOVQ hashSmall+8(FP), R15
 	MOVQ b+16(FP), SI
@@ -58,6 +58,10 @@ TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $80-160
 	MOVQ iend+56(FP), AX
 	SUBQ $8, AX
 	MOVQ AX, ILIMIT
+	MOVQ primeS+112(FP), AX
+	MOVQ shiftS+96(FP), CX
+	SHLQ CX, AX
+	MOVQ AX, PRIMES
 
 outer:
 	MOVL $1, R10            // step
