@@ -10,7 +10,7 @@ import (
 	"unsafe"
 )
 
-// TestRowAsmParamsLayout pins the field offsets row_amd64.s and row_arm64.s use (P_* macros).
+// TestRowAsmParamsLayout pins the field offsets row_lazy_amd64.s and row_lazy_arm64.s use (P_* macros).
 func TestRowAsmParamsLayout(t *testing.T) {
 	var p rowAsmParams
 	for _, c := range []struct {
@@ -23,21 +23,15 @@ func TestRowAsmParamsLayout(t *testing.T) {
 		{"cache", unsafe.Offsetof(p.cache), 24},
 		{"nextToUpdate", unsafe.Offsetof(p.nextToUpdate), 32},
 		{"entropy", unsafe.Offsetof(p.entropy), 40},
-		{"shift", unsafe.Offsetof(p.shift), 48},
-		{"hShift", unsafe.Offsetof(p.hShift), 56},
-		{"prime", unsafe.Offsetof(p.prime), 64},
-		{"saltAdj", unsafe.Offsetof(p.saltAdj), 72},
-		{"baseIdx", unsafe.Offsetof(p.baseIdx), 80},
-		{"rowLog", unsafe.Offsetof(p.rowLog), 84},
-		{"rowMask", unsafe.Offsetof(p.rowMask), 88},
-		{"nbAttempts", unsafe.Offsetof(p.nbAttempts), 92},
-		{"lowestValid", unsafe.Offsetof(p.lowestValid), 96},
-		{"maxDistance", unsafe.Offsetof(p.maxDistance), 100},
-		{"isDictionary", unsafe.Offsetof(p.isDictionary), 104},
-		{"pfHash2", unsafe.Offsetof(p.pfHash2), 120},
-		{"pfTag2", unsafe.Offsetof(p.pfTag2), 128},
-		{"iLimit", unsafe.Offsetof(p.iLimit), 136},
-		{"skip", unsafe.Offsetof(p.skip), 144},
+		{"hShift", unsafe.Offsetof(p.hShift), 48},
+		{"saltAdj", unsafe.Offsetof(p.saltAdj), 56},
+		{"baseIdx", unsafe.Offsetof(p.baseIdx), 64},
+		{"nbAttempts", unsafe.Offsetof(p.nbAttempts), 68},
+		{"lowestValid", unsafe.Offsetof(p.lowestValid), 72},
+		{"maxDistance", unsafe.Offsetof(p.maxDistance), 76},
+		{"isDictionary", unsafe.Offsetof(p.isDictionary), 80},
+		{"iLimit", unsafe.Offsetof(p.iLimit), 96},
+		{"skip", unsafe.Offsetof(p.skip), 104},
 	} {
 		if c.got != c.want {
 			t.Errorf("rowAsmParams.%s at offset %d, the assembly expects %d", c.name, c.got, c.want)
@@ -45,12 +39,10 @@ func TestRowAsmParamsLayout(t *testing.T) {
 	}
 }
 
-// TestRowAsmFinderEquiv compares, search by search, the row finder's
-// assembly entry points that the whole-loop lazyRow* leaves unused in
-// practice with the Go bodies: rowFindBestMatch with the Go helpers,
-// rowFindBestMatch with the assembly rowUpdateCached and rowSearch, and
-// rowFindBestMatchAsmCall, each on its own copy of the same match state.
-// Every result and the final tables must agree.
+// TestRowAsmFinderEquiv compares, search by search, rowFindBestMatch with
+// the Go rowUpdateCached and with the assembly one (which the whole-loop
+// lazyRow* leaves to the dictionary finders), each on its own copy of the
+// same match state. Every result and the final tables must agree.
 func TestRowAsmFinderEquiv(t *testing.T) {
 	text := readTestdata(t, "dickens-32k.raw")
 	r := rand.New(rand.NewPCG(7, 8))
@@ -88,32 +80,26 @@ func TestRowAsmFinderEquiv(t *testing.T) {
 					rowFillHashCache(ms, src, baseIdx, mls, ms.nextToUpdate, len(src)-16)
 					return ms
 				}
-				msGo, msAsm, msFind := mk(), mk(), mk()
+				msGo, msAsm := mk(), mk()
 				iend := len(src)
-				useRowAsm = true
-				rowAsmSetup(msFind, mls, rowLog, iend)
-				if !msFind.rowAsm.ok {
-					t.Fatal("rowAsmSetup refused the match state")
-				}
 				skipping := false
 				for ip := 1; ip < iend-24; {
 					if r.IntN(64) == 0 {
 						if skipping {
-							for _, ms := range []*matchState{msGo, msAsm, msFind} {
+							for _, ms := range []*matchState{msGo, msAsm} {
 								rowFillHashCache(ms, src, baseIdx, mls, ms.nextToUpdate, iend-24)
 							}
 						}
 						skipping = !skipping
 					}
-					msGo.lazySkipping, msAsm.lazySkipping, msFind.lazySkipping = skipping, skipping, skipping
+					msGo.lazySkipping, msAsm.lazySkipping = skipping, skipping
 					useRowAsm = false
 					ml1, ob1 := rowFindBestMatch(msGo, ip, iend, mls, rowLog)
 					useRowAsm = true
 					ml2, ob2 := rowFindBestMatch(msAsm, ip, iend, mls, rowLog)
-					ml3, ob3 := rowFindBestMatchAsmCall(msFind, ip, iend)
-					if ml1 != ml2 || ob1 != ob2 || ml1 != ml3 || ob1 != ob3 {
-						t.Fatalf("rowLog %d mls %d dict %v ip %d: Go (%d, %d), rowSearch asm (%d, %d), rowFindBestMatchAsm (%d, %d)",
-							rowLog, mls, dict, ip, ml1, ob1, ml2, ob2, ml3, ob3)
+					if ml1 != ml2 || ob1 != ob2 {
+						t.Fatalf("rowLog %d mls %d dict %v ip %d: Go (%d, %d), asm rowUpdateCached (%d, %d)",
+							rowLog, mls, dict, ip, ml1, ob1, ml2, ob2)
 					}
 					switch n := r.IntN(100); {
 					case n < 2:
@@ -124,14 +110,11 @@ func TestRowAsmFinderEquiv(t *testing.T) {
 						ip++
 					}
 				}
-				for _, ms := range []*matchState{msAsm, msFind} {
-					if !slices.Equal(ms.hashTable, msGo.hashTable) || !bytes.Equal(ms.tagTable, msGo.tagTable) ||
-						ms.hashCache != msGo.hashCache || ms.nextToUpdate != msGo.nextToUpdate ||
-						ms.hashSaltEntropy != msGo.hashSaltEntropy {
-						t.Fatalf("rowLog %d mls %d dict %v: the tables differ from Go's", rowLog, mls, dict)
-					}
+				if !slices.Equal(msAsm.hashTable, msGo.hashTable) || !bytes.Equal(msAsm.tagTable, msGo.tagTable) ||
+					msAsm.hashCache != msGo.hashCache || msAsm.nextToUpdate != msGo.nextToUpdate ||
+					msAsm.hashSaltEntropy != msGo.hashSaltEntropy {
+					t.Fatalf("rowLog %d mls %d dict %v: the tables differ from Go's", rowLog, mls, dict)
 				}
-				msFind.rowAsm = rowAsmParams{}
 			}
 		}
 	}

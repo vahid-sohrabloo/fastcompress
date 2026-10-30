@@ -274,8 +274,8 @@ func rowFindBestMatch(ms *matchState, ip, iLimit int, mls, rowLog uint32) (int, 
 	// Get the hash for ip, compute the appropriate row
 	relRow := (hash >> rowHashTagBits) << rowLog
 	tag := hash & rowHashTagMask
-	ml, matchIndex := rowSearch(ms, ip, iLimit, relRow, tag, rowLog, nbAttempts, lowLimit)
-	ms.nextToUpdate++ // rowSearch inserted it
+	ml, matchIndex := rowSearchGeneric(ms, ip, iLimit, relRow, tag, rowLog, nbAttempts, lowLimit)
+	ms.nextToUpdate++ // rowSearchGeneric inserted it
 	if ml > 4-1 {
 		offBase = offsetToOffBase(curr - matchIndex)
 	}
@@ -509,9 +509,6 @@ func hcFindBestMatch(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
 // and rowLog as arguments.
 func searchMax(ms *matchState, ip, iLimit int, mls, rowLog uint32, method searchMethod) (int, uint32) {
 	if method == searchRowHash {
-		if ms.rowAsm.ok {
-			return rowFindBestMatchAsmCall(ms, ip, iLimit)
-		}
 		return rowFindBestMatch(ms, ip, iLimit, mls, rowLog)
 	}
 	if method == searchBinaryTree {

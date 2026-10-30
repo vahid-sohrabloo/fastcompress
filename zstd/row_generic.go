@@ -98,10 +98,10 @@ func rowSearchGeneric(ms *matchState, ip, iLimit int, relRow, tag, rowLog, nbAtt
 	return ml, best
 }
 
-// rowAsmParams holds what the assembly rowFindBestMatchAsm reads for one
-// block; ok is false when it is not set up (always, without assembly).
-// The layout is fixed: row_amd64.s and row_arm64.s read the fields by
-// offset (checked by TestRowAsmParamsLayout).
+// rowAsmParams holds what the assembly lazyRow* reads for one block; ok is
+// false when it is not set up (always, without assembly). The layout is
+// fixed: row_lazy_amd64.s and row_lazy_arm64.s read the fields by offset
+// (checked by TestRowAsmParamsLayout).
 type rowAsmParams struct {
 	hashTable    *uint32                   // 0
 	tagTable     *byte                     // 8
@@ -109,21 +109,15 @@ type rowAsmParams struct {
 	cache        *[rowHashCacheSize]uint32 // 24
 	nextToUpdate *uint32                   // 32
 	entropy      *uint32                   // 40
-	shift        uint64                    // 48: hash = ((le64 << shift) * prime ^ saltAdj) >> hShift
-	hShift       uint64                    // 56
-	prime        uint64                    // 64
-	saltAdj      uint64                    // 72
-	baseIdx      uint32                    // 80
-	rowLog       uint32                    // 84
-	rowMask      uint32                    // 88
-	nbAttempts   uint32                    // 92
-	lowestValid  uint32                    // 96
-	maxDistance  uint32                    // 100
-	isDictionary uint32                    // 104
-	ok           bool                      // 108
-	bLen         int                       // 112: positions up to bLen-16 may be searched
-	pfHash2      uint64                    // 120: 64 if a hash row spans a second cache line (rowLog >= 5), else 0
-	pfTag2       uint64                    // 128: 32 if a tag row spans a second line (rowLog == 6), else 0
-	iLimit       int                       // 136: the end of the input, for the searches' ZSTD_count
-	skip         uint32                    // 144: lazySkipping, while lazyRow* runs
+	hShift       uint64                    // 48: hash = (le64 * (prime << shift) ^ saltAdj) >> hShift
+	saltAdj      uint64                    // 56
+	baseIdx      uint32                    // 64
+	nbAttempts   uint32                    // 68
+	lowestValid  uint32                    // 72
+	maxDistance  uint32                    // 76
+	isDictionary uint32                    // 80
+	ok           bool                      // 84
+	bLen         int                       // 88: positions up to bLen-16 may be searched
+	iLimit       int                       // 96: the end of the input, for the searches' ZSTD_count
+	skip         uint32                    // 104: lazySkipping, while lazyRow* runs
 }

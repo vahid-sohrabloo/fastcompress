@@ -23,28 +23,6 @@ func rowUpdateCached(ms *matchState, idx, end, mls, rowLog uint32) {
 		uint64(saltedHashShift[m]), uint64(64-hBits), saltedHashPrime[m], ms.hashSalt<<saltedHashSaltShift[m])
 }
 
-func rowSearch(ms *matchState, ip, iLimit int, relRow, tag, rowLog, nbAttempts, lowLimit uint32) (int, uint32) {
-	if !useRowAsm {
-		return rowSearchGeneric(ms, ip, iLimit, relRow, tag, rowLog, nbAttempts, lowLimit)
-	}
-	b := ms.window.base
-	end := int(relRow) + 1<<rowLog
-	if rowLog < 4 || rowLog > 6 || end > len(ms.hashTable) || end > len(ms.tagTable) ||
-		ip <= 0 || ip >= iLimit || iLimit > len(b) {
-		panic("zstd: rowSearch preconditions")
-	}
-	baseIdx := ms.window.baseIdx
-	if lowLimit < baseIdx {
-		panic("zstd: rowSearch lowLimit below the window base")
-	}
-	ml, best := rowSearchAsm(&ms.hashTable[0], &ms.tagTable[0], &b[0], ip, iLimit,
-		baseIdx, relRow, tag, rowLog, nbAttempts, lowLimit, ms.nextToUpdate)
-	if ml < 0 {
-		panic("zstd: row table holds an index at or after the current position")
-	}
-	return ml, best
-}
-
 // rowAsmSetup prepares ms.rowAsm for compressBlockLazyGeneric's row
 // searches over a block ending at iend (a position in ms.window.base).
 func rowAsmSetup(ms *matchState, mls, rowLog uint32, iend int) {
@@ -65,13 +43,9 @@ func rowAsmSetup(ms *matchState, mls, rowLog uint32, iend int) {
 		cache:        &ms.hashCache,
 		nextToUpdate: &ms.nextToUpdate,
 		entropy:      &ms.hashSaltEntropy,
-		shift:        uint64(saltedHashShift[m]),
 		hShift:       uint64(64 - (ms.rowHashLog + rowHashTagBits)),
-		prime:        saltedHashPrime[m],
 		saltAdj:      ms.hashSalt << saltedHashSaltShift[m],
 		baseIdx:      ms.window.baseIdx,
-		rowLog:       rowLog,
-		rowMask:      1<<rowLog - 1,
 		nbAttempts:   1 << min(cParams.searchLog, rowLog),
 		lowestValid:  ms.window.lowLimit,
 		maxDistance:  1 << cParams.windowLog,
@@ -82,24 +56,6 @@ func rowAsmSetup(ms *matchState, mls, rowLog uint32, iend int) {
 	if ms.loadedDictEnd != 0 {
 		p.isDictionary = 1
 	}
-	if rowLog >= 5 {
-		p.pfHash2 = 64
-	}
-	if rowLog == 6 {
-		p.pfTag2 = 32
-	}
-}
-
-func rowFindBestMatchAsmCall(ms *matchState, ip, iLimit int) (int, uint32) {
-	p := &ms.rowAsm
-	if ip <= 0 || ip >= iLimit || iLimit > p.bLen || ip+16 > p.bLen || ms.nextToUpdate > uint32(ip)+p.baseIdx {
-		return rowFindBestMatch(ms, ip, iLimit, min(max(ms.cParams.minMatch, 4), 6), p.rowLog)
-	}
-	ml, offBase := rowFindBestMatchAsm(p, ip, iLimit, ms.lazySkipping)
-	if ml < 0 {
-		panic("zstd: row table holds an index at or after the current position")
-	}
-	return ml, offBase
 }
 
 // lazyRowRun runs compressBlockLazyGeneric's match loop (row finder, noDict)
