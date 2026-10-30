@@ -1,7 +1,7 @@
 // Port of libzstd v1.5.7 lib/compress/hist.c (Copyright (c) Meta
 // Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the counting
-// loop of HIST_count_parallel_wksp, always compiled; on amd64 hist_amd64.s
-// has an equivalent one.
+// loop of HIST_count_parallel_wksp, always compiled; hist_amd64.s and
+// hist_arm64.s have equivalent ones.
 
 package hist
 
