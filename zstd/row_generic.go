@@ -1,7 +1,7 @@
 // Port of libzstd v1.5.7 lib/compress/zstd_lazy.c (Copyright (c) Meta
 // Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the inner loops of
-// the row-based match finder, which have amd64 assembly versions
-// (row_amd64.s). These Go bodies are always compiled.
+// the row-based match finder, which have amd64 and arm64 assembly versions
+// (row_amd64.s, row_arm64.s). These Go bodies are always compiled.
 
 package zstd
 
@@ -98,10 +98,10 @@ func rowSearchGeneric(ms *matchState, ip, iLimit int, relRow, tag, rowLog, nbAtt
 	return ml, best
 }
 
-// rowAsmParams holds what the amd64 rowFindBestMatchAsm reads for one
+// rowAsmParams holds what the assembly rowFindBestMatchAsm reads for one
 // block; ok is false when it is not set up (always, without assembly).
-// The layout is fixed: row_amd64.s reads the fields by offset (checked by
-// TestRowAsmParamsLayout).
+// The layout is fixed: row_amd64.s and row_arm64.s read the fields by
+// offset (checked by TestRowAsmParamsLayout).
 type rowAsmParams struct {
 	hashTable    *uint32                   // 0
 	tagTable     *byte                     // 8
