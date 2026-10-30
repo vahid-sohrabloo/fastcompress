@@ -20,8 +20,7 @@ import (
 
 type spec struct {
 	M, R    int    // mls, rowLog
-	Shift   int    // hash: (le64 << Shift) * Prime
-	Prime   string // as an immediate
+	Prime   string // hash: le64 * Prime, C's (le64 << shift) * prime with the shift folded in (as C does)
 	Mask    int    // 1<<R - 1
 	PfHash2 bool   // a hash row spans a second cache line (R >= 5)
 	PfTag2  bool   // a tag row spans a second cache line (R == 6)
@@ -29,12 +28,13 @@ type spec struct {
 }
 
 func main() {
-	primes := map[int]string{4: "2654435761", 5: "889523592379", 6: "227718039650203"} // prime{4,5,6}bytes
+	primes := map[int]uint64{4: 2654435761, 5: 889523592379, 6: 227718039650203} // prime{4,5,6}bytes
 	shifts := map[int]int{4: 32, 5: 64 - 40, 6: 64 - 48}
 	var specs []spec
 	for m := 4; m <= 6; m++ {
 		for r := 4; r <= 6; r++ {
-			specs = append(specs, spec{m, r, shifts[m], primes[m], 1<<r - 1, r >= 5, r == 6, fmt.Sprintf("%d%d", m, r)})
+			prime := fmt.Sprintf("0x%x", primes[m]<<shifts[m]) // (x << s) * p == x * (p << s) mod 2^64
+			specs = append(specs, spec{m, r, prime, 1<<r - 1, r >= 5, r == 6, fmt.Sprintf("%d%d", m, r)})
 		}
 	}
 	var out bytes.Buffer
@@ -116,17 +116,13 @@ TEXT ·rowUpd{{.Name}}(SB), NOSPLIT, $0-0
 	SUBQ R10, SI
 	MOVQ ${{.Prime}}, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-{{- if .Shift}}
-	SHLQ  ${{.Shift}}, DI
-{{- end}}
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -140,9 +136,9 @@ loop:
 	PREFETCHT0 32(BX)(R13*1)
 {{- end}}
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  ${{.R}}, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -151,7 +147,7 @@ loop:
 	CMOVLEQ rowMask{{.Mask}}<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -211,9 +207,6 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-{{- if .Shift}}
-	SHLQ ${{.Shift}}, R10
-{{- end}}
 	MOVQ ${{.Prime}}, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
@@ -252,9 +245,6 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-{{- if .Shift}}
-	SHLQ ${{.Shift}}, R10
-{{- end}}
 	MOVQ ${{.Prime}}, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
@@ -282,9 +272,6 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-{{- if .Shift}}
-	SHLQ ${{.Shift}}, BX
-{{- end}}
 	MOVQ ${{.Prime}}, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
@@ -351,19 +338,16 @@ havehash:
 {{- end}}
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  ${{.Mask}}, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -379,7 +363,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -769,9 +757,6 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-{{- if .Shift}}
-	SHLQ ${{.Shift}}, R10
-{{- end}}
 	MOVQ ${{.Prime}}, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10

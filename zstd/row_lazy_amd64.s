@@ -47,17 +47,15 @@ TEXT ·rowUpd44(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $2654435761, R11
+	MOVQ $0x9e3779b100000000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $32, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -65,9 +63,9 @@ loop:
 	PREFETCHT0 (AX)(R13*4)
 	PREFETCHT0 (BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $4, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -76,7 +74,7 @@ loop:
 	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -136,8 +134,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -169,8 +166,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -191,8 +187,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $32, BX
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -233,19 +228,16 @@ havehash:
 	MOVWLZX   R11, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $15, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -261,7 +253,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -651,8 +647,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -769,17 +764,15 @@ TEXT ·rowUpd45(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $2654435761, R11
+	MOVQ $0x9e3779b100000000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $32, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -788,9 +781,9 @@ loop:
 	PREFETCHT0 64(AX)(R13*4)
 	PREFETCHT0 (BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $5, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -799,7 +792,7 @@ loop:
 	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -859,8 +852,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -893,8 +885,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -916,8 +907,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $32, BX
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -962,19 +952,16 @@ havehash:
 	RORL      CX, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $31, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -990,7 +977,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -1380,8 +1371,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -1499,17 +1489,15 @@ TEXT ·rowUpd46(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $2654435761, R11
+	MOVQ $0x9e3779b100000000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $32, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -1519,9 +1507,9 @@ loop:
 	PREFETCHT0 (BX)(R13*1)
 	PREFETCHT0 32(BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $6, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -1530,7 +1518,7 @@ loop:
 	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -1590,8 +1578,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -1625,8 +1612,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -1649,8 +1635,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $32, BX
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -1705,19 +1690,16 @@ havehash:
 	RORQ      CX, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $63, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -1733,7 +1715,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -2123,8 +2109,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $32, R10
-	MOVQ $2654435761, CX
+	MOVQ $0x9e3779b100000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -2243,17 +2228,15 @@ TEXT ·rowUpd54(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $889523592379, R11
+	MOVQ $0xcf1bbcdcbb000000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $24, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -2261,9 +2244,9 @@ loop:
 	PREFETCHT0 (AX)(R13*4)
 	PREFETCHT0 (BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $4, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -2272,7 +2255,7 @@ loop:
 	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -2332,8 +2315,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -2365,8 +2347,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -2387,8 +2368,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $24, BX
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -2429,19 +2409,16 @@ havehash:
 	MOVWLZX   R11, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $15, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -2457,7 +2434,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -2847,8 +2828,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -2965,17 +2945,15 @@ TEXT ·rowUpd55(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $889523592379, R11
+	MOVQ $0xcf1bbcdcbb000000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $24, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -2984,9 +2962,9 @@ loop:
 	PREFETCHT0 64(AX)(R13*4)
 	PREFETCHT0 (BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $5, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -2995,7 +2973,7 @@ loop:
 	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -3055,8 +3033,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -3089,8 +3066,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -3112,8 +3088,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $24, BX
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -3158,19 +3133,16 @@ havehash:
 	RORL      CX, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $31, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -3186,7 +3158,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -3576,8 +3552,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -3695,17 +3670,15 @@ TEXT ·rowUpd56(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $889523592379, R11
+	MOVQ $0xcf1bbcdcbb000000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $24, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -3715,9 +3688,9 @@ loop:
 	PREFETCHT0 (BX)(R13*1)
 	PREFETCHT0 32(BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $6, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -3726,7 +3699,7 @@ loop:
 	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -3786,8 +3759,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -3821,8 +3793,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -3845,8 +3816,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $24, BX
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -3901,19 +3871,16 @@ havehash:
 	RORQ      CX, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $63, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -3929,7 +3896,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -4319,8 +4290,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $24, R10
-	MOVQ $889523592379, CX
+	MOVQ $0xcf1bbcdcbb000000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -4439,17 +4409,15 @@ TEXT ·rowUpd64(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $227718039650203, R11
+	MOVQ $0xcf1bbcdcbf9b0000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $16, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -4457,9 +4425,9 @@ loop:
 	PREFETCHT0 (AX)(R13*4)
 	PREFETCHT0 (BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $4, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -4468,7 +4436,7 @@ loop:
 	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -4528,8 +4496,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -4561,8 +4528,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -4583,8 +4549,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $16, BX
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -4625,19 +4590,16 @@ havehash:
 	MOVWLZX   R11, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $15, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -4653,7 +4615,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -5043,8 +5009,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -5161,17 +5126,15 @@ TEXT ·rowUpd65(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $227718039650203, R11
+	MOVQ $0xcf1bbcdcbf9b0000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $16, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -5180,9 +5143,9 @@ loop:
 	PREFETCHT0 64(AX)(R13*4)
 	PREFETCHT0 (BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $5, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -5191,7 +5154,7 @@ loop:
 	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -5251,8 +5214,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -5285,8 +5247,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -5308,8 +5269,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $16, BX
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -5354,19 +5314,16 @@ havehash:
 	RORL      CX, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $31, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -5382,7 +5339,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -5772,8 +5733,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -5891,17 +5851,15 @@ TEXT ·rowUpd66(SB), NOSPLIT, $0-0
 	MOVQ P_B, SI
 	MOVL P_BASEIDX, R10
 	SUBQ R10, SI
-	MOVQ $227718039650203, R11
+	MOVQ $0xcf1bbcdcbf9b0000, R11
 	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, R14
+	MOVQ P_HSHIFT, CX
 
 loop:
 	MOVL  R8, R10
 	MOVQ  8(SI)(R10*1), DI
-	SHLQ  $16, DI
 	IMULQ R11, DI
 	XORQ  R12, DI
-	MOVQ  R14, CX
 	SHRQ  CX, DI               // newHash
 	MOVL  DI, R13
 	SHRL  $8, R13
@@ -5911,9 +5869,9 @@ loop:
 	PREFETCHT0 (BX)(R13*1)
 	PREFETCHT0 32(BX)(R13*1)
 	ANDL  $7, R10
-	MOVL  (DX)(R10*4), CX      // hash
+	MOVL  (DX)(R10*4), R14     // hash
 	MOVL  DI, (DX)(R10*4)
-	MOVL  CX, R13
+	MOVL  R14, R13
 	SHRL  $8, R13
 	SHLL  $6, R13           // relRow
 	MOVBLZX (BX)(R13*1), R10
@@ -5922,7 +5880,7 @@ loop:
 	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
 	MOVB  R10, (BX)(R13*1)
 	ADDQ  R10, R13
-	MOVB  CX, (BX)(R13*1)
+	MOVB  R14, (BX)(R13*1)
 	MOVL  R8, (AX)(R13*4)
 	INCL  R8
 	CMPL  R8, R9
@@ -5982,8 +5940,7 @@ fill:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -6017,8 +5974,7 @@ upd:
 	MOVQ P_B, SI
 	MOVQ S_IP, DI
 	MOVQ 8(SI)(DI*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
@@ -6041,8 +5997,7 @@ upd:
 
 skipping:
 	MOVQ (SI)(DI*1), BX
-	SHLQ $16, BX
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, BX
 	XORQ P_SALT, BX
 	MOVQ P_HSHIFT, CX
@@ -6097,19 +6052,16 @@ havehash:
 	RORQ      CX, R11
 	MOVL      S_LOWLIM, R12
 	XORL      R13, R13
+	JMP       gnext             // nbAttempts >= 1
 
 gather:
-	TESTQ R11, R11
-	JEQ   insert
-	TESTL R14, R14
-	JEQ   insert
 	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
 	BSFQ  R11, CX
 	LEAQ  -1(R11), DX
 	ANDQ  DX, R11
 	ADDL  R10, CX
 	ANDL  $63, CX
-	JEQ   gather            // the head entry is not a candidate
+	JEQ   gnext             // the head entry is not a candidate
 	MOVL  (AX)(CX*4), DX
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
@@ -6125,7 +6077,11 @@ gather:
 	MOVL  DX, 0(SP)(R13*4)
 	INCL  R13
 	DECL  R14
-	JMP   gather
+	JEQ   insert
+
+gnext:
+	TESTQ R11, R11
+	JNE   gather
 
 insert:
 	MOVBLZX (BX), CX
@@ -6515,8 +6471,7 @@ fillloop:
 	MOVL R8, AX
 	SUBL P_BASEIDX, AX
 	MOVQ (SI)(AX*1), R10
-	SHLQ $16, R10
-	MOVQ $227718039650203, CX
+	MOVQ $0xcf1bbcdcbf9b0000, CX
 	IMULQ CX, R10
 	XORQ P_SALT, R10
 	MOVQ P_HSHIFT, CX
