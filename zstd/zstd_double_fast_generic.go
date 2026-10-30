@@ -2,7 +2,7 @@
 // Meta Platforms, Inc. and affiliates; BSD/GPLv2 dual license).
 //
 // The Go body of the no-dictionary double-fast match finder, always
-// compiled; on amd64 zstd_double_fast_amd64.s replaces its main loop.
+// compiled; zstd_double_fast_amd64.s and _arm64.s replace its main loop.
 
 package zstd
 

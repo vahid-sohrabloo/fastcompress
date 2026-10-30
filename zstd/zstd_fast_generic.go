@@ -1,8 +1,8 @@
 // Port of libzstd v1.5.7 lib/compress/zstd_fast.c (Copyright (c) Meta
 // Platforms, Inc. and affiliates; BSD/GPLv2 dual license).
 //
-// The Go body of the no-dictionary fast match finder, always compiled; on
-// amd64 zstd_fast_amd64.s replaces its main loop.
+// The Go body of the no-dictionary fast match finder, always compiled;
+// zstd_fast_amd64.s and zstd_fast_arm64.s replace its main loop.
 
 package zstd
 

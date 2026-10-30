@@ -37,3 +37,7 @@ Mirrors the above: one `Encoder` (pooling its cctx), one `EncodeAll` per indepen
     go test ./zstd -run xxx -bench 'EncodeAll/xml/1' -cpuprofile cpu.prof
 
 `BenchmarkEncodeAll/<file>/<level>` skips missing corpus files.
+
+## arm64
+
+The assembly routines have arm64 ports (NEON for the row match finder's tag compare), tested for byte-identical output under qemu. There is no arm64 hardware here, so arm64 speed against C is unverified until arm64 hardware is available; qemu timings say nothing about it.
