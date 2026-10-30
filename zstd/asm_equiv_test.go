@@ -65,8 +65,9 @@ var crefTests = []struct {
 }
 
 // TestAsmEquiv runs every C-reference test with the assembly routines off,
-// on, and on without BMI2 (the baseline-amd64 variants). Each run must
-// reproduce C's output, so all three produce identical bytes.
+// on, and, on a BMI2 host, on without BMI2 (the baseline-amd64 variants;
+// elsewhere asm=on already ran those). Each run must reproduce C's output,
+// so all runs produce identical bytes.
 func TestAsmEquiv(t *testing.T) {
 	if len(cpu.AsmRoutines()) == 0 {
 		t.Log("no assembly routines in this build; running the Go bodies only")

@@ -16,11 +16,3 @@ func init() {
 //
 //go:noescape
 func countStripesAsm(ws *[4 * 256]uint32, src *byte, n int)
-
-func countStripes(ws *[4 * 256]uint32, src []byte) {
-	if !useHistAsm || len(src) == 0 {
-		countStripesGeneric(ws, src)
-		return
-	}
-	countStripesAsm(ws, &src[0], len(src))
-}

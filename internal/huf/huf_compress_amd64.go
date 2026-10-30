@@ -33,17 +33,11 @@ func compress1XAsm(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
 //go:noescape
 func compress1XAsmBMI2(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
 
-func compress1XBody(dst, src []byte, ct CTable) int {
-	if !useHufAsm || len(dst) <= 8 || ReadCTableHeader(ct).TableLog > TableLogMax {
-		return compress1XBodyGeneric(dst, src, ct)
-	}
-	var srcPtr *byte
-	if len(src) > 0 {
-		srcPtr = &src[0]
-	}
-	elts := (*[SymbolValueMax + 1]CElt)(ct[1:])
+// compress1XAsmVariant runs compress1XAsmBMI2 when it is on, else
+// compress1XAsm.
+func compress1XAsmVariant(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int {
 	if useHufBMI2 {
-		return compress1XAsmBMI2(&dst[0], len(dst), srcPtr, len(src), &elts[0])
+		return compress1XAsmBMI2(dst, dstLen, src, srcLen, ct)
 	}
-	return compress1XAsm(&dst[0], len(dst), srcPtr, len(src), &elts[0])
+	return compress1XAsm(dst, dstLen, src, srcLen, ct)
 }
