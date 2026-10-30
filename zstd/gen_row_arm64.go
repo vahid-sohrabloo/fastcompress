@@ -107,6 +107,7 @@ TEXT ·rowUpd{{.Name}}(SB), NOSPLIT|NOFRAME, $0-0
 	MOVD  ${{.Prime}}, R9
 	MOVD  P_SALT, R10
 	MOVD  P_HSHIFT, R11
+	MOVW  ${{.Mask}}, R17
 
 loop:
 	ADD   R2, R7, R12
@@ -133,11 +134,8 @@ loop:
 	LSLW  ${{.R}}, R14, R14       // relRow
 	MOVBU (R5)(R14), R12
 	SUBW  $1, R12
-	ANDW  ${{.Mask}}, R12
-	CBNZW R12, pos
-	MOVW  ${{.Mask}}, R12
-
-pos:
+	ANDSW ${{.Mask}}, R12, R12
+	CSELW EQ, R17, R12, R12     // head 0 wraps to rowMask (C: cmove)
 	MOVB  R12, (R5)(R14)
 	ADD   R12, R14, R14
 	MOVB  R16, (R5)(R14)
@@ -289,6 +287,8 @@ havehash:
 	ADD   R3, R6, R6            // tagRow
 	MOVD  P_ILIMIT, R8
 	MOVWU P_BASEIDX, R9
+	SUB   R9, R4, R7            // b - baseIdx: an index addresses b directly
+	MOVWU S_CURR, R20
 	MOVWU P_ATTEMPTS, R14
 	MOVBU (R6), R10
 	ANDW  ${{.Mask}}, R10         // head
@@ -349,10 +349,12 @@ gather:
 	MOVWU (R5)(R16<<2), R17
 	CMPW  R12, R17
 	BLO   insert                // below lowLimit: stop
-	SUBW  R9, R17, R16
-	CMP   R0, R16
+	// lowLimit <= R17 < curr and lowLimit >= baseIdx (see the amd64
+	// generator), so R7 + R17 lies in b[0:ip]; the compare loop reads only
+	// buffered candidates, which all passed this check.
+	CMPW  R20, R17
 	BHS   bad
-	ADD   R16, R4, R19
+	ADD   R17, R7, R19
 	PRFM  (R19), PLDL1KEEP
 	MOVW  R17, (R15)(R13<<2)
 	ADD   $1, R13
@@ -362,11 +364,9 @@ gather:
 insert:
 	MOVBU (R6), R16
 	SUBW  $1, R16
-	ANDW  ${{.Mask}}, R16
-	CBNZW R16, ins
-	MOVW  ${{.Mask}}, R16
-
-ins:
+	ANDSW ${{.Mask}}, R16, R16
+	MOVW  ${{.Mask}}, R17
+	CSELW EQ, R17, R16, R16
 	MOVB  R16, (R6)
 	MOVWU S_TAG, R17
 	MOVB  R17, (R6)(R16)
@@ -387,8 +387,7 @@ cmp:
 	BHS   done
 	MOVWU (R15)(R12<<2), R3
 	ADD   $1, R12
-	SUBW  R9, R3, R2
-	ADD   R2, R4, R2
+	ADD   R3, R7, R2
 	ADD   R10, R2, R16
 	MOVWU -3(R16), R16
 	ADD   R10, R1, R17
