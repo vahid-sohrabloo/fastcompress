@@ -352,8 +352,9 @@ gather:
 	CMPL  DX, R12
 	JB    insert            // below lowLimit: stop
 	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
-	// checks lowestValid >= baseIdx; curr - maxDistance is above
-	// lowestValid when it is used). So R9 + DX lies in b[0:ip], and the
+	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
+	// curr - lowestValid does not wrap and curr - maxDistance is used only
+	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
 	// compare and count below read only b[DX-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
