@@ -73,12 +73,16 @@ inner:
 	B     foundrep
 
 norep:
-	CMPW  R23, R7
-	BLO   miss1
-	SUBW  R22, R7, R14
-	CMP   R2, R14
+	// Branchless on the index, as on amd64: matchIdx < current0 (else
+	// bad); below prefixStartIndex matchIdx becomes current0, so ip0
+	// itself is read and incremented, and the compare fails.
+	CMPW  R13, R7
 	BHS   bad
+	CMPW  R23, R7
+	CSELW LO, R13, R7, R7
+	SUBW  R22, R7, R14
 	MOVWU (R0)(R14), R15
+	CINCW LO, R15, R15
 	MOVWU (R0)(R2), R16
 	CMPW  R15, R16
 	BNE   miss1
@@ -95,12 +99,13 @@ miss1:
 	ADD   $1, R4                  // ip2 = ip3
 	ADDW  R2, R22, R13
 	MOVW  R13, (R1)(R5<<2)
-	CMPW  R23, R7
-	BLO   miss2
-	SUBW  R22, R7, R14
-	CMP   R2, R14
+	CMPW  R13, R7
 	BHS   bad
+	CMPW  R23, R7
+	CSELW LO, R13, R7, R7
+	SUBW  R22, R7, R14
 	MOVWU (R0)(R14), R15
+	CINCW LO, R15, R15
 	MOVWU (R0)(R2), R16
 	CMPW  R15, R16
 	BNE   miss2

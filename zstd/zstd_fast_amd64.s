@@ -85,16 +85,21 @@ inner:
 	JMP   foundrep
 
 norep:
-	// prefixStartIndex <= matchIdx < current0 (AX), so R15 + matchIdx lies
-	// in b[prefixStart:ip0] (prefixStartIndex >= baseIdx: the Go caller
-	// falls back otherwise).
-	CMPL R13, prefixStartIndex+64(FP)
-	JB   miss1
-	CMPL R13, AX
-	JAE  bad
-	MOVL (R15)(R13*1), DX
-	CMPL DX, (SI)(R8*1)
-	JNE  miss1
+	// matchIdx < current0 (AX), else bad. Without a branch on the index
+	// (C: zstd_fast.c's mval = idx >= prefixStartIndex ? read32(match) :
+	// read32(ip0) ^ 1): for prefixStartIndex <= matchIdx, R15 + matchIdx
+	// lies in b[prefixStart:ip0] (prefixStartIndex >= baseIdx: the Go
+	// caller falls back otherwise); below it, matchIdx becomes current0,
+	// so ip0 itself is read, and the carry from the index compare is
+	// added, so the compare fails (and matchIdx is not used again).
+	CMPL    R13, AX
+	JAE     bad
+	CMPL    R13, prefixStartIndex+64(FP)
+	CMOVLCS AX, R13
+	MOVL    (R15)(R13*1), DX
+	ADCL    $0, DX
+	CMPL    DX, (SI)(R8*1)
+	JNE     miss1
 	LEAL (R9)(BX*1), AX
 	MOVL AX, (DI)(R12*4)   // hashTable[hash1] = idx(ip1)
 	JMP  foundoffset
@@ -109,13 +114,14 @@ miss1:
 	LEAL (R8)(BX*1), AX
 	MOVL AX, 0(SP)
 	MOVL AX, (DI)(R11*4)
-	CMPL R13, prefixStartIndex+64(FP)
-	JB   miss2
-	CMPL R13, AX
-	JAE  bad
-	MOVL (R15)(R13*1), DX
-	CMPL DX, (SI)(R8*1)
-	JNE  miss2
+	CMPL    R13, AX            // as at norep
+	JAE     bad
+	CMPL    R13, prefixStartIndex+64(FP)
+	CMOVLCS AX, R13
+	MOVL    (R15)(R13*1), DX
+	ADCL    $0, DX
+	CMPL    DX, (SI)(R8*1)
+	JNE     miss2
 	CMPQ 16(SP), $4
 	JA   foundoffset
 	LEAL (R9)(BX*1), AX
