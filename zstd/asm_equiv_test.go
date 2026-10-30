@@ -2,6 +2,7 @@ package zstd
 
 import (
 	"bytes"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
@@ -65,9 +66,10 @@ var crefTests = []struct {
 }
 
 // TestAsmEquiv runs every C-reference test with the assembly routines off,
-// on, and, on a BMI2 host, on without BMI2 (the baseline-amd64 variants;
-// elsewhere asm=on already ran those). Each run must reproduce C's output,
-// so all runs produce identical bytes.
+// on, on a BMI2 host on without BMI2 (the baseline-amd64 variants;
+// elsewhere asm=on already ran those), and on an AVX2 host on without AVX2
+// (the scalar match-length count). Each run must reproduce C's output, so
+// all runs produce identical bytes.
 func TestAsmEquiv(t *testing.T) {
 	if len(cpu.AsmRoutines()) == 0 {
 		t.Log("no assembly routines in this build; running the Go bodies only")
@@ -86,12 +88,64 @@ func TestAsmEquiv(t *testing.T) {
 		return
 	}
 	run("asm=on", true)
-	if !cpu.X86.HasBMI2 {
-		return // asm=on already ran the baseline variants (always so off amd64)
+	// Without the feature, asm=on already ran the fallback (always so off amd64).
+	if cpu.X86.HasBMI2 {
+		restore := cpu.DisableBMI2()
+		run("asm=on,bmi2=off", true)
+		restore()
 	}
-	restore := cpu.DisableBMI2()
-	defer restore()
-	run("asm=on,bmi2=off", true)
+	if cpu.X86.HasAVX2 {
+		restore := cpu.DisableAVX2()
+		run("asm=on,avx2=off", true)
+		restore()
+	}
+}
+
+// TestAsmEquivMatchLengths compresses inputs made of one random block
+// repeated with a changed byte every n bytes, for n around the count
+// loops' 8- and 32-byte steps, at every EncoderLevel with the assembly off,
+// on and (on an AVX2 host) on without AVX2. The frames must be equal and
+// decode with C.
+func TestAsmEquivMatchLengths(t *testing.T) {
+	r := rand.New(rand.NewPCG(1, 2))
+	unit := make([]byte, 4096)
+	for i := range unit {
+		unit[i] = byte(r.IntN(256))
+	}
+	var lens []int
+	for n := 4; n <= 140; n++ {
+		lens = append(lens, n)
+	}
+	lens = append(lens, 255, 256, 257, 1000, 4095)
+	for _, n := range lens {
+		src := make([]byte, 0, 64<<10)
+		for len(src) < cap(src) {
+			src = append(src, unit...)
+		}
+		for i := n; i < len(src); i += n + 1 + r.IntN(3) {
+			src[i]++
+		}
+		for _, lv := range encoderLevels {
+			e := newTestEncoder(t, WithEncoderLevel(lv.l))
+			var off, on, noAVX2 []byte
+			withAsm(t, false, func() { off = e.EncodeAll(src, nil) })
+			withAsm(t, true, func() { on = e.EncodeAll(src, nil) })
+			if cpu.X86.HasAVX2 {
+				restore := cpu.DisableAVX2()
+				withAsm(t, true, func() { noAVX2 = e.EncodeAll(src, nil) })
+				restore()
+			} else {
+				noAVX2 = on
+			}
+			if !bytes.Equal(off, on) || !bytes.Equal(off, noAVX2) {
+				t.Fatalf("n %d L%d: assembly changes the output (off %d, on %d, avx2=off %d bytes)",
+					n, lv.c, len(off), len(on), len(noAVX2))
+			}
+			if got := creftest.DecodeC(t, on); !bytes.Equal(got, src) {
+				t.Fatalf("n %d L%d: C decode mismatch", n, lv.c)
+			}
+		}
+	}
 }
 
 // FuzzEncodeAsmEquiv compresses src with the assembly routines on and off;

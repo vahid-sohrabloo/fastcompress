@@ -8,8 +8,14 @@ import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
 // finder (baseline amd64 instructions only).
 var useFastAsm bool
 
+// useAVX2 selects the 32-byte AVX2 compare in fastCount and in the row
+// search's inline count (row_lazy_amd64.s), taken once the first 8 bytes
+// match. The scalar 8-byte loop runs otherwise.
+var useAVX2 bool
+
 func init() {
 	cpu.RegisterAsm("fast", &useFastAsm, func() bool { return true })
+	cpu.RegisterAsm("avx2count", &useAVX2, func() bool { return cpu.X86.HasAVX2 })
 }
 
 // compressBlockFastAsm runs the search loop of

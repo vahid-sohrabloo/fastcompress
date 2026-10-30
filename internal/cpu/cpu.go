@@ -5,7 +5,7 @@
 package cpu
 
 // X86 holds the features detected at start-up. Tests may clear them (see
-// DisableBMI2) to exercise the baseline paths.
+// DisableBMI2 and DisableAVX2) to exercise the baseline paths.
 var X86 struct {
 	HasBMI1 bool // TZCNT, ANDN, ...
 	HasBMI2 bool // SHLX, SHRX, BZHI, ...
@@ -17,6 +17,13 @@ func DisableBMI2() (restore func()) {
 	old := X86.HasBMI2
 	X86.HasBMI2 = false
 	return func() { X86.HasBMI2 = old }
+}
+
+// DisableAVX2 clears HasAVX2 and returns a function that restores it.
+func DisableAVX2() (restore func()) {
+	old := X86.HasAVX2
+	X86.HasAVX2 = false
+	return func() { X86.HasAVX2 = old }
 }
 
 // AsmRoutine is an assembly routine's on/off switch, registered by the

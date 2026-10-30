@@ -293,7 +293,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX
@@ -992,7 +1022,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX
@@ -1705,7 +1765,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX
@@ -2399,7 +2489,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX
@@ -3098,7 +3218,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX
@@ -3811,7 +3961,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX
@@ -4505,7 +4685,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX
@@ -5204,7 +5414,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX
@@ -5917,7 +6157,37 @@ cmp:
 	MOVL -3(AX)(R10*1), R14
 	CMPL R14, -3(BX)(R10*1)
 	JNE  cmp
+	// count (as fastCount): 8 bytes, then 32 per step with AVX2
 	XORL R14, R14
+	CMPQ R8, $8
+	JB   cnttail
+	MOVQ (AX), CX
+	XORQ (BX), CX
+	JNE  cntdiff
+	MOVL $8, R14
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R14), CX
+	CMPQ CX, R8
+	JA   cnt32end
+	VMOVDQU   (AX)(R14*1), Y0
+	VPCMPEQB  (BX)(R14*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX
+	JNE       cnt32diff
+	ADDQ      $32, R14
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R14
+	JMP  cntdone
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R14), CX

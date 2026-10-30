@@ -355,9 +355,39 @@ done:
 
 // fastCount returns in R11 the length of the common prefix of R9[0:R13]
 // and R10[0:R13] (C: ZSTD_count). Reads only within those ranges.
-// Clobbers CX, BX.
+// Once the first 8 bytes match it compares 32 bytes per step with AVX2
+// when useAVX2 is set. Clobbers CX, BX, Y0.
 TEXT ·fastCount(SB), NOSPLIT, $0-0
 	XORL R11, R11
+	CMPQ R13, $8
+	JLT  tail
+	MOVQ (R10), CX
+	XORQ (R9), CX
+	JNE  diff
+	MOVL $8, R11
+	CMPB ·useAVX2(SB), $0
+	JEQ  cnt8
+
+cnt32:
+	LEAQ 32(R11), CX
+	CMPQ CX, R13
+	JGT  cnt32end
+	VMOVDQU   (R10)(R11*1), Y0
+	VPCMPEQB  (R9)(R11*1), Y0, Y0
+	VPMOVMSKB Y0, CX
+	INCL      CX               // all equal: 0xFFFFFFFF + 1 = 0; else the lowest set bit is the first mismatch
+	JNE       cnt32diff
+	ADDQ      $32, R11
+	JMP       cnt32
+
+cnt32diff:
+	VZEROUPPER
+	BSFL CX, CX
+	ADDQ CX, R11
+	RET
+
+cnt32end:
+	VZEROUPPER
 
 cnt8:
 	LEAQ 8(R11), CX
