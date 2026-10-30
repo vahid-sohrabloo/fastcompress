@@ -1,8 +1,8 @@
 // Port of libzstd v1.5.7 lib/compress/zstd_compress_sequences.c
 // (Copyright (c) Meta Platforms, Inc. and affiliates; BSD/GPLv2 dual license).
 //
-// The Go body of ZSTD_encodeSequences, always compiled; on amd64
-// zstd_compress_sequences_amd64.s replaces its main loop.
+// The Go body of ZSTD_encodeSequences, always compiled;
+// zstd_compress_sequences_amd64.s and _arm64.s replace its main loop.
 
 package zstd
 
