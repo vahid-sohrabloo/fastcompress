@@ -3,6 +3,8 @@ package cpu
 import "testing"
 
 func TestDisableBMI2(t *testing.T) {
+	saved := X86.HasBMI2
+	defer func() { X86.HasBMI2 = saved }()
 	X86.HasBMI2 = true
 	restore := DisableBMI2()
 	if X86.HasBMI2 {
@@ -15,6 +17,8 @@ func TestDisableBMI2(t *testing.T) {
 }
 
 func TestDisableAVX2(t *testing.T) {
+	saved := X86.HasAVX2
+	defer func() { X86.HasAVX2 = saved }()
 	X86.HasAVX2 = true
 	restore := DisableAVX2()
 	if X86.HasAVX2 {
