@@ -270,7 +270,7 @@ Function shares are flat % of the level's merged profile unless noted.
 | 8d8eedb perf(huf) | x-ray L1 `compress1XAsm` 39% (serial container chain) | 672 MB/s, 39% | `compress1XAsmBMI2` 37.6%; 734 MB/s (dickens L1 share 6.8% -> 4.9%) |
 | 376f9c1 perf(sequences) BMI2 | `encodeSequencesAsm` 14% of dickens L1 (C's ZSTD_encodeSequences_bmi2 is 12% of a faster run: ~50% more time per byte in Go); CL-shift juggling in every BIT_addBits/FSE_encodeSymbol | dickens L1 282.9 (13.7%), L3 174.7 (14.5%); xml L1 634.2 (13.9%), L3 477.5 (12.1%) | dickens L1 296.9 (9.4%), L3 188.2 (9.3%); xml L1 674.8 (11.1%), L3 495.8 (6.7%) |
 
-## C side (gprof, as perf is unavailable)
+## C side, first pass (gprof; perf was installed later, see below)
 
 C zstd v1.5.7 built with `gcc -O3 -pg` into the scratch directory (the
 reference binary is untouched; -pg costs it under 2% at these levels),
@@ -290,13 +290,9 @@ milliseconds per MB with the real C speed, next to Go's at commit 8d8eedb:
 | 7 | lazy loop (ZSTD_compressBlock_lazy_row vs compressBlockLazyGeneric + storeSeq + glue) | 1.42 | 2.0 | 1.4 |
 | 11 | ZSTD_RowFindBestMatch (+ row update) | 37.6 | 54.2 | 1.44 |
 
-The remaining gap at levels 7 and 11 is inside the row search itself. Its
-hottest instructions are the stores right after the candidate PREFETCHT0s
-and the first compare of each candidate (cache misses on candidate data);
-the instruction sequence mirrors C's (same prefetches, SSE2 tag match, same
-candidate order), so the difference is not visible at function granularity
-and `perf stat` counters (not installed) would be needed to see whether it
-is TLB/fill-buffer pressure or code layout.
+The remaining gap at levels 7 and 11 is inside the row search itself; at
+function granularity the two sides look alike, so the perf counters below
+were used to split it.
 
 ## perf: C vs Go on the row search (dickens, levels 7 and 11)
 

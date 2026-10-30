@@ -603,6 +603,9 @@ func compressBlockLazyGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32,
 	if method == searchRowHash {
 		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
 		rowAsmSetup(ms, mls, rowLog, iend)
+		// Do not keep the window and tables reachable through ms.rowAsm
+		// once the block is done.
+		defer func() { ms.rowAsm = rowAsmParams{} }()
 		if ms.rowAsm.ok {
 			// The whole match loop in assembly; the Go loop below then
 			// has nothing left to do (ip >= ilimit).

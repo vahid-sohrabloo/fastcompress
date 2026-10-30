@@ -224,12 +224,14 @@ func rowUpd66()
 // assembly is off or a precondition fails: ms.rowAsm set up for this block
 // (tables hold every row, searched positions + 16 within the input),
 // mls and rowLog in 4..6, 0 < ip, ilimit + 16 <= iend, and room in ss for
-// every literal and a sequence per 4 input bytes (every match is >= 4).
+// every literal and a sequence per 4 input bytes (every match is >= 4), and
+// ms.nextToUpdate <= ip's index (the row update starts there).
 func lazyRowRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLowest int,
 	offset1, offset2 uint32, depth int, mls, rowLog uint32) (int, int, uint32, uint32, bool) {
 	p := &ms.rowAsm
 	nLits, nSeqs := len(ss.literals), len(ss.sequences)
 	if !p.ok || mls < 4 || mls > 6 || rowLog < 4 || rowLog > 6 || ip <= 0 || anchor > ip || ilimit+16 > iend ||
+		ms.nextToUpdate > uint32(ip)+p.baseIdx ||
 		iend > p.bLen || prefixLowest < 0 || depth < 0 || depth > 2 ||
 		cap(ss.literals)-nLits < iend-anchor || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
 		return ip, anchor, offset1, offset2, false

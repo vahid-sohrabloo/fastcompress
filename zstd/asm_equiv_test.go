@@ -57,6 +57,11 @@ var crefTests = []struct {
 	{"CrefStreamReset", TestCrefStreamReset},
 	{"CrefStreamReadFrom", TestCrefStreamReadFrom},
 	{"CrefStreamContentSize", TestCrefStreamContentSize},
+	{"DictCCtxLevels", TestDictCCtxLevels},
+	{"DictRepBeyondLoadedContent", TestDictRepBeyondLoadedContent},
+	{"DictTinyRaw", TestDictTinyRaw},
+	{"Compress2AliasedInputs", TestCompress2AliasedInputs},
+	{"ConcurrentBlocks", TestConcurrentBlocks},
 }
 
 // TestAsmEquiv runs every C-reference test with the assembly routines off,
@@ -85,19 +90,31 @@ func TestAsmEquiv(t *testing.T) {
 	run("asm=on,bmi2=off", true)
 }
 
-// FuzzEncodeAsmEquiv compresses src at every level with the assembly
-// routines on and off; the frames must be equal and decode with C to src.
+// FuzzEncodeAsmEquiv compresses src with the assembly routines on and off;
+// the frames must be equal and decode with C to src. Every input goes
+// through the four EncoderLevels (EncodeAll), and through a cctx at C level
+// 1+level%22 (every ported strategy, small-input parameter tables) with,
+// per mode bit, a raw-content dictionary (bit 0: its first 1-32 KiB of
+// dickens, as a loaded dictionary sets isDictionary for the row finder) and
+// a small window (bit 1: windowLog 10-17, so longer inputs overflow the
+// window).
 func FuzzEncodeAsmEquiv(f *testing.F) {
+	i := 0
 	for _, in := range creftest.Inputs(f) {
 		if len(in) <= 1<<17 {
-			f.Add(in)
+			f.Add(uint8(i), uint8(i*5), in)
+			i++
 		}
 	}
+	dictSrc := readTestdata(f, "dickens-32k.raw")
+	f.Add(uint8(1), uint8(6), dictSrc[:20000]) // level 7, dictionary
+	f.Add(uint8(3), uint8(10), dictSrc)        // level 11, dictionary, small window
+	f.Add(uint8(2), uint8(5), dictSrc)         // level 6, small window
 	encs := make([]*Encoder, len(encoderLevels))
 	for i, lv := range encoderLevels {
 		encs[i] = newTestEncoder(f, WithEncoderLevel(lv.l), WithZeroFrames(true))
 	}
-	f.Fuzz(func(t *testing.T, src []byte) {
+	f.Fuzz(func(t *testing.T, mode, level uint8, src []byte) {
 		if len(src) > 1<<18 {
 			return
 		}
@@ -111,6 +128,54 @@ func FuzzEncodeAsmEquiv(f *testing.F) {
 			if got := creftest.DecodeC(t, on); !bytes.Equal(got, src) {
 				t.Fatalf("L%d: C decode mismatch", encoderLevels[i].c)
 			}
+		}
+
+		lv := 1 + int(level)%22
+		var dict []byte
+		if mode&1 != 0 {
+			dict = dictSrc[:1024*(1+int(mode>>2)%32)]
+		}
+		var wlog uint32
+		if mode&2 != 0 {
+			wlog = 10 + uint32(mode>>2)%8
+		}
+		compress := func() ([]byte, error) {
+			c := newCCtx()
+			c.setLevel(lv)
+			if err := c.setWindowLog(wlog); err != nil {
+				t.Fatal(err)
+			}
+			if dict != nil {
+				if err := c.loadDictionary(dict, dctRawContent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return c.compress2(nil, src)
+		}
+		var off, on []byte
+		var errOff, errOn error
+		withAsm(t, false, func() { off, errOff = compress() })
+		withAsm(t, true, func() { on, errOn = compress() })
+		if (errOff != nil) != (errOn != nil) {
+			t.Fatalf("L%d mode %d: error with asm off %v, on %v", lv, mode, errOff, errOn)
+		}
+		if errOff != nil {
+			return // a strategy this port does not have
+		}
+		if !bytes.Equal(off, on) {
+			t.Fatalf("cctx L%d mode %d: assembly changes the output (%d vs %d bytes)", lv, mode, len(on), len(off))
+		}
+		var got []byte
+		if dict != nil {
+			var err error
+			if got, err = creftest.DecodeCDict(t, on, dict); err != nil {
+				t.Fatalf("cctx L%d mode %d: C decode: %v", lv, mode, err)
+			}
+		} else {
+			got = creftest.DecodeC(t, on)
+		}
+		if !bytes.Equal(got, src) {
+			t.Fatalf("cctx L%d mode %d: C decode mismatch", lv, mode)
 		}
 	})
 }

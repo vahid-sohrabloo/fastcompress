@@ -24,8 +24,14 @@ func init() {
 // tables (ct[1:]), tts their symbolTT, and mlMax/ofMax/llMax the tables'
 // maxSymbolValue: a code above it (impossible: the tables are built from
 // these codes' histograms) stops the loop with bitPosOut = 64 instead of
-// reading outside the symbolTT. The state transitions of a valid FSE table
-// stay inside its state table.
+// reading outside the symbolTT.
+//
+// Unchecked precondition: the CTables are valid FSE tables (built by
+// fse.BuildCTable or BuildCTableRLE, or C-checked repeats of them): the
+// state-table reads stateTable[(state >> nbBitsOut) + deltaFindState] are
+// not bounds-checked and stay inside the table only for such tables, as in
+// C. With a malformed table the Go body would panic where this reads out of
+// bounds.
 //
 // Preconditions (checked by encodeSequences): the code slices and seqs hold
 // n entries; 0 <= ptr <= endPtr = len(buf) - 8 (each flush writes 8 bytes at ptr and
