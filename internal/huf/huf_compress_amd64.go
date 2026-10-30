@@ -33,10 +33,19 @@ func compress1XAsm(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
 //go:noescape
 func compress1XAsmBMI2(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
 
-// compress1XAsmVariant runs compress1XAsmBMI2 when it is on, else
-// compress1XAsm.
-func compress1XAsmVariant(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int {
+// compress1XAsmBMI2x5 is compress1XAsmBMI2 flushing every 5 codes, for
+// tableLog <= 11 (5 codes and the 7 bits left by a flush fit in 64).
+//
+//go:noescape
+func compress1XAsmBMI2x5(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
+
+// compress1XAsmVariant runs compress1XAsmBMI2x5 or compress1XAsmBMI2 (by
+// tableLog) when BMI2 is on, else compress1XAsm.
+func compress1XAsmVariant(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt, tableLog uint32) int {
 	if useHufBMI2 {
+		if tableLog <= 11 {
+			return compress1XAsmBMI2x5(dst, dstLen, src, srcLen, ct)
+		}
 		return compress1XAsmBMI2(dst, dstLen, src, srcLen, ct)
 	}
 	return compress1XAsm(dst, dstLen, src, srcLen, ct)

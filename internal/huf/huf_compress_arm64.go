@@ -25,7 +25,8 @@ func init() {
 //go:noescape
 func compress1XAsm(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
 
-// compress1XAsmVariant runs compress1XAsm (arm64 has no other variant).
-func compress1XAsmVariant(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int {
+// compress1XAsmVariant runs compress1XAsm (arm64 has no other variant,
+// so tableLog is unused).
+func compress1XAsmVariant(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt, tableLog uint32) int {
 	return compress1XAsm(dst, dstLen, src, srcLen, ct)
 }

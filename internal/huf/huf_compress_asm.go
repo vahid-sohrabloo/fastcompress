@@ -6,7 +6,8 @@
 package huf
 
 func compress1XBody(dst, src []byte, ct CTable) int {
-	if !useHufAsm || len(dst) <= 8 || ReadCTableHeader(ct).TableLog > TableLogMax {
+	tableLog := uint32(ReadCTableHeader(ct).TableLog)
+	if !useHufAsm || len(dst) <= 8 || tableLog > TableLogMax {
 		return compress1XBodyGeneric(dst, src, ct)
 	}
 	var srcPtr *byte
@@ -14,5 +15,5 @@ func compress1XBody(dst, src []byte, ct CTable) int {
 		srcPtr = &src[0]
 	}
 	elts := (*[SymbolValueMax + 1]CElt)(ct[1:])
-	return compress1XAsmVariant(&dst[0], len(dst), srcPtr, len(src), &elts[0])
+	return compress1XAsmVariant(&dst[0], len(dst), srcPtr, len(src), &elts[0], tableLog)
 }
