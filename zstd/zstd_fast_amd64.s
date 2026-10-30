@@ -2,15 +2,17 @@
 
 #include "textflag.h"
 
-// HASH(pos, dst): dst = ((le64(b[pos:]) << mlsShift) * prime) >> hShift.
-// Clobbers CX.
-#define HASH(pos, dst) \
+// HASHF(pos, dst): dst = (le64(b[pos:]) * (prime << mlsShift)) >> CX,
+// which is ((le64 << mlsShift) * prime) >> hShift mod 2^64 with CX = hShift.
+#define HASHF(pos, dst) \
 	MOVQ  (SI)(pos*1), dst; \
-	MOVQ  mlsShift+88(FP), CX; \
-	SHLQ  CX, dst; \
-	IMULQ prime+104(FP), dst; \
-	MOVQ  hShift+96(FP), CX; \
+	IMULQ 32(SP), dst; \
 	SHRQ  CX, dst
+
+// HASH(pos, dst) is HASHF loading CX = hShift first.
+#define HASH(pos, dst) \
+	MOVQ hShift+96(FP), CX; \
+	HASHF(pos, dst)
 
 // func compressBlockFastAsm(hashTable *uint32, b *byte, seqs *seqDef, lits *byte,
 //	ip0, istart, iend, prefixStart int, prefixStartIndex, baseIdx, rep1, rep2 uint32,
@@ -19,12 +21,15 @@
 // Mirrors compressBlockFastNoDictGeneric's loop (C: zstd_fast.c:
 // ZSTD_compressBlock_fast_noDict_generic, _start to _cleanup).
 //
-// Registers: SI b, DI hashTable, R8 ip0, R9 ip1, R10 ip2 (ip3 = ip2 + 1),
-// R11 hash0, R12 hash1, R13 matchIdx, R14 rep1, R15 step, BX nextStep,
-// AX/CX/DX scratch. rep2, anchor, nSeq and nLits live in their argument and
-// result slots; the frame holds current0 at 0(SP) and ilimit at 8(SP).
+// Registers in the search loop: SI b, DI hashTable, R8 ip0, R9 ip1, R10 ip2
+// (ip3 = ip2 + 1), R11 hash0, R12 hash1, R13 matchIdx, R14 rep1,
+// BX baseIdx, R15 b - baseIdx (so an index addresses b directly; no calls
+// in the loop, so the GC never sees it), CX hShift, AX/DX scratch. BX, R15
+// and CX are reloaded at start. rep2, anchor, nSeq and nLits live in their
+// argument and result slots; the frame holds current0 at 0(SP), ilimit at
+// 8(SP), step at 16(SP), nextStep at 24(SP) and prime << mlsShift at 32(SP).
 // After a match: R8 ip0, DX match0, AX mLength, R12 offBase.
-TEXT ·compressBlockFastAsm(SB), NOSPLIT, $16-152
+TEXT ·compressBlockFastAsm(SB), NOSPLIT, $40-152
 	MOVQ hashTable+0(FP), DI
 	MOVQ b+8(FP), SI
 	MOVL rep1+72(FP), R14
@@ -38,17 +43,27 @@ TEXT ·compressBlockFastAsm(SB), NOSPLIT, $16-152
 	MOVQ iend+48(FP), AX
 	SUBQ $8, AX
 	MOVQ AX, 8(SP)          // ilimit = iend - HASH_READ_SIZE
+	MOVQ prime+104(FP), AX
+	MOVQ mlsShift+88(FP), CX
+	SHLQ CX, AX
+	MOVQ AX, 32(SP)
 
 start:
-	MOVQ stepSize+80(FP), R15
-	LEAQ 128(R8), BX        // nextStep = ip0 + kStepIncr
+	MOVQ stepSize+80(FP), AX
+	MOVQ AX, 16(SP)         // step
+	LEAQ (R8)(AX*1), R10
+	LEAQ 128(R8), AX
+	MOVQ AX, 24(SP)         // nextStep = ip0 + kStepIncr
 	LEAQ 1(R8), R9
-	LEAQ (R8)(R15*1), R10
 	LEAQ 1(R10), AX         // ip3
 	CMPQ AX, 8(SP)
 	JGE  cleanup
-	HASH(R8, R11)
-	HASH(R9, R12)
+	MOVL baseIdx+68(FP), BX
+	MOVQ SI, R15
+	SUBQ BX, R15
+	MOVQ hShift+96(FP), CX
+	HASHF(R8, R11)
+	HASHF(R9, R12)
 	MOVL (DI)(R11*4), R13
 
 inner:
@@ -57,8 +72,7 @@ inner:
 	SUBQ R14, AX
 	MOVL (SI)(AX*1), DX
 	// current0 = idx(ip0); hashTable[hash0] = current0
-	MOVL baseIdx+68(FP), AX
-	ADDL R8, AX
+	LEAL (R8)(BX*1), AX
 	MOVL AX, 0(SP)
 	MOVL AX, (DI)(R11*4)
 	// repcode at ip2
@@ -66,64 +80,60 @@ inner:
 	JNE   norep
 	TESTL R14, R14
 	JEQ   norep
-	MOVL  baseIdx+68(FP), AX
-	ADDL  R9, AX
+	LEAL  (R9)(BX*1), AX
 	MOVL  AX, (DI)(R12*4)  // hashTable[hash1] = idx(ip1)
 	JMP   foundrep
 
 norep:
+	// prefixStartIndex <= matchIdx < current0 (AX), so R15 + matchIdx lies
+	// in b[prefixStart:ip0] (prefixStartIndex >= baseIdx: the Go caller
+	// falls back otherwise).
 	CMPL R13, prefixStartIndex+64(FP)
 	JB   miss1
-	MOVL R13, AX
-	SUBL baseIdx+68(FP), AX
-	CMPQ AX, R8
+	CMPL R13, AX
 	JAE  bad
-	MOVL (SI)(AX*1), DX
+	MOVL (R15)(R13*1), DX
 	CMPL DX, (SI)(R8*1)
 	JNE  miss1
-	MOVL baseIdx+68(FP), AX
-	ADDL R9, AX
+	LEAL (R9)(BX*1), AX
 	MOVL AX, (DI)(R12*4)   // hashTable[hash1] = idx(ip1)
 	JMP  foundoffset
 
 miss1:
 	MOVL (DI)(R12*4), R13  // matchIdx = hashTable[hash1]
 	MOVQ R12, R11          // hash0 = hash1
-	HASH(R10, R12)         // hash1 = hash(ip2)
+	HASHF(R10, R12)        // hash1 = hash(ip2)
 	MOVQ R9, R8            // ip0 = ip1
 	MOVQ R10, R9           // ip1 = ip2
 	INCQ R10               // ip2 = ip3
-	MOVL baseIdx+68(FP), AX
-	ADDL R8, AX
+	LEAL (R8)(BX*1), AX
 	MOVL AX, 0(SP)
 	MOVL AX, (DI)(R11*4)
 	CMPL R13, prefixStartIndex+64(FP)
 	JB   miss2
-	MOVL R13, AX
-	SUBL baseIdx+68(FP), AX
-	CMPQ AX, R8
+	CMPL R13, AX
 	JAE  bad
-	MOVL (SI)(AX*1), DX
+	MOVL (R15)(R13*1), DX
 	CMPL DX, (SI)(R8*1)
 	JNE  miss2
-	CMPQ R15, $4
+	CMPQ 16(SP), $4
 	JA   foundoffset
-	MOVL baseIdx+68(FP), AX
-	ADDL R9, AX
+	LEAL (R9)(BX*1), AX
 	MOVL AX, (DI)(R12*4)
 	JMP  foundoffset
 
 miss2:
 	MOVL (DI)(R12*4), R13
 	MOVQ R12, R11
-	HASH(R10, R12)
+	HASHF(R10, R12)
 	MOVQ R9, R8            // ip0 = ip1
 	MOVQ R10, R9           // ip1 = ip2
-	LEAQ (R8)(R15*1), R10  // ip2 = ip0 + step (ip3 = ip1 + step = ip2 + 1)
-	CMPQ R10, BX
+	MOVQ 16(SP), R10
+	ADDQ R8, R10           // ip2 = ip0 + step (ip3 = ip1 + step = ip2 + 1)
+	CMPQ R10, 24(SP)
 	JLT  nostep
-	INCQ R15
-	ADDQ $128, BX
+	INCQ 16(SP)
+	ADDQ $128, 24(SP)
 
 nostep:
 	LEAQ 1(R10), AX
@@ -151,7 +161,7 @@ rep0:
 
 foundoffset:
 	MOVL R13, DX
-	SUBL baseIdx+68(FP), DX // match0
+	SUBL BX, DX            // match0
 	MOVL R14, rep2+76(FP)  // rep2 = rep1
 	MOVQ R8, R14
 	SUBQ DX, R14           // rep1 = ip0 - match0
