@@ -30,3 +30,12 @@ func init() {
 func compressBlockDoubleFastAsm(hashLong, hashSmall *uint32, b *byte, seqs *seqDef, lits *byte,
 	ip, istart, iend, prefixLowest int, prefixLowestIndex, baseIdx, rep1, rep2 uint32,
 	hShiftL, shiftS, hShiftS, primeS uint64) (anchor, nSeq, nLits int, rep1Out, rep2Out, llType, llPos uint32)
+
+// compressBlockDoubleFastAsmStale is compressBlockDoubleFastAsm without a
+// branch on the candidates' indices: faster while the tables hold many
+// entries from before the window. Same arguments, results and output.
+//
+//go:noescape
+func compressBlockDoubleFastAsmStale(hashLong, hashSmall *uint32, b *byte, seqs *seqDef, lits *byte,
+	ip, istart, iend, prefixLowest int, prefixLowestIndex, baseIdx, rep1, rep2 uint32,
+	hShiftL, shiftS, hShiftS, primeS uint64) (anchor, nSeq, nLits int, rep1Out, rep2Out, llType, llPos uint32)

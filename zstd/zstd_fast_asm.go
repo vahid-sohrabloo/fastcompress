@@ -62,9 +62,14 @@ func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 	if len(lits) > 0 {
 		litPtr = &lits[0]
 	}
-	anchor, nSeq, nLit, r1, r2, llType, llPos := compressBlockFastAsm(&ms.hashTable[0], &b[0], seqPtr, litPtr,
+	asm := compressBlockFastAsm
+	if istart-prefixStart < staleTables<<hlog || ms.staleHint {
+		asm = compressBlockFastAsmStale
+	}
+	anchor, nSeq, nLit, r1, r2, llType, llPos := asm(&ms.hashTable[0], &b[0], seqPtr, litPtr,
 		ip0, istart, iend, prefixStart, prefixStartIndex, baseIdx, repOffset1, repOffset2,
 		stepSize, uint64(hShift), uint64(64-hlog), prime)
+	ms.staleHint = nLit*staleLitsFast < iend-istart
 	if nSeq < 0 {
 		panic("zstd: fast hash table holds an index at or after the current position")
 	}
@@ -90,3 +95,20 @@ func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 	}
 	return iend - anchor
 }
+
+// The fast and double-fast finders have two assembly loops with the same
+// output: one branches on whether a candidate's index is inside the window,
+// the other (...Stale) does not. The branch predicts well once the frame has
+// refreshed most of the tables; while they still hold many entries from
+// before the window (a context reused for a new frame), it mispredicts, and
+// the branchless loop is faster. The Stale loop runs while the frame has
+// covered fewer than staleTables table sizes, or after a block whose
+// literals were under 1/staleLits* of it (nearly all matches, so few
+// positions were inserted and old entries survive). Measured on silesia:
+// the branchless loop alone made whole files 1-4% slower at L1 and up to
+// 4% at L3; these choices are at or below the branchy loop on every file.
+const (
+	staleTables     = 4
+	staleLitsFast   = 16
+	staleLitsDouble = 8
+)

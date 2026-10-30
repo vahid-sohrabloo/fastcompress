@@ -38,6 +38,15 @@ func compressBlockFastAsm(hashTable *uint32, b *byte, seqs *seqDef, lits *byte,
 	ip0, istart, iend, prefixStart int, prefixStartIndex, baseIdx, rep1, rep2 uint32,
 	stepSize int, mlsShift, hShift, prime uint64) (anchor, nSeq, nLits int, rep1Out, rep2Out, llType, llPos uint32)
 
+// compressBlockFastAsmStale is compressBlockFastAsm without a branch on the
+// candidate's index: faster while the table holds many entries from before
+// the window. Same arguments, results and output.
+//
+//go:noescape
+func compressBlockFastAsmStale(hashTable *uint32, b *byte, seqs *seqDef, lits *byte,
+	ip0, istart, iend, prefixStart int, prefixStartIndex, baseIdx, rep1, rep2 uint32,
+	stepSize int, mlsShift, hShift, prime uint64) (anchor, nSeq, nLits int, rep1Out, rep2Out, llType, llPos uint32)
+
 // Register-convention helpers of compressBlockFastAsm (never called from Go).
 func fastCopyLits()
 func fastCount()
