@@ -478,11 +478,12 @@ func hcFindBestMatch(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
 	matchIndex := insertAndFindFirstIndexInternal(ms, ip, mls, ms.lazySkipping)
 
 	// C: `&` of the two conditions; && is equivalent (no side effects).
+	ipVal := le32(b, ip+ml-3) // C reads it every attempt; it changes only with ml
 	for ; matchIndex >= lowLimit && nbAttempts > 0; nbAttempts-- {
 		currentMl := 0
 		match := int(matchIndex - baseIdx)
 		// read 4B starting from (match + ml + 1 - sizeof(U32))
-		if binary.LittleEndian.Uint32(b[match+ml-3:]) == binary.LittleEndian.Uint32(b[ip+ml-3:]) { // potentially better
+		if le32(b, match+ml-3) == ipVal { // potentially better
 			currentMl = count(b, ip, match, iLimit)
 		}
 
@@ -493,6 +494,7 @@ func hcFindBestMatch(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
 			if ip+currentMl == iLimit {
 				break // best possible, avoids read overflow on next attempt
 			}
+			ipVal = le32(b, ip+ml-3)
 		}
 
 		if matchIndex <= minChain {

@@ -746,6 +746,13 @@ const (
 	prime8bytes = 0xCF1BBCDCB7A56463
 )
 
+// le32 is binary.LittleEndian.Uint32(b[i:]) without making the subslice
+// (whose pointer arithmetic costs several instructions in a hot loop).
+func le32(b []byte, i int) uint32 {
+	_ = b[i+3]
+	return uint32(b[i]) | uint32(b[i+1])<<8 | uint32(b[i+2])<<16 | uint32(b[i+3])<<24
+}
+
 // hash3Ptr hashes the first 3 bytes at b[i:] to h bits (4 bytes are read).
 // C: zstd_compress_internal.h:ZSTD_hash3Ptr
 func hash3Ptr(b []byte, i int, h uint32) uint32 {
