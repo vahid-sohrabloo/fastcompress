@@ -70,3 +70,35 @@ wrappers require 16 of them, and the source read is checked against iend.
 L3 with the same change (paired, 5 rounds): dickens -0.2%, mozilla -1.3%,
 sao -0.4%, xml -0.2%, samba -0.1%, ooffice -1.6%, tar -B128K -0.9%,
 tar -B16K -0.8%. L1: ooffice -0.9%, tar -B16K -1.3%, x-ray +0.1%.
+
+## Step 3: L11 (btopt at 16 KiB, btlazy2 at 128 KiB)
+
+Before (6406544), tar4m (first 4 MiB of silesia.tar):
+
+| config | side | cycles/B | instr/B | br/B | br-miss/KiB |
+|---|---|---|---|---|---|
+| L11 -B16K (btopt, mls 4) | C | 210.6 | 525.8 | 60.5 | 3501 |
+| | Go | 288.5 | 1028.0 | 152.8 | 3556 |
+| L11 -B128K (btlazy2) | C | 226.9 | 336.0 | 43.7 | 3695 |
+| | Go | 252.2 | 484.7 | 81.9 | 3704 |
+
+`perf record` cycles, -B16K:
+- C: btGetAllMatches_noDict_4 40.8%, compressBlock_opt0 40.1%, insertBt1 13.9%.
+- Go: insertBtAndGetAllMatches 44.8%, compressBlockOptGeneric 20.9%,
+  insertBt1 13.4%, getMatchPrice 6.3%, litLengthPrice 4.8%,
+  btGetAllMatches 1.9%, updateTreeInternal 1.6%, llIncPrice 1.3%.
+
+The gap is instructions (2x C at IPC 3.6), not misses: branch and L1D
+misses per byte equal C's.
+
+### insertBt1's tree walk in assembly
+
+The walk of insertBt1 (C: ZSTD_insertBt1) as insertBt1Asm, beside the
+btlazy2 tree walks in dubt_*.s. L11 -B16K -2.3% [-3.0..-1.2] (instr/B
+1028 -> 1004), -B128K -0.4%.
+
+Tried and dropped: insertBtAndGetAllMatches' tree walk alone in assembly
+(called from the Go function): -1.1% [-1.4..+1.0]. An instructions
+profile showed why: the Go code around the walk (repcode checks, hash,
+setup, the call) ran about 280 instructions per call, more than the walk
+itself (170); C's whole btGetAllMatches_noDict_4 is 238 per byte.

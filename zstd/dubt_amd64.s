@@ -231,3 +231,93 @@ send:
 sbad:
 	MOVL $0, matchEndIdx+76(FP)
 	RET
+
+// TREEWALK: the smaller/larger step shared by the optimal parser's walks
+// (as in insertDUBT1Asm): DX matchLength, CX match position. Continues at
+// loop, or ends at end.
+#define TREEWALK(btLow, loop, end, smallstop, larger, largestop) \
+	LEAQ  (SI)(CX*1), AX; \
+	MOVBLZX (AX)(DX*1), AX; \
+	CMPB  AX, (BX)(DX*1); \
+	JAE   larger; \
+	MOVL  R14, (R12); \
+	MOVQ  DX, R10; \
+	CMPL  R14, btLow; \
+	JLS   smallstop; \
+	MOVQ  8(SP), AX; \
+	LEAQ  4(AX), R12; \
+	MOVL  4(AX), R14; \
+	DECL  R15; \
+	JMP   loop; \
+smallstop: \
+	LEAQ  0(SP), R12; \
+	JMP   end; \
+larger: \
+	MOVL  R14, (R13); \
+	MOVQ  DX, R11; \
+	CMPL  R14, btLow; \
+	JLS   largestop; \
+	MOVQ  8(SP), R13; \
+	MOVL  (R13), R14; \
+	DECL  R15; \
+	JMP   loop; \
+largestop: \
+	LEAQ  0(SP), R13
+
+// func insertBt1Asm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbCompares, btLow, windowLow, matchIndex uint32) (bestLength int, matchEndIdx uint32)
+//
+// C: zstd_opt.c:ZSTD_insertBt1 (extDict 0), the tree walk.
+// Extra frame: 16(SP) bestLength, 24(SP) matchEndIdx.
+TEXT ·insertBt1Asm(SB), NOSPLIT, $32-76
+	MOVQ bt+0(FP), DI
+	MOVQ b+8(FP), SI
+	MOVQ ip+16(FP), R8
+	MOVQ iend+24(FP), R9
+	LEAQ (SI)(R8*1), BX
+	XORL R10, R10
+	XORL R11, R11
+	MOVL curr+32(FP), AX
+	ANDL btMask+40(FP), AX
+	LEAQ (DI)(AX*8), R12        // smallerPtr = &bt[2*(curr&btMask)]
+	LEAQ 4(R12), R13            // largerPtr
+	MOVL matchIndex+56(FP), R14
+	MOVL nbCompares+44(FP), R15
+	MOVQ $8, 16(SP)             // bestLength
+	MOVL curr+32(FP), AX
+	ADDL $9, AX
+	MOVL AX, 24(SP)             // matchEndIdx = curr + 8 + 1
+
+bloop:
+	TESTL R15, R15
+	JEQ   bend
+	CMPL  R14, windowLow+52(FP)
+	JB    bend
+	MATCHLEN(btMask+40(FP), baseIdx+36(FP), bbad, bcnt8, bcdiff, bctail, bcdone)
+	CMPQ  DX, 16(SP)
+	JLE   bnotbetter
+	MOVQ  DX, 16(SP)
+	MOVL  24(SP), AX
+	SUBL  R14, AX
+	CMPQ  DX, AX
+	JLS   bnotbetter
+	LEAL  (R14)(DX*1), AX
+	MOVL  AX, 24(SP)
+
+bnotbetter:
+	LEAQ  (R8)(DX*1), AX
+	CMPQ  AX, R9
+	JEQ   bend                  // equal: no way to know if inf or sup
+	TREEWALK(btLow+48(FP), bloop, bend, bsmallstop, blarger, blargestop)
+
+bend:
+	MOVL $0, (R13)
+	MOVL $0, (R12)
+	MOVQ 16(SP), AX
+	MOVQ AX, bestLength+64(FP)
+	MOVL 24(SP), AX
+	MOVL AX, matchEndIdx+72(FP)
+	RET
+
+bbad:
+	MOVL $0, matchEndIdx+72(FP)
+	RET

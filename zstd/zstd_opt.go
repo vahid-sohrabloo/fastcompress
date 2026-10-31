@@ -377,6 +377,12 @@ func insertBt1(ms *matchState, ip, iend int, target, mls uint32) uint32 {
 
 	hashTable[h] = curr // Update Hash Table
 
+	if bl, me, ok := insertBt1Loop(ms, ip, iend, curr, matchIndex, nbCompares, btLow, windowLow); ok {
+		// The walk is done and the tree's open ends are cleared.
+		bestLength, matchEndIdx = bl, me
+		nbCompares = 0
+		smallerPtr, largerPtr = &dummy32, &dummy32
+	}
 	for ; nbCompares > 0 && matchIndex >= windowLow; nbCompares-- {
 		nextPtr := bt[2*(matchIndex&btMask):][:2]
 		matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes

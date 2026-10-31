@@ -30,3 +30,11 @@ func insertDUBT1Asm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nb
 //
 //go:noescape
 func dubtSearchAsm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbCompares, btLow, windowLow, matchIndex uint32) (bestLength int, offBase, matchEndIdx uint32)
+
+// insertBt1Asm is insertBt1's tree walk (see it) from matchIndex, with the
+// preconditions of insertDUBT1Asm (candidates are >= windowLow here). It
+// returns bestLength and matchEndIdx; matchEndIdx is 0 if a candidate was
+// not before ip (impossible).
+//
+//go:noescape
+func insertBt1Asm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbCompares, btLow, windowLow, matchIndex uint32) (bestLength int, matchEndIdx uint32)

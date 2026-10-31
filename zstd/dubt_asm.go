@@ -40,3 +40,19 @@ func dubtSearch(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLo
 	}
 	return best, offBase, matchEndIdx
 }
+
+// insertBt1Loop runs insertBt1's tree walk in assembly from matchIndex
+// (hashTable already updated), returning bestLength and matchEndIdx, or
+// ok = false (nothing done) when the assembly is off or a precondition
+// fails (see dubtAsmOK; candidates are >= windowLow >= baseIdx).
+func insertBt1Loop(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLow, windowLow uint32) (int, uint32, bool) {
+	if !dubtAsmOK(ms, ip, iend, windowLow) {
+		return 0, 0, false
+	}
+	btMask := uint32(1)<<(ms.cParams.chainLog-1) - 1
+	bestLength, matchEndIdx := insertBt1Asm(&ms.chainTable[0], &ms.window.base[0], ip, iend, curr, ms.window.baseIdx, btMask, nbCompares, btLow, windowLow, matchIndex)
+	if matchEndIdx == 0 {
+		panic("zstd: binary tree holds an index at or after the current position")
+	}
+	return bestLength, matchEndIdx, true
+}

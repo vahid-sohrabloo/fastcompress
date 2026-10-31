@@ -214,3 +214,73 @@ send:
 sbad:
 	MOVW ZR, matchEndIdx+76(FP)
 	RET
+
+// func insertBt1Asm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbCompares, btLow, windowLow, matchIndex uint32) (bestLength int, matchEndIdx uint32)
+//
+// C: zstd_opt.c:ZSTD_insertBt1 (extDict 0), the tree walk.
+// Extra registers: R21 bestLength, R23 matchEndIdx.
+TEXT ·insertBt1Asm(SB), NOSPLIT, $16-76
+	SETUP
+	MOVWU matchIndex+56(FP), R9
+	MOVWU nbCompares+44(FP), R10
+	MOVD  $8, R21
+	MOVWU curr+32(FP), R23
+	ADDW  $9, R23               // matchEndIdx = curr + 8 + 1
+
+bloop:
+	CBZW  R10, bend
+	CMPW  R15, R9
+	BLO   bend                  // matchIndex < windowLow
+	MATCHLEN(bbad, bcnt8, bcdiff, bctail, bcdone)
+	CMP   R21, R16
+	BLE   bnotbetter
+	MOVD  R16, R21
+	SUBW  R9, R23, R19
+	CMP   R19, R16
+	BLS   bnotbetter
+	ADDW  R16, R9, R23
+
+bnotbetter:
+	ADD   R2, R16, R19
+	CMP   R3, R19
+	BEQ   bend                  // equal: no way to know if inf or sup
+	MOVBU (R17)(R16), R19
+	MOVBU (R4)(R16), R20
+	CMPW  R20, R19
+	BHS   blarger
+	MOVW  R9, (R7)
+	MOVD  R16, R5
+	CMPW  R14, R9
+	BLS   bsmallstop
+	ADD   $4, R11, R7
+	MOVWU 4(R11), R9
+	SUBW  $1, R10
+	B     bloop
+
+bsmallstop:
+	ADD $8, RSP, R7
+	B   bend
+
+blarger:
+	MOVW  R9, (R8)
+	MOVD  R16, R6
+	CMPW  R14, R9
+	BLS   blargestop
+	MOVD  R11, R8
+	MOVWU (R11), R9
+	SUBW  $1, R10
+	B     bloop
+
+blargestop:
+	ADD $8, RSP, R8
+
+bend:
+	MOVW ZR, (R8)
+	MOVW ZR, (R7)
+	MOVD R21, bestLength+64(FP)
+	MOVW R23, matchEndIdx+72(FP)
+	RET
+
+bbad:
+	MOVW ZR, matchEndIdx+72(FP)
+	RET
