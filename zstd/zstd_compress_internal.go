@@ -578,9 +578,16 @@ type matchState struct {
 	hashSalt        uint64                   // salts the hash; changes on every context reset
 	hashSaltEntropy uint32                   // collects entropy for the next salt
 	lazySkipping    bool                     // the lazy parser only inserts the positions it searches
-	staleHint       bool                     // the last fast/double-fast asm block was nearly all matches (picks the loop; see staleTables)
 	frameStart      uint32                   // index of the current frame's first byte (set on reset; picks the fast/dfast loop, see staleTables)
 	rowAsm          rowAsmParams             // set up for the row finder's assembly during a block
+
+	// staleHint: the last fast or double-fast assembly block's sequences had
+	// few literals (see staleTables), so the next block runs the Stale loop.
+	// Speed only: it never affects output. Never reset; it carries across
+	// blocks, frames, context resets and level changes, and the fast and
+	// double-fast finders share it (each frame's first blocks run the Stale
+	// loop by frameStart anyway).
+	staleHint bool
 
 	// forceNonContiguous makes the next windowUpdate start a new segment.
 	forceNonContiguous bool
