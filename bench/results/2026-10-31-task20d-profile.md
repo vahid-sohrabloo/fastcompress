@@ -30,3 +30,43 @@ the finder swapped).
 | L7 -B16K cycles/B | 91.79 | 60.84 | **-33.8%** [-33.8..-33.7] | 60.62 |
 | L7 -B16K instr/B | 392.2 | 126.6 | | 140.2 |
 | L7 -B128K cycles/B (row finder, unchanged code) | 44.15 | 43.38 | -1.9% | 44.70 |
+
+## Step 2: L1/L3 whole files
+
+Before (3ebe545), per input byte:
+
+| config | C cycles/B | Go cycles/B | C instr/B | Go instr/B | C br/B | Go br/B | C br-miss/KiB | Go br-miss/KiB |
+|---|---|---|---|---|---|---|---|---|
+| L1 dickens | 10.76 | 11.82 | 33.7 | 33.8 | 3.33 | 5.01 | 102 | 108 |
+| L1 mozilla | 7.32 | 8.08 | 24.3 | 25.6 | 2.29 | 3.75 | 68 | 75 |
+| L1 sao | 8.80 | 9.52 | 37.0 | 37.5 | 3.76 | 5.76 | 48 | 54 |
+| L3 dickens | 19.04 | 19.83 | 39.6 | 41.0 | 3.40 | 5.33 | 129 | 130 |
+| L3 samba | 9.64 | 10.51 | 21.4 | 23.2 | 1.92 | 3.26 | 78 | 77 |
+| L3 xml | 6.21 | 6.62 | 14.5 | 15.5 | 1.35 | 2.17 | 61 | 58 |
+| L3 mozilla | 12.44 | 13.40 | 31.6 | 35.5 | 2.82 | 5.47 | 91 | 92 |
+
+`perf record`, L1 dickens: C's ZSTD_compressBlock_fast is 72.9% (7.84
+cycles/B); Go's fast asm + fastCount + fastCopyLits + stale loop is 73.0%
+(8.62 cycles/B), so +0.78 of the +1.06 cycles/B gap is the loop and its two
+helpers (fastCount 7.6%, fastCopyLits 2.7%). The rest is spread over the
+entropy stage (encodeSequences 1.26 vs 1.20). L3 mozilla: dfast asm (both
+loops) 62.7% + fastCount 5.7% + fastCopyLits 2.0% vs C's 70.1%.
+
+Tried (L1, paired A/B vs 3ebe545, 5 rounds):
+
+| variant | dickens | mozilla | sao | xml | samba |
+|---|---|---|---|---|---|
+| fastCount's first 8 bytes inline, then the call | -0.9..-1.4% | -0.3% | -0.5% | **+1.7%** | **+1.0%** |
+| fastCount's whole body inline (no call) | -0.4% | +0.4% | +0.1% | +0.2% | +0.3% |
+| literals <= 16: one inline 16-byte copy | **-1.7%** | **-2.2%** | +0.4% | **-1.9%** | **-1.6%** |
+| inline 16-byte wildcopy loop for every length | -1.5% | -1.8% | +0.2% | -1.9% | -1.5% |
+
+The call to fastCount is not the cost (inlining it gains nothing, and the
+first-8 split costs xml and samba); the literal copy is. Kept: the <= 16
+copy16 (C's ZSTD_storeSeq fast path), in the fast and the double-fast loop.
+The literal buffer now has C's WILDCOPY_OVERLENGTH (32) bytes of slack; the
+wrappers require 16 of them, and the source read is checked against iend.
+
+L3 with the same change (paired, 5 rounds): dickens -0.2%, mozilla -1.3%,
+sao -0.4%, xml -0.2%, samba -0.1%, ooffice -1.6%, tar -B128K -0.9%,
+tar -B16K -0.8%. L1: ooffice -0.9%, tar -B16K -1.3%, x-ray +0.1%.

@@ -281,9 +281,22 @@ store:
 	MOVQ  lits+32(FP), R10
 	ADDQ  nLits+136(FP), R10
 	MOVQ  anchor+120(FP), R11
+	ADDQ  R9, nLits+136(FP)
+	// up to 16 literals: one 16-byte copy (C: ZSTD_storeSeq's ZSTD_copy16).
+	// The literal buffer has 16 bytes of slack (compressBlockDoubleFastNoDict
+	// checks), and the source must hold the 16 bytes (else fastCopyLits).
+	CMPQ  R9, $16
+	JA    litcall
+	LEAQ  16(R11), CX
+	CMPQ  CX, iend+56(FP)
+	JA    litcall
+	MOVOU (SI)(R11*1), X0
+	MOVOU X0, (R10)
+	JMP   storeseq
+
+litcall:
 	ADDQ  SI, R11
 	CALL  ·fastCopyLits(SB)
-	ADDQ  R9, nLits+136(FP)
 
 storeseq:
 	MOVQ seqs+24(FP), R10

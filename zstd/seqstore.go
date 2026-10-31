@@ -105,6 +105,11 @@ const (
 	lltMatchLength   = 2 // represents a long match
 )
 
+// wildcopyOverlength is the slack after a block's literals in the literal
+// buffer (C: WILDCOPY_OVERLENGTH), so that the assembly finders can copy
+// literals 16 bytes at a time.
+const wildcopyOverlength = 32
+
 // seqStore holds the sequences and literals of one block.
 // C: zstd_compress_internal.h:SeqStore_t. C's start/end pointer pairs are Go
 // slices: sequences is sequencesStart..sequences (len = nbSeq), literals is

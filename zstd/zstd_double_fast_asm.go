@@ -25,7 +25,7 @@ func compressBlockDoubleFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]ui
 	// prefixLowestIndex >= baseIdx is checked explicitly (the assembly
 	// addresses b with b - baseIdx + index for indices >= prefixLowestIndex).
 	if len(ms.hashTable) < 1<<hBitsL || len(ms.chainTable) < 1<<hBitsS || iend > len(b) ||
-		prefixLowestIndex < baseIdx || prefixLowest > istart || cap(ss.literals)-nLits < len(src) || cap(ss.sequences)-nSeqs < len(src)/4 {
+		prefixLowestIndex < baseIdx || prefixLowest > istart || cap(ss.literals)-nLits < len(src)+16 || cap(ss.sequences)-nSeqs < len(src)/4 {
 		return compressBlockDoubleFastNoDictGeneric(ms, ss, rep, src, srcIdx, mls)
 	}
 	offset1, offset2 := rep[0], rep[1]

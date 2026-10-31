@@ -842,8 +842,8 @@ func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, load
 		ss.mlCode = make([]byte, nbSeq)
 		ss.ofCode = make([]byte, nbSeq)
 	}
-	if cap(ss.literals) < blockSize {
-		ss.literals = make([]byte, 0, blockSize)
+	if cap(ss.literals) < blockSize+wildcopyOverlength {
+		ss.literals = make([]byte, 0, blockSize+wildcopyOverlength)
 	}
 	if c.tmpWorkspace == nil {
 		c.tmpWorkspace = make([]byte, entropyWorkspaceSize)
