@@ -994,6 +994,11 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 	if ip == prefixStart {
 		ip++
 	}
+	if mode == noDict && dynamic {
+		if lits, ok := optParseFast(ms, ss, rep, ip, anchor, iend, minML, sufficientLen); ok {
+			return lits // the match loop, in assembly (amd64)
+		}
+	}
 
 	// Match Loop
 	for ip < ilimit {
