@@ -439,6 +439,58 @@ func TestCompress2ReuseSmallFrames(t *testing.T) {
 	runSeq(t, steps)
 }
 
+// TestCompress2ReuseLargeFrames is TestCompress2ReuseSmallFrames for the
+// branchy fast and double-fast loops and the switch between the loops (see
+// staleTables). One context compresses 1.25 MiB frames at levels 1 and 3
+// with a 128 KiB window. Each frame is 640 KiB of text-like data (past 4
+// table sizes, so the branchy loop runs), 128 KiB of seeded random bytes,
+// 256 KiB of text, the same random bytes again and 128 KiB of text. In the
+// second copy the candidates are the first copy's positions: below the
+// window but byte-equal to ip, so a missing window test would emit a match
+// C does not. A random block has almost no sequences, so the next block
+// runs the Stale loop (staleHint), and later ones the branchy loop again.
+func TestCompress2ReuseLargeFrames(t *testing.T) {
+	rng := rand.New(rand.NewPCG(3, 5))
+	words := make([][]byte, 3000)
+	for i := range words {
+		w := make([]byte, 3+rng.IntN(7))
+		for j := range w {
+			w[j] = 'a' + byte(rng.IntN(26))
+		}
+		words[i] = w
+	}
+	text := func(n int) []byte {
+		var b []byte
+		for len(b) < n {
+			b = append(b, words[rng.IntN(len(words))]...)
+			b = append(b, ' ')
+			for range rng.IntN(4) {
+				b = append(b, byte(rng.Uint32()))
+			}
+		}
+		return b[:n]
+	}
+	same := func(seed uint64, n int) []byte {
+		r := rand.New(rand.NewPCG(seed, 9))
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = byte(r.Uint32())
+		}
+		return b
+	}
+	var steps []seqStep
+	for i := range 4 {
+		var src []byte
+		src = append(src, text(640<<10)...)
+		src = append(src, same(1, 128<<10)...)
+		src = append(src, text(256<<10)...)
+		src = append(src, same(1, 128<<10)...)
+		src = append(src, text(128<<10)...)
+		steps = append(steps, seqStep{"large" + strconv.Itoa(i), compress2Case{level: 1 + 2*(i%2), windowLog: 17}, src})
+	}
+	runSeq(t, steps)
+}
+
 // TestCompress2OverflowCorrectionBtlazy2 starts a btlazy2 frame (level 11,
 // 128 KiB blocks) just below currentMax, so overflow correction
 // (ZSTD_reduceIndex with ZSTD_reduceTable_btlazy2) runs between blocks while

@@ -42,6 +42,7 @@ var crefTests = []struct {
 	{"Compress2IndexResetTables", TestCompress2IndexResetTables},
 	{"Compress2ReuseMultiBlock", TestCompress2ReuseMultiBlock},
 	{"Compress2ReuseSmallFrames", TestCompress2ReuseSmallFrames},
+	{"Compress2ReuseLargeFrames", TestCompress2ReuseLargeFrames},
 	{"Compress2OverflowCorrectionBtlazy2", TestCompress2OverflowCorrectionBtlazy2},
 	{"Compress2OverflowCorrectionBtopt", TestCompress2OverflowCorrectionBtopt},
 	{"EncodeAllCref", TestEncodeAllCref},
