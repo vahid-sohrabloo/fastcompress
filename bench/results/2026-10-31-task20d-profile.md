@@ -154,3 +154,24 @@ length below 64, llIncPrice now reads both codes from llCodeTable and
 returns 0 when they are equal; otherwise the difference of the two
 bits*256 - bitWeight(freq) terms (the base price cancels and the uint32
 prices cannot wrap). L11 tar4m -B16K: -2.7% [-2.8..-2.5] (instr/B 706 -> 677).
+
+Tried and dropped: updateTreeInternal's loop in assembly (hash per
+position, then a call to insertBt1Asm with stack arguments, and the
+forward step), removing the Go insertBt1/updateTreeInternal wrappers: L11
+-B16K instr/B 677 -> 643 but cycles +0.6% [+0.4..+0.7].
+
+## Step 4: fresh profile, L1/L3 at 16 KiB blocks
+
+Per-symbol cycles (perf record -F 4000, whole silesia.tar, L1 -B16K, in
+millions; C / Go): fast loop 1254 / 1311 (asm loop + fastCount +
+fastCopyLits), encodeSequences 247 / 206, HUF_compress1X 116 / 159, HUF
+table build 103 / 128 (sortSymbols, buildTree, buildCTableFromTree,
+setMaxHeight), HIST 165 / 170, FSE_buildCTable 60 / 80, seqToCodes 43 /
+73, FSE_writeNCount 30 / 40, FSE_compress_usingCTable 13 / 23.
+
+Tried and dropped: seqToCodes with the llCode/mlCode branches written as
+selects: L1 -B16K +0.8%, L3 -B16K +0.6%, dickens +0.5%, xml +0.4%.
+
+Tried and dropped: C's PREFETCH_L1(ip1 + 64) and (ip1 + 128) on each step
+increase in the fast loop: dickens +0.3%, mozilla -0.4%, sao +0.1%, x-ray
+-0.4%, ooffice +0.3% (noise).
