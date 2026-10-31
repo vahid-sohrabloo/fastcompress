@@ -1,5 +1,5 @@
 // Code included by zstd_fast_amd64.s: the body of compressBlockFastAsm
-// and compressBlockFastAsmStale, which differ only in CANDIDATE(miss), the
+// and compressBlockFastAsmStale, which differ only in CANDIDATE(hit, miss), the
 // test of the candidate at matchIdx (R13) against ip0 (current0 in AX).
 //
 // go vet's asmdecl does not read #included files, so it does not check
@@ -63,20 +63,13 @@ inner:
 	LEAL (R8)(BX*1), AX
 	MOVL AX, 0(SP)
 	MOVL AX, (DI)(R11*4)
-	// repcode at ip2
+	// repcode at ip2. The misses fall through: the loop's only taken
+	// branch is then the one back to inner (C's layout).
 	CMPL  DX, (SI)(R10*1)
-	JNE   norep
-	TESTL R14, R14
-	JEQ   norep
-	LEAL  (R9)(BX*1), AX
-	MOVL  AX, (DI)(R12*4)  // hashTable[hash1] = idx(ip1)
-	JMP   foundrep
+	JEQ   maybeRep
 
 norep:
-	CANDIDATE(miss1)
-	LEAL (R9)(BX*1), AX
-	MOVL AX, (DI)(R12*4)   // hashTable[hash1] = idx(ip1)
-	JMP  foundoffset
+	CANDIDATE(hit1, miss1)
 
 miss1:
 	MOVL (DI)(R12*4), R13  // matchIdx = hashTable[hash1]
@@ -88,12 +81,7 @@ miss1:
 	LEAL (R8)(BX*1), AX
 	MOVL AX, 0(SP)
 	MOVL AX, (DI)(R11*4)
-	CANDIDATE(miss2)
-	CMPQ 16(SP), $4
-	JA   foundoffset
-	LEAL (R9)(BX*1), AX
-	MOVL AX, (DI)(R12*4)
-	JMP  foundoffset
+	CANDIDATE(hit2, miss2)
 
 miss2:
 	MOVL (DI)(R12*4), R13
@@ -104,15 +92,37 @@ miss2:
 	MOVQ 16(SP), R10
 	ADDQ R8, R10           // ip2 = ip0 + step (ip3 = ip1 + step = ip2 + 1)
 	CMPQ R10, 24(SP)
-	JLT  nostep
-	INCQ 16(SP)
-	ADDQ $128, 24(SP)
+	JGE  stepinc
 
 nostep:
 	LEAQ 1(R10), AX
 	CMPQ AX, 8(SP)
-	JGE  cleanup
-	JMP  inner
+	JLT  inner
+	JMP  cleanup
+
+stepinc:
+	INCQ 16(SP)
+	ADDQ $128, 24(SP)
+	JMP  nostep
+
+maybeRep:
+	TESTL R14, R14
+	JEQ   norep
+	LEAL  (R9)(BX*1), AX
+	MOVL  AX, (DI)(R12*4)  // hashTable[hash1] = idx(ip1)
+	JMP   foundrep
+
+hit1:
+	LEAL (R9)(BX*1), AX
+	MOVL AX, (DI)(R12*4)   // hashTable[hash1] = idx(ip1)
+	JMP  foundoffset
+
+hit2:
+	CMPQ 16(SP), $4
+	JA   foundoffset
+	LEAL (R9)(BX*1), AX
+	MOVL AX, (DI)(R12*4)
+	JMP  foundoffset
 
 foundrep:
 	MOVQ    R10, R8        // ip0 = ip2

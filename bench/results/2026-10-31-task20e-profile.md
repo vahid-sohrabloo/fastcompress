@@ -111,3 +111,28 @@ assembly loop of gcc's shape (seqCodesAsm):
 
 Instructions -2 to -3% everywhere; kept (no whole-file regression beyond
 noise; load average 3-4 during these runs).
+
+L1 dickens branches (perf stat, 5 passes): C 3.33/B, Go 4.87/B; misses
+0.102 vs 0.109/B. Branch profile (`br_inst_retired.all_branches/upp`,
+proportions): fast loop and its helpers C 2.87/B, Go 3.75/B;
+encodeSequences C 0.15/B, Go 0.53/B (but equal cycles); HUF_compress1X
+C 0.03/B, Go 0.16/B. In the fast loop's search the misses (the common
+case) jumped: per two positions the repcode test, both candidate tests,
+the step test and the loop's back-edge were taken branches, against
+gcc's single back-edge.
+
+Fix: the fast loop's misses fall through (CANDIDATE(hit, miss) jumps on
+a hit; the step increase and the repcode hit move out of line), so the
+loop's only taken branch is the one back to inner. Same branch count,
+fewer taken branches. Output identical.
+
+| config | before cyc/B | after | change (5 rounds) |
+|---|---|---|---|
+| L1 dickens | 11.58 | 11.43 | **-1.3%** [-1.3..-0.2] |
+| L1 mozilla | 7.79 | 7.77 | -0.3% [-0.6..-0.0] |
+| L1 xml | 4.98 | 4.99 | +0.2% [-0.1..+0.4] |
+| L1 sao | 9.30 | 9.19 | **-1.2%** [-2.0..-0.5] |
+| L1 x-ray | 4.73 | 4.70 | -0.2% [-0.4..-0.1] |
+| L1 samba | 6.78 | 6.77 | -0.2% [-0.4..-0.1] |
+| L1 tar4m -B16K | 15.61 | 15.30 | **-2.0%** [-2.3..-1.9] |
+| L1 tar4m -B128K | 12.18 | 11.81 | **-3.1%** [-3.5..-2.8] |

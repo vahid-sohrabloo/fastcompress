@@ -29,8 +29,9 @@
 // argument and result slots; the frame holds current0 at 0(SP), ilimit at
 // 8(SP), step at 16(SP), nextStep at 24(SP) and prime << mlsShift at 32(SP).
 // After a match: R8 ip0, DX match0, AX mLength, R12 offBase.
-// CANDIDATE(miss): compare the 4 bytes at matchIdx (R13) with ip0's, going
-// to miss unless they match. matchIdx < current0 (AX), else bad; with
+// CANDIDATE(hit, miss): compare the 4 bytes at matchIdx (R13) with ip0's,
+// going to hit if they match; a miss falls through to the label miss,
+// which must follow. matchIdx < current0 (AX), else bad; with
 // prefixStartIndex <= matchIdx, R15 + matchIdx lies in b[prefixStart:ip0]
 // (the Go caller checks prefixStartIndex >= baseIdx).
 //
@@ -42,20 +43,20 @@
 // added, so the compare fails (matchIdx is not used again). That is faster
 // while the table still holds many entries from before the window (a young
 // frame in a reused context), where the branch mispredicts.
-#define CANDIDATE(miss) \
+#define CANDIDATE(hit, miss) \
 	CMPL R13, prefixStartIndex+64(FP); \
 	JB   miss; \
 	CMPL R13, AX; \
 	JAE  bad; \
 	MOVL (R15)(R13*1), DX; \
 	CMPL DX, (SI)(R8*1); \
-	JNE  miss
+	JEQ  hit
 
 TEXT ·compressBlockFastAsm(SB), NOSPLIT, $40-152
 #include "zstd_fast_amd64.h"
 
 #undef CANDIDATE
-#define CANDIDATE(miss) \
+#define CANDIDATE(hit, miss) \
 	CMPL    R13, AX; \
 	JAE     bad; \
 	CMPL    R13, prefixStartIndex+64(FP); \
@@ -63,7 +64,7 @@ TEXT ·compressBlockFastAsm(SB), NOSPLIT, $40-152
 	MOVL    (R15)(R13*1), DX; \
 	ADCL    $0, DX; \
 	CMPL    DX, (SI)(R8*1); \
-	JNE     miss
+	JEQ     hit
 
 // func compressBlockFastAsmStale: compressBlockFastAsm without a branch on
 // the candidate's index (see CANDIDATE).
