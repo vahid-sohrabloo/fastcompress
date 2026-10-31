@@ -46,9 +46,10 @@
 // R11 nextStep, R12 hl0, R13 idxl0, R14 offset1; AX/BX/CX/DX scratch.
 // offset2, anchor, nSeq and nLits live in their argument/result slots.
 // For a match: R8 ip, DX match position, AX mLength, R12 offBase.
-// LONGCAND compares the 8 bytes at idxl0 (R13) with ip's and goes to nolong
-// unless they match; SHORTCAND the 4 bytes at idxs0 (BX), going to
-// searchlong if they match. CX = curr. Every entry is below curr (else
+// LONGCAND compares the 8 bytes at idxl0 (R13) with ip's, going to
+// longmatch if they match (a miss falls through to nolong, which follows
+// it); SHORTCAND the 4 bytes at idxs0 (BX), going to searchlong if they
+// match. CX = curr. Every entry is below curr (else
 // bad), so with idx >= prefixLowestIndex >= baseIdx (the Go caller checks
 // the latter), R10 + idx lies in b[:ip].
 //
@@ -67,7 +68,7 @@
 	JAE  bad; \
 	MOVQ (R10)(R13*1), AX; \
 	CMPQ AX, (SI)(R8*1); \
-	JNE  nolong
+	JEQ  longmatch
 
 #define SHORTCAND \
 	CMPL BX, prefixLowestIndex+72(FP); \
@@ -91,7 +92,7 @@ TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $88-160
 	MOVQ    (R10)(R13*1), AX; \
 	ADCQ    $0, AX; \
 	CMPQ    AX, (SI)(R8*1); \
-	JNE     nolong
+	JEQ     longmatch
 
 #define SHORTCAND \
 	CMPL    BX, CX; \

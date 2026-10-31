@@ -59,14 +59,51 @@ inner:
 	MOVL AX, (DI)(R12*4)    // hashLong[hl0] = curr
 	MOVL AX, (R15)(BX*4)    // hashSmall[hs0] = curr
 
-	// repcode at ip+1
+	// repcode at ip+1. The misses fall through: the loop's only taken
+	// branch is then the one back to inner (C's layout).
 	TESTL R14, R14
 	JEQ   norep
 	LEAQ  1(R8), AX
 	SUBQ  R14, AX
 	MOVL  (SI)(AX*1), DX
 	CMPL  DX, 1(SI)(R8*1)
-	JNE   norep
+	JEQ   repmatch
+
+norep:
+	HASHL(R9, BX)
+	MOVL BX, HL1
+
+	// long match at ip (see LONGCAND)
+	MOVL CURR, CX
+	LONGCAND
+
+nolong:
+	MOVL (DI)(BX*4), AX
+	MOVL AX, IDXL1          // idxl1 = hashLong[hl1]
+
+	// short match at ip (see SHORTCAND)
+	MOVL IDXS0, BX
+	SHORTCAND
+
+noshort:
+	CMPQ R9, R11
+	JGE  stepinc
+
+nostep:
+	MOVQ R9, R8             // ip = ip1
+	ADDQ STEP, R9           // ip1 += step
+	MOVL HL1, R12           // hl0 = hl1
+	MOVL IDXL1, R13         // idxl0 = idxl1
+	CMPQ R9, ILIMIT
+	JLE  inner
+	JMP  cleanup
+
+stepinc:
+	INCQ STEP
+	ADDQ $256, R11
+	JMP  nostep
+
+repmatch:
 	// mLength = count(b, ip+1+4, ip+1+4-offset1, iend) + 4
 	LEAQ  4(SI)(AX*1), R10  // ip+1+4-offset1 (step is not needed after a repcode)
 	LEAQ  5(SI)(R8*1), R9
@@ -82,13 +119,7 @@ inner:
 	MOVQ  $0, RETSEL           // return to matchstored
 	JMP   store
 
-norep:
-	HASHL(R9, BX)
-	MOVL BX, HL1
-
-	// long match at ip (see LONGCAND)
-	MOVL CURR, CX
-	LONGCAND
+longmatch:
 	MOVL R13, DX
 	SUBL baseIdx+76(FP), DX  // matchl0
 	MOVQ R9, IP1
@@ -103,29 +134,6 @@ norep:
 	MOVQ R8, R12
 	SUBQ DX, R12            // offset
 	JMP  catchup
-
-nolong:
-	MOVL (DI)(BX*4), AX
-	MOVL AX, IDXL1          // idxl1 = hashLong[hl1]
-
-	// short match at ip (see SHORTCAND)
-	MOVL IDXS0, BX
-	SHORTCAND
-
-noshort:
-	CMPQ R9, R11
-	JLT  nostep
-	INCQ STEP
-	ADDQ $256, R11
-
-nostep:
-	MOVQ R9, R8             // ip = ip1
-	ADDQ STEP, R9           // ip1 += step
-	MOVL HL1, R12           // hl0 = hl1
-	MOVL IDXL1, R13         // idxl0 = idxl1
-	CMPQ R9, ILIMIT
-	JGT  cleanup
-	JMP  inner
 
 searchlong:
 	// C: _search_next_long.

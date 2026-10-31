@@ -136,3 +136,20 @@ fewer taken branches. Output identical.
 | L1 samba | 6.78 | 6.77 | -0.2% [-0.4..-0.1] |
 | L1 tar4m -B16K | 15.61 | 15.30 | **-2.0%** [-2.3..-1.9] |
 | L1 tar4m -B128K | 12.18 | 11.81 | **-3.1%** [-3.5..-2.8] |
+
+The double-fast loop (L3) had the same shape: per position the repcode
+miss, the long-candidate miss, the step test and the back-edge were taken
+jumps. Same fix (LONGCAND jumps to longmatch on a hit; the repcode hit,
+the long-match body and the step increase move out of line). Output
+identical.
+
+| config | before cyc/B | after | change (5 rounds) |
+|---|---|---|---|
+| L3 dickens | 20.11 | 19.84 | **-1.3%** [-1.6..-0.2] |
+| L3 mozilla | 13.09 | 13.01 | -0.6% [-1.6..-0.5] |
+| L3 xml | 6.73 | 6.69 | -0.6% [-0.8..-0.2] |
+| L3 sao | 22.25 | 22.07 | **-1.2%** [-1.5..-0.0] |
+| L3 samba | 10.53 | 10.39 | **-1.4%** [-1.4..-1.2] |
+| L3 ooffice | 17.67 | 17.41 | -1.0% [-2.0..+0.7] |
+| L3 tar4m -B16K | 22.23 | 21.98 | **-1.1%** [-2.0..-0.7] |
+| L3 tar4m -B128K | 18.67 | 18.35 | **-2.1%** [-2.3..-1.6] |
