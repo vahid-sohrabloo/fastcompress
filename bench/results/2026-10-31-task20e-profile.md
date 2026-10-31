@@ -153,3 +153,10 @@ identical.
 | L3 ooffice | 17.67 | 17.41 | -1.0% [-2.0..+0.7] |
 | L3 tar4m -B16K | 22.23 | 21.98 | **-1.1%** [-2.0..-0.7] |
 | L3 tar4m -B128K | 18.67 | 18.35 | **-2.1%** [-2.3..-1.6] |
+
+Tried and dropped: the same layout in the lazy-parser template (row, hc
+and bt; the repcode hit at ip+1 and a better first match out of line).
+Paired, 5 rounds: L7 dickens +0.3%, mozilla -0.3%, xml +0.5%, L11
+dickens +0.8%, samba -0.6%, L7 -B16K +1.4%, L7 -B128K +0.5%, L11 -B128K
++0.0%. The finder call dominates there; the branches around it do not
+matter.
