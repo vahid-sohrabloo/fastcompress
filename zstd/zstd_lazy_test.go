@@ -139,3 +139,34 @@ func TestGreedyRowCref(t *testing.T) {
 		}
 	}
 }
+
+// TestRowDictMinMatch3Cref loads a raw-content dictionary into a context
+// whose row match finder has minMatch 3 (explicit parameters; no level
+// table has it): C's ZSTD_row_update hashes the dictionary with mls =
+// min(minMatch, 6) = 3, which ZSTD_hashPtrSalted's default case treats as
+// 4. The frame must equal C's.
+func TestRowDictMinMatch3Cref(t *testing.T) {
+	text := readTestdata(t, "dickens-32k.raw")
+	src := bytes.Repeat(text, 4)[:100000]
+	dict := text[:26624]
+	for _, s := range []strategy{zstdGreedy, zstdLazy, zstdLazy2} {
+		cp := compressionParameters{windowLog: 15, chainLog: 6, hashLog: 12, searchLog: 1, minMatch: 3, targetLength: 16, strategy: s}
+		cc := newCCtx()
+		cc.setLevel(3)
+		cc.requestedParams.cParams = cp
+		cc.requestedParams.useRowMatchFinder = psEnable
+		if err := cc.loadDictionary(dict, dctRawContent); err != nil {
+			t.Fatal(err)
+		}
+		got, err := cc.compress2(nil, src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := append([]string{"compress", "-level", "3", "-pledged", "1", "-row", "1", "-cparams",
+			fmt.Sprintf("%d,%d,%d,%d,%d,%d,%d", cp.windowLog, cp.chainLog, cp.hashLog, cp.searchLog, cp.minMatch, cp.targetLength, cp.strategy)},
+			dictCase{dict: dict, raw: true}.crefArgs(t)...)
+		if want := creftest.Run(t, src, args...); !bytes.Equal(got, want) {
+			t.Fatalf("strategy %d: the frame differs from C's%s", s, firstDiff(got, want))
+		}
+	}
+}

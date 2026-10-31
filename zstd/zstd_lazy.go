@@ -40,11 +40,14 @@ func hashPtrSalted(b []byte, i int, hBits, mls uint32, salt uint64) uint32 {
 	return uint32((((binary.LittleEndian.Uint64(b[i:]) << saltedHashShift[m]) * saltedHashPrime[m]) ^ (salt << saltedHashSaltShift[m])) >> (64 - hBits))
 }
 
-// Parameters of hashPtrSalted per mls (4..8; other entries unused).
+// Parameters of hashPtrSalted per mls (3..8; other entries unused). mls 3
+// hashes 4 bytes, as C's switch default does: rowUpdate passes minMatch
+// capped at 6 but not raised to 4 (C: ZSTD_row_update), which a dictionary
+// load with minMatch 3 reaches.
 var (
-	saltedHashShift     = [16]uint8{4: 32, 5: 64 - 40, 6: 64 - 48, 7: 64 - 56, 8: 0}
-	saltedHashPrime     = [16]uint64{4: prime4bytes, 5: prime5bytes, 6: prime6bytes, 7: prime7bytes, 8: prime8bytes}
-	saltedHashSaltShift = [16]uint8{4: 32}
+	saltedHashShift     = [16]uint8{3: 32, 4: 32, 5: 64 - 40, 6: 64 - 48, 7: 64 - 56, 8: 0}
+	saltedHashPrime     = [16]uint64{3: prime4bytes, 4: prime4bytes, 5: prime5bytes, 6: prime6bytes, 7: prime7bytes, 8: prime8bytes}
+	saltedHashSaltShift = [16]uint8{3: 32, 4: 32}
 )
 
 // bitmix mixes the bits of a 64-bit value, based on XXH3_rrmxmx.

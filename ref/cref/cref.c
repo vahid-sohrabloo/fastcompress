@@ -20,6 +20,12 @@
  *   -raw-dict 0|1   1: load the dictionary as ZSTD_dct_rawContent
  *   -lit-mode M     ZSTD_c_literalCompressionMode: 0 auto (default),
  *                   1 ZSTD_ps_enable, 2 ZSTD_ps_disable
+ *   -cparams W,C,H,S,M,T,STRAT
+ *                   ZSTD_c_windowLog, chainLog, hashLog, searchLog, minMatch,
+ *                   targetLength, strategy, set after the level (0 = the
+ *                   level's value)
+ *   -row R          ZSTD_c_useRowMatchFinder: 0 auto (default), 1 enable,
+ *                   2 disable
  *
  * MODES
  *
@@ -175,7 +181,8 @@ static void dieZ(const char* what, size_t rc) {
 }
 
 typedef struct {
-    int level, checksum, pledged, windowLog, rawDict, tablelog, flags, litMode;
+    int level, checksum, pledged, windowLog, rawDict, tablelog, flags, litMode, row;
+    const char* cparams;
     const char* dictFile;
     unsigned long long seed;
     const char* chunks;
@@ -226,6 +233,8 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-dict"))       o->dictFile = v;
         else if (!strcmp(a, "-raw-dict"))   o->rawDict = atoi(v);
         else if (!strcmp(a, "-lit-mode"))   o->litMode = atoi(v);
+        else if (!strcmp(a, "-cparams"))    o->cparams = v;
+        else if (!strcmp(a, "-row"))        o->row = atoi(v);
         else if (!strcmp(a, "-tablelog"))   o->tablelog = atoi(v);
         else if (!strcmp(a, "-flags"))      o->flags = atoi(v);
         else if (!strcmp(a, "-seed"))       o->seed = strtoull(v, NULL, 0);
@@ -259,6 +268,22 @@ static ZSTD_CCtx* newCCtx(const Opts* o) {
     if (o->litMode) {
         r = ZSTD_CCtx_setParameter(c, ZSTD_c_literalCompressionMode, o->litMode);
         if (ZSTD_isError(r)) dieZ("set literalCompressionMode", r);
+    }
+    if (o->cparams) {
+        static const ZSTD_cParameter ps[7] = { ZSTD_c_windowLog, ZSTD_c_chainLog,
+            ZSTD_c_hashLog, ZSTD_c_searchLog, ZSTD_c_minMatch, ZSTD_c_targetLength,
+            ZSTD_c_strategy };
+        int v[7];
+        if (sscanf(o->cparams, "%d,%d,%d,%d,%d,%d,%d", &v[0], &v[1], &v[2], &v[3],
+                   &v[4], &v[5], &v[6]) != 7) die("-cparams needs 7 values");
+        for (int i = 0; i < 7; i++) {
+            r = ZSTD_CCtx_setParameter(c, ps[i], v[i]);
+            if (ZSTD_isError(r)) dieZ("set cparams", r);
+        }
+    }
+    if (o->row) {
+        r = ZSTD_CCtx_setParameter(c, ZSTD_c_useRowMatchFinder, o->row);
+        if (ZSTD_isError(r)) dieZ("set useRowMatchFinder", r);
     }
     if (o->dictFile) {
         FILE* f = fopen(o->dictFile, "rb");
