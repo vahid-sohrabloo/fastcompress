@@ -254,7 +254,8 @@ func llPrice(litLength uint32, o *optState) int {
 // parser's loop) it reads the two codes from llCodeTable directly: the
 // litLengthSumBasePrice terms cancel (each price is at least 0, as
 // litLengthSumBasePrice >= bitWeight of any one frequency, so the uint32
-// prices do not wrap), and equal codes cost the same.
+// prices do not wrap; TestLLIncPriceInvariant checks it), and equal codes
+// cost the same.
 func llIncPrice(litLength uint32, o *optState) int {
 	if o.priceType != zopPredef && litLength-1 < 63 {
 		c1, c0 := llCodeTable[litLength], llCodeTable[litLength-1]

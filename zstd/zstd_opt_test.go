@@ -36,3 +36,46 @@ func TestBtoptFewLiteralsCref(t *testing.T) {
 		}
 	}
 }
+
+// TestLLIncPriceInvariant checks llIncPrice's dynamic fast path against its
+// definition, llPrice(L) - llPrice(L-1), for every L in [1, 256] (and
+// beyond 64, where it takes the two-call form) at every point where the
+// parser prices: after rescaleFreqs (first block, then the downscale of
+// later blocks) and after the setBasePrices that follows each run of
+// updateStats, with random sequences. The fast path relies on
+// litLengthSumBasePrice >= bitWeight(litLengthFreq[c]) for every code
+// (the sum of the frequencies is at least each one), so a change that
+// breaks that invariant fails here.
+func TestLLIncPriceInvariant(t *testing.T) {
+	r := rand.New(rand.NewPCG(21, 22))
+	check := func(o *optState, when string) {
+		t.Helper()
+		for l := uint32(1); l <= 256; l++ {
+			if got, want := llIncPrice(l, o), llPrice(l, o)-llPrice(l-1, o); got != want {
+				t.Fatalf("%s: llIncPrice(%d) = %d, llPrice difference %d", when, l, got, want)
+			}
+		}
+	}
+	lits := make([]byte, 1<<17)
+	for i := range lits {
+		lits[i] = byte(r.IntN(64))
+	}
+	for range 20 {
+		o := &optState{symbolCosts: &entropyCTables{}}
+		for range 8 {
+			rescaleFreqs(o, lits[:1000+r.IntN(len(lits)-1000)])
+			if o.priceType == zopPredef {
+				t.Fatal("expected dynamic prices")
+			}
+			check(o, "after rescaleFreqs")
+			for range 1 + r.IntN(50) {
+				for range 1 + r.IntN(20) {
+					ll := uint32(r.IntN(1 << uint(r.IntN(17))))
+					updateStats(o, ll, lits, uint32(1+r.IntN(1<<20)), uint32(3+r.IntN(1000)))
+				}
+				setBasePrices(o)
+				check(o, "after updateStats")
+			}
+		}
+	}
+}
