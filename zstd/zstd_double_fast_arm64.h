@@ -57,7 +57,8 @@ inner:
 	MOVW  R10, (R1)(R7<<2)      // hashLong[hl0] = curr
 	MOVW  R10, (R2)(R14<<2)     // hashSmall[hs0] = curr
 
-	// repcode at ip+1
+	// repcode at ip+1. The misses fall through: the loop's only taken
+	// branch is then the one back to inner (C's layout).
 	CBZW  R9, norep
 	ADD   $1, R3, R14
 	SUB   R9, R14, R14
@@ -65,7 +66,40 @@ inner:
 	ADD   $1, R3, R16
 	MOVWU (R0)(R16), R16
 	CMPW  R15, R16
-	BNE   norep
+	BEQ   repmatch
+
+norep:
+	HASHL(R4, R11)              // hl1
+
+	// long match at ip (see LONGCAND); R14 = matchl0
+	LONGCAND
+
+nolong:
+	MOVWU (R1)(R11<<2), R12     // idxl1 = hashLong[hl1]
+
+	// short match at ip (see SHORTCAND); R14 = matchs0
+	MOVWU IDXS0, R20
+	SHORTCAND
+
+noshort:
+	CMP   R6, R4
+	BGE   stepinc
+
+nostep:
+	MOVD  R4, R3                // ip = ip1
+	ADD   R5, R4                // ip1 += step
+	MOVD  R11, R7               // hl0 = hl1
+	MOVD  R12, R8               // idxl0 = idxl1
+	CMP   R13, R4
+	BLE   inner
+	B     cleanup
+
+stepinc:
+	ADD   $1, R5
+	ADD   $256, R6
+	B     nostep
+
+repmatch:
 	// mLength = count(b, ip+1+4, ip+1+4-offset1, iend) + 4
 	ADD   R0, R14, R15
 	ADD   $4, R15
@@ -83,11 +117,7 @@ inner:
 	MOVD  ZR, R5                // return to matchstored
 	B     store
 
-norep:
-	HASHL(R4, R11)              // hl1
-
-	// long match at ip (see LONGCAND); R14 = matchl0
-	LONGCAND
+longmatch:
 	MOVD  R14, R6               // matchl0
 	// mLength = count(b, ip+8, matchl0+8, iend) + 8
 	ADD   R0, R3, R14
@@ -101,28 +131,6 @@ norep:
 	ADD   $8, R17, R7
 	SUB   R6, R3, R8            // offset
 	B     catchup
-
-nolong:
-	MOVWU (R1)(R11<<2), R12     // idxl1 = hashLong[hl1]
-
-	// short match at ip (see SHORTCAND); R14 = matchs0
-	MOVWU IDXS0, R20
-	SHORTCAND
-
-noshort:
-	CMP   R6, R4
-	BLT   nostep
-	ADD   $1, R5
-	ADD   $256, R6
-
-nostep:
-	MOVD  R4, R3                // ip = ip1
-	ADD   R5, R4                // ip1 += step
-	MOVD  R11, R7               // hl0 = hl1
-	MOVD  R12, R8               // idxl0 = idxl1
-	CMP   R13, R4
-	BGT   cleanup
-	B     inner
 
 searchlong:
 	// C: _search_next_long. R14 = matchs0.

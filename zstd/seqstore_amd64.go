@@ -18,13 +18,3 @@ func init() {
 //
 //go:noescape
 func seqCodesAsm(seqs *seqDef, n int, llCodes, ofCodes, mlCodes *byte)
-
-// seqCodes is seqCodesGeneric, in assembly when it is on.
-func seqCodes(seqs []seqDef, llCodes, ofCodes, mlCodes []byte) {
-	n := len(seqs)
-	if !useSeqCodesAsm || n == 0 || len(llCodes) < n || len(ofCodes) < n || len(mlCodes) < n {
-		seqCodesGeneric(seqs, llCodes, ofCodes, mlCodes)
-		return
-	}
-	seqCodesAsm(&seqs[0], n, &llCodes[0], &ofCodes[0], &mlCodes[0])
-}

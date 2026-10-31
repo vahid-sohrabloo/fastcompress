@@ -34,9 +34,10 @@
 // in their argument/result slots. For a match: R3 ip, R6 match position,
 // R7 mLength, R8 offset (then offBase); store takes R4 litLen and R5 the
 // return selector.
-// LONGCAND compares the 8 bytes at idxl0 (R8) with ip's, going to nolong
-// unless they match; SHORTCAND the 4 bytes at idxs0 (R20), going to
-// searchlong if they match. Both leave the match position in R14; every
+// LONGCAND compares the 8 bytes at idxl0 (R8) with ip's, going to
+// longmatch if they match (a miss falls through to nolong, which follows
+// it); SHORTCAND the 4 bytes at idxs0 (R20), going to searchlong if they
+// match. Both leave the match position in R14; every
 // entry is below curr (R10), else bad. The variants are those of
 // zstd_double_fast_amd64.s: compressBlockDoubleFastAsmStale reads ip itself
 // for an index below prefixLowestIndex (CSELW) and increments the value
@@ -50,7 +51,7 @@
 	MOVD  (R0)(R14), R15; \
 	MOVD  (R0)(R3), R16; \
 	CMP   R15, R16; \
-	BNE   nolong
+	BEQ   longmatch
 
 #define SHORTCAND \
 	CMPW  R22, R20; \
@@ -78,7 +79,7 @@ TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $16-160
 	CINC  LO, R15, R15; \
 	MOVD  (R0)(R3), R16; \
 	CMP   R15, R16; \
-	BNE   nolong
+	BEQ   longmatch
 
 #define SHORTCAND \
 	CMPW  R10, R20; \

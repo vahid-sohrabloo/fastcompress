@@ -24,12 +24,13 @@
 // R20 scratch (the helpers clobber them). nSeq and nLits live in their
 // result slots. After a match: R2 ip0, R5 match0, R6 mLength, R7 offBase;
 // store takes R3 litLen and R10 the return selector.
-// CANDIDATE(miss): compare the 4 bytes at matchIdx (R7) with ip0's, going
-// to miss unless they match; matchIdx < current0 (R13), else bad. The two
+// CANDIDATE(hit, miss): compare the 4 bytes at matchIdx (R7) with ip0's,
+// going to hit if they match; a miss falls through to the label miss,
+// which must follow. matchIdx < current0 (R13), else bad. The two
 // variants are those of zstd_fast_amd64.s: compressBlockFastAsmStale reads
 // ip0 itself for matchIdx < prefixStartIndex (CSELW) and increments the
 // value (CINCW), so the compare fails.
-#define CANDIDATE(miss) \
+#define CANDIDATE(hit, miss) \
 	CMPW  R23, R7; \
 	BLO   miss; \
 	CMPW  R13, R7; \
@@ -38,13 +39,13 @@
 	MOVWU (R0)(R14), R15; \
 	MOVWU (R0)(R2), R16; \
 	CMPW  R15, R16; \
-	BNE   miss
+	BEQ   hit
 
 TEXT ·compressBlockFastAsm(SB), NOSPLIT, $8-152
 #include "zstd_fast_arm64.h"
 
 #undef CANDIDATE
-#define CANDIDATE(miss) \
+#define CANDIDATE(hit, miss) \
 	CMPW  R13, R7; \
 	BHS   bad; \
 	CMPW  R23, R7; \
@@ -54,7 +55,7 @@ TEXT ·compressBlockFastAsm(SB), NOSPLIT, $8-152
 	CINCW LO, R15, R15; \
 	MOVWU (R0)(R2), R16; \
 	CMPW  R15, R16; \
-	BNE   miss
+	BEQ   hit
 
 TEXT ·compressBlockFastAsmStale(SB), NOSPLIT, $8-152
 #include "zstd_fast_arm64.h"

@@ -1,5 +1,5 @@
 // Code included by zstd_fast_arm64.s: the body of compressBlockFastAsm
-// and compressBlockFastAsmStale, which differ only in CANDIDATE(miss).
+// and compressBlockFastAsmStale, which differ only in CANDIDATE(hit, miss).
 //
 // go vet's asmdecl does not read #included files, so it does not check
 // this body: every name+off(FP) here must match, by hand, the Go
@@ -55,20 +55,14 @@ inner:
 	// current0 = idx(ip0); hashTable[hash0] = current0
 	ADDW  R2, R22, R13
 	MOVW  R13, (R1)(R5<<2)
-	// repcode at ip2
+	// repcode at ip2. The misses fall through: the loop's only taken
+	// branch is then the one back to inner (C's layout).
 	MOVWU (R0)(R4), R14
 	CMPW  R14, R15
-	BNE   norep
-	CBZW  R8, norep
-	ADDW  R3, R22, R14
-	MOVW  R14, (R1)(R6<<2)        // hashTable[hash1] = idx(ip1)
-	B     foundrep
+	BEQ   maybeRep
 
 norep:
-	CANDIDATE(miss1)
-	ADDW  R3, R22, R14
-	MOVW  R14, (R1)(R6<<2)        // hashTable[hash1] = idx(ip1)
-	B     foundoffset
+	CANDIDATE(hit1, miss1)
 
 miss1:
 	MOVWU (R1)(R6<<2), R7         // matchIdx = hashTable[hash1]
@@ -79,12 +73,7 @@ miss1:
 	ADD   $1, R4                  // ip2 = ip3
 	ADDW  R2, R22, R13
 	MOVW  R13, (R1)(R5<<2)
-	CANDIDATE(miss2)
-	CMP   $4, R9
-	BHI   foundoffset
-	ADDW  R3, R22, R14
-	MOVW  R14, (R1)(R6<<2)
-	B     foundoffset
+	CANDIDATE(hit2, miss2)
 
 miss2:
 	MOVWU (R1)(R6<<2), R7
@@ -94,15 +83,36 @@ miss2:
 	MOVD  R4, R3                  // ip1 = ip2
 	ADD   R9, R2, R4              // ip2 = ip0 + step (ip3 = ip1 + step = ip2 + 1)
 	CMP   R10, R4
-	BLT   nostep
-	ADD   $1, R9
-	ADD   $128, R10
+	BGE   stepinc
 
 nostep:
 	ADD  $1, R4, R14
 	CMP  R21, R14
-	BGE  cleanup
-	B    inner
+	BLT  inner
+	B    cleanup
+
+stepinc:
+	ADD $1, R9
+	ADD $128, R10
+	B   nostep
+
+maybeRep:
+	CBZW R8, norep
+	ADDW R3, R22, R14
+	MOVW R14, (R1)(R6<<2)         // hashTable[hash1] = idx(ip1)
+	B    foundrep
+
+hit1:
+	ADDW R3, R22, R14
+	MOVW R14, (R1)(R6<<2)         // hashTable[hash1] = idx(ip1)
+	B    foundoffset
+
+hit2:
+	CMP  $4, R9
+	BHI  foundoffset
+	ADDW R3, R22, R14
+	MOVW R14, (R1)(R6<<2)
+	B    foundoffset
 
 foundrep:
 	MOVD  R4, R2                  // ip0 = ip2
