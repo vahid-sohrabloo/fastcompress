@@ -346,8 +346,11 @@ func WithLowerEncoderMem(b bool) EOption {
 // only, and a no-op elsewhere; it needs the kernel's transparent huge pages
 // in "always" or "madvise" mode (/sys/kernel/mm/transparent_hugepage/enabled).
 // It may raise resident memory, since each table is rounded up to whole
-// 2 MiB pages. The mappings are released when the encoder's pooled contexts
-// are garbage collected. Cannot be changed with ResetWithOptions.
+// 2 MiB pages. The mappings are outside the Go heap: the GC does not count
+// them (nor does GOMEMLIMIT), and they are released only when the encoder's
+// pooled contexts are garbage collected, after a GC cycle. Reuse encoders
+// rather than creating one per stream. Cannot be changed with
+// ResetWithOptions.
 //
 // C: no equivalent; not a klauspost/compress option.
 func WithHugePages(b bool) EOption {

@@ -6,9 +6,8 @@
 # Writes bench/results/<date>-<label>.md. Each row: taskset -c $CPU, RUNS
 # (default 3) interleaved C/Go runs, median speed reported. Both sides report
 # the best ~1 s window (mean time per pass) seen in their time budget. Keep
-# CPU $CPU's SMT sibling (CPU 3 for CPU 2) and the rest of the machine idle. (All levels are
-# ported; the "n/a (not ported)" row for a gobench failure mentioning "not
-# ported" is no longer reachable.) Rows whose C and Go ratios differ are
+# CPU $CPU's SMT sibling (CPU 3 for CPU 2) and the rest of the machine idle. A
+# gobench failure stops the script. Rows whose C and Go ratios differ are
 # flagged "MISMATCH" (the port must be byte-identical, so ratios must be equal).
 # -hp LEVELS adds, for those levels, a third interleaved run per round with
 # gobench -hugepages (WithHugePages) and two more columns; "-" elsewhere.
@@ -35,7 +34,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$LABEL" ] || { echo "usage: $0 [-l \"1 3\"] [-f FILES] [-i SECS] [-g SECS] [-n RUNS] -label NAME" >&2; exit 2; }
+[ -n "$LABEL" ] || { echo "usage: $0 [-l \"1 3\"] [-f FILES] [-i SECS] [-g SECS] [-n RUNS] [-hp \"7 11\"] -label NAME" >&2; exit 2; }
 
 ZSTD=ref/zstd/programs/zstd
 [ -x "$ZSTD" ] || { echo "missing $ZSTD; run ref/fetch.sh" >&2; exit 1; }
@@ -103,10 +102,6 @@ for spec in "${SPECS[@]}"; do
   for lvl in $LEVELS; do
     echo "== $bname L$lvl block=$blabel" >&2
     if ! probe=$(go_bench "$lvl" "$blk" "$f" 2>&1); then
-      if grep -q "not ported" <<<"$probe"; then
-        echo "| $bname | $lvl | $blabel | n/a (not ported) | n/a (not ported) | n/a | n/a | n/a |" >> "$OUT"
-        continue
-      fi
       echo "gobench failed: $probe" >&2; exit 1
     fi
     cs=(); gs=(); hs=(); cr=""; gr=""; hp=""

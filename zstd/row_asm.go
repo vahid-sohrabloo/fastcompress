@@ -97,6 +97,7 @@ func lazyRowRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLo
 	if nSeq < 0 {
 		panic("zstd: row table holds an index at or after the current position")
 	}
+	ms.asmLoopRuns++
 	ms.lazySkipping = p.skip != 0
 	ss.sequences = ss.sequences[:nSeqs+nSeq]
 	ss.literals = ss.literals[:nLits+nLit]

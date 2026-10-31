@@ -68,6 +68,7 @@ func compressBlockDoubleFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]ui
 	if nSeq < 0 {
 		panic("zstd: double-fast hash table holds an index at or after the current position")
 	}
+	ms.asmLoopRuns++
 	ss.sequences = ss.sequences[:nSeqs+nSeq]
 	ss.literals = ss.literals[:nLits+nLit]
 	if llType != lltNone {

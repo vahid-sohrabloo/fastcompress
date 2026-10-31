@@ -583,6 +583,7 @@ type matchState struct {
 	rowAsm          rowAsmParams             // set up for the row finder's assembly during a block
 	btAsm           btAsmParams              // set up for the optimal parser's assembly btGetAllMatches during a block
 	asmCalls        int                      // calls of lazyHcRun, btGetAllNoDict and dubtFindBestMatchFast that ran the assembly (tests check it)
+	asmLoopRuns     int                      // blocks whose match loop ran in assembly: fast, double-fast, lazyHcRun, lazyRowRun, lazyBtRun, optParseFast (tests check it)
 
 	// staleHint: the last fast or double-fast assembly block's sequences had
 	// few literals (see staleTables), so the next block runs the Stale loop.

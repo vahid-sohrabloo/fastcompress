@@ -10,8 +10,13 @@ import (
 
 const hugePagesSupported = true
 
-// hugeLive counts the live mappings (tests check that cleanups unmap them).
+// hugeLive counts the live mappings.
 var hugeLive atomic.Int64
+
+// hugeTrace, when set (by tests only, before any mapping they watch is
+// made), is called with each mapping hugeMap makes (mapped true) and each
+// one hugeUnmap unmaps; the cleanup goroutine may call it.
+var hugeTrace atomic.Pointer[func(mem []byte, mapped bool)]
 
 // hugeMap maps n bytes rounded up to 2 MiB, plus 2 MiB of slack (address
 // space only, never touched) so a 2 MiB-aligned start exists inside the
@@ -29,6 +34,9 @@ func hugeMap(n int) (mem, b []byte) {
 	off := int(-uintptr(unsafe.Pointer(unsafe.SliceData(mem))) & (hugePageSize - 1))
 	_ = syscall.Madvise(mem[off:off+size], syscall.MADV_HUGEPAGE)
 	hugeLive.Add(1)
+	if f := hugeTrace.Load(); f != nil {
+		(*f)(mem, true)
+	}
 	return mem, mem[off : off+n : off+n]
 }
 
@@ -36,5 +44,8 @@ func hugeMap(n int) (mem, b []byte) {
 func hugeUnmap(mem []byte) {
 	if syscall.Munmap(mem) == nil {
 		hugeLive.Add(-1)
+		if f := hugeTrace.Load(); f != nil {
+			(*f)(mem, false)
+		}
 	}
 }

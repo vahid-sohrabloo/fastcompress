@@ -132,7 +132,7 @@ func TestOptAsmEquiv(t *testing.T) {
 			resetSeqStore(&ssAsm)
 			useOptAsm = false
 			litGo := compressBlockBtopt(msGo, &ssGo, &repGo, blk, uint32(pos)+baseIdx)
-			calls := msAsm.asmCalls
+			runs := msAsm.asmLoopRuns
 			useOptAsm = true
 			litAsm := compressBlockBtopt(msAsm, &ssAsm, &repAsm, blk, uint32(pos)+baseIdx)
 			if litGo != litAsm || repGo != repAsm || !slices.Equal(ssGo.sequences, ssAsm.sequences) ||
@@ -147,7 +147,7 @@ func TestOptAsmEquiv(t *testing.T) {
 				msAsm.nextToUpdate != msGo.nextToUpdate {
 				t.Fatalf("mls %d block [%d, %d): the statistics or tables differ from Go's", mls, pos, pos+n)
 			}
-			if n > 8 && msAsm.asmCalls != calls+1 { // optParseFast counts 1, the Go loop's finder calls 1 each
+			if n > 8 && msAsm.asmLoopRuns == runs {
 				t.Fatalf("mls %d block [%d, %d): the assembly parser did not run", mls, pos, pos+n)
 			}
 			pos += n

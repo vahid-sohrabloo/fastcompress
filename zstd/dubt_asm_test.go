@@ -20,8 +20,9 @@ import (
 // no public API reaches it), and random table sizes and window logs, over
 // text, random bytes and short-period runs (long matches overlapping their
 // source, after which the searches skip positions below nextToUpdate). The
-// sequences, literals, repcodes and final tables must agree, and the
-// assembly must have run. On an AVX2 host it runs again without AVX2.
+// sequences, literals, repcodes, final tables and lazySkipping must agree,
+// and the assembly must have run (for btlazy2, the parser lazyBtRun, not
+// only its finder). On an AVX2 host it runs again without AVX2.
 func TestBtAsmBlockEquiv(t *testing.T) {
 	withAsm(t, true, func() { testBtAsmBlockEquiv(t) })
 	if cpu.X86.HasAVX2 {
@@ -119,13 +120,16 @@ func testBtAsmBlockEquiv(t *testing.T) {
 							strat, mls, dict, cp, pos, pos+n, len(ssAsm.sequences), len(ssGo.sequences))
 					}
 					if !slices.Equal(msAsm.hashTable, msGo.hashTable) || !slices.Equal(msAsm.chainTable, msGo.chainTable) ||
-						msAsm.nextToUpdate != msGo.nextToUpdate {
-						t.Fatalf("strategy %d mls %d dict %v block [%d, %d): the tables differ from Go's", strat, mls, dict, pos, pos+n)
+						msAsm.nextToUpdate != msGo.nextToUpdate || msAsm.lazySkipping != msGo.lazySkipping {
+						t.Fatalf("strategy %d mls %d dict %v block [%d, %d): the tables or lazySkipping differ from Go's", strat, mls, dict, pos, pos+n)
 					}
 					pos += n
 				}
-				if msGo.asmCalls != 0 || msAsm.asmCalls == 0 {
-					t.Fatalf("strategy %d mls %d dict %v: the assembly ran %d times (Go side %d)", strat, mls, dict, msAsm.asmCalls, msGo.asmCalls)
+				if goRuns, asmRuns := msGo.asmCalls+msGo.asmLoopRuns, msAsm.asmCalls+msAsm.asmLoopRuns; goRuns != 0 || asmRuns == 0 {
+					t.Fatalf("strategy %d mls %d dict %v: the assembly ran %d times (Go side %d)", strat, mls, dict, asmRuns, goRuns)
+				}
+				if strat == zstdBtlazy2 && msAsm.asmLoopRuns == 0 { // lazyBtRun, not only its finder
+					t.Fatalf("mls %d dict %v: the btlazy2 assembly parser never ran", mls, dict)
 				}
 			}
 		}

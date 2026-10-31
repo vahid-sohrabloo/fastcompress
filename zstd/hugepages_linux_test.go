@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"runtime"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -92,27 +93,87 @@ func u32Bytes(t []uint32) []byte {
 
 // TestHugePagesReleased checks that a table that outgrows its mapping
 // unmaps the old one, and that dropped encoders' mappings are unmapped by
-// the GC cleanup.
+// the GC cleanup. It follows only the mappings made while it runs (through
+// hugeTrace), so other tests' encoders, whose cleanups may run meanwhile,
+// do not affect it.
 func TestHugePagesReleased(t *testing.T) {
 	src := hugeTestInput(t)
-	base := hugeLive.Load()
+	// This test's mappings, in order; an address can be mapped again after
+	// an unmap, so a mapping is identified by its record, not its address.
+	type mapping struct {
+		start *byte
+		live  bool
+	}
+	var mu sync.Mutex
+	var maps []*mapping
+	trace := func(mem []byte, mapped bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if p := unsafe.SliceData(mem); mapped {
+			maps = append(maps, &mapping{p, true})
+		} else {
+			for _, m := range maps {
+				if m.start == p && m.live {
+					m.live = false
+				}
+			}
+		}
+	}
+	hugeTrace.Store(&trace)
+	defer hugeTrace.Store(nil)
+	current := func(m []byte) *mapping { // the live record of mapping m
+		mu.Lock()
+		defer mu.Unlock()
+		for _, r := range maps {
+			if r.start == unsafe.SliceData(m) && r.live {
+				return r
+			}
+		}
+		return nil
+	}
+	isLive := func(r *mapping) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return r.live
+	}
+	nLive := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, r := range maps {
+			if r.live {
+				n++
+			}
+		}
+		return n
+	}
 
 	c := newCCtx()
 	c.hugePages = true
+	// oldHash is the previous level's hash table mapping.
+	var oldHash *mapping
 	for _, level := range []int{7, 11, 12} { // hashLog 20, 22, 23: each grows the hash table
 		c.setLevel(level)
 		if _, err := c.compress2(nil, src); err != nil {
 			t.Fatal(err)
 		}
+		if oldHash != nil && isLive(oldHash) {
+			t.Fatalf("level %d: the replaced hash table mapping is still mapped", level)
+		}
+		huge := &c.blockState.matchState.huge.mem
 		n := 0
-		for _, m := range c.blockState.matchState.huge.mem {
+		for slot, m := range huge {
 			if m != nil {
 				n++
+				if current(m) == nil {
+					t.Fatalf("level %d: the mapping of table slot %d is not live", level, slot)
+				}
 			}
 		}
-		if live := hugeLive.Load() - base; live != int64(n) {
-			t.Fatalf("level %d: %d live mappings, want %d (one per huge table)", level, live, n)
+		if huge[hugeHash] == nil || nLive() != n {
+			t.Fatalf("level %d: %d live mappings, want %d (one per huge table, including the hash table)", level, nLive(), n)
 		}
+		oldHash = current(huge[hugeHash])
 	}
 	runtime.KeepAlive(c)
 	c = nil
@@ -125,9 +186,9 @@ func TestHugePagesReleased(t *testing.T) {
 		}
 	}
 	deadline := time.Now().Add(20 * time.Second)
-	for hugeLive.Load() != base {
+	for nLive() != 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("%d huge-page mappings still live after the encoders were dropped", hugeLive.Load()-base)
+			t.Fatalf("%d huge-page mappings still live after the encoders were dropped", nLive())
 		}
 		runtime.GC()
 		time.Sleep(10 * time.Millisecond)

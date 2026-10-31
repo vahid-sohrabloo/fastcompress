@@ -257,7 +257,8 @@ func FuzzEncodeAsmEquiv(f *testing.F) {
 // raise lowLimit above the first index. As a crefTests entry it runs with
 // the assembly off, on, without BMI2 and without AVX2. With the assembly
 // on, the hash-chain and binary-tree cases without a dictionary must have
-// run it.
+// run it, and (from 4 KiB of input) so must every strategy's assembly
+// match loop (matchState.asmLoopRuns).
 func TestAsmEquivParams(t *testing.T) {
 	text := readTestdata(t, "dickens-32k.raw")
 	r := rand.New(rand.NewPCG(11, 12))
@@ -334,8 +335,17 @@ func TestAsmEquivParams(t *testing.T) {
 		}
 		hc := c.cp.strategy >= zstdGreedy && c.cp.strategy <= zstdLazy2 && c.row == psDisable && asmOn("hc")
 		bt := c.cp.strategy == zstdBtlazy2 && asmOn("dubt") || c.cp.strategy == zstdBtopt && c.cp.minMatch > 3 && asmOn("dubt")
-		if (hc || bt) && c.dict == nil && cc.blockState.matchState.asmCalls == 0 {
+		if (hc || bt) && c.dict == nil && cc.blockState.matchState.asmCalls+cc.blockState.matchState.asmLoopRuns == 0 {
 			t.Fatalf("%+v row %d n %d dict %d: the assembly never ran", c.cp, c.row, c.n, len(c.dict))
+		}
+		// The block-level match loops (fast, double-fast, the lazy parsers,
+		// the optimal parser) must have run too, not only the finders.
+		lazy := c.cp.strategy >= zstdGreedy && c.cp.strategy <= zstdLazy2
+		loop := c.cp.strategy == zstdFast && asmOn("fast") || c.cp.strategy == zstdDfast && asmOn("doublefast") ||
+			lazy && c.row == psDisable && asmOn("hc") || lazy && c.row == psEnable && asmOn("row") ||
+			c.cp.strategy == zstdBtlazy2 && asmOn("dubt") || c.cp.strategy == zstdBtopt && c.cp.minMatch > 3 && asmOn("opt")
+		if loop && c.dict == nil && c.n >= 4<<10 && cc.blockState.matchState.asmLoopRuns == 0 {
+			t.Fatalf("%+v row %d n %d: the assembly match loop never ran", c.cp, c.row, c.n)
 		}
 	}
 }

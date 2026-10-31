@@ -188,6 +188,7 @@ func lazyBtRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLow
 	if nSeq < 0 {
 		panic("zstd: binary tree holds an index at or after the current position")
 	}
+	ms.asmLoopRuns++
 	ms.lazySkipping = p.skip != 0
 	ss.sequences = ss.sequences[:nSeqs+nSeq]
 	ss.literals = ss.literals[:nLits+nLit]

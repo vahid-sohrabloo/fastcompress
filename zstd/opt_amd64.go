@@ -86,7 +86,7 @@ func optParseFast(ms *matchState, ss *seqStore, rep *[repNum]uint32, ip, anchor,
 	for {
 		switch optParseAsm(&p) {
 		case 0:
-			ms.asmCalls++
+			ms.asmLoopRuns++
 			return iend - anchor, true
 		case 2:
 			panic("zstd: binary tree holds an index at or after the current position")
