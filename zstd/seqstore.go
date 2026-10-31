@@ -192,11 +192,7 @@ func seqToCodes(ss *seqStore) bool {
 	llCodes := ss.llCode[:nbSeq]
 	ofCodes := ss.ofCode[:nbSeq]
 	mlCodes := ss.mlCode[:nbSeq]
-	for u, s := range ss.sequences {
-		llCodes[u] = byte(llCode(uint32(s.litLength)))
-		ofCodes[u] = byte(highbit32(s.offBase))
-		mlCodes[u] = byte(mlCode(uint32(s.mlBase)))
-	}
+	seqCodes(ss.sequences, llCodes, ofCodes, mlCodes)
 	if ss.longLengthType == lltLiteralLength {
 		llCodes[ss.longLengthPos] = maxLL
 	}
@@ -204,4 +200,15 @@ func seqToCodes(ss *seqStore) bool {
 		mlCodes[ss.longLengthPos] = maxML
 	}
 	return false
+}
+
+// seqCodesGeneric is seqToCodes' loop: the three codes of each sequence.
+// The code slices hold len(seqs) entries.
+func seqCodesGeneric(seqs []seqDef, llCodes, ofCodes, mlCodes []byte) {
+	llCodes, ofCodes, mlCodes = llCodes[:len(seqs)], ofCodes[:len(seqs)], mlCodes[:len(seqs)]
+	for u, s := range seqs {
+		llCodes[u] = byte(llCode(uint32(s.litLength)))
+		ofCodes[u] = byte(highbit32(s.offBase))
+		mlCodes[u] = byte(mlCode(uint32(s.mlBase)))
+	}
 }

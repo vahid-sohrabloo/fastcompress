@@ -73,3 +73,41 @@ dubtFindBestMatchAsm.
 | L11 tar32m -B128K instr/B | 288.7 | 234.4 | | 250.3 |
 
 Output identical (sha256 of L11 -B128K, L13 whole, L15 -B64K on tar4m).
+
+## Step 2: L1/L3 whole files and small blocks
+
+perf note: kernel.perf_event_max_sample_rate is 1500 here, so `perf
+record` with a short period (or -F 4000) silently drops samples; the
+per-symbol shares below use a period of 3M cycles (under the limit) and
+40 passes.
+
+L1 dickens whole (40 passes), cycles in millions, C / Go: total 4398 /
+4749 (+8%); fast loop (asm + fastCount + fastCopyLits + stale loop) 3225 /
+3384 (+159); **encodeSequences 519 / 504** (Go is not slower: the "27%"
+of Task 20d does not reproduce with an unthrottled profile); seqToCodes
+102 / 171 (+69); HUF_compress1X 195 / 231 (+36); FSE_buildCTable 30 / 66
+(+36); HIST 282 / 303 (+21).
+
+L1 -B16K (tar32m, 10 passes, -F 4000 so shares only): fast loop +128M,
+HIST +68M, FSE_buildCTable +62M, HUF table build +53M, seqToCodes +47M,
+FSE_compress_usingCTable +30M, HUF_compress1X -44M and encodeSequences
+-48M (Go faster) of a +362M gap.
+
+seqToCodes: gcc's loop is 19 instructions per sequence with the same two
+branches (ll > 63, ml > 127); Go's is 30 (no bounds checks, but the
+highbit32 LEA/BSR form, address recomputation and jumps). An amd64
+assembly loop of gcc's shape (seqCodesAsm):
+
+| config | before cyc/B | after | change (7 or 5 rounds) |
+|---|---|---|---|
+| L1 dickens | 11.71 | 11.62 | -0.7% [-1.0..-0.4] (5 rounds: -1.1%) |
+| L1 mozilla | 7.90 | 7.90 | -0.2% [-0.2..+0.6] |
+| L1 xml | 5.05 | 5.02 | -0.6% [-0.8..-0.1] |
+| L3 dickens | 20.17 | 20.25 | +0.2% [-0.7..+0.9] |
+| L3 mozilla | 13.15 | 13.15 | +0.0% [-0.4..+1.0] |
+| L3 xml | 6.87 | 6.83 | -0.6% [-1.0..-0.5] |
+| L1 tar4m -B16K | 15.75 | 15.68 | -0.4% [-0.4..+0.0] |
+| L3 tar4m -B16K | 22.43 | 22.37 | -0.7% [-1.1..-0.1] |
+
+Instructions -2 to -3% everywhere; kept (no whole-file regression beyond
+noise; load average 3-4 during these runs).
