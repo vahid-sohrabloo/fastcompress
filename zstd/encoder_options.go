@@ -35,6 +35,7 @@ const (
 //	WithConcurrentBlocks         none; accepted, encoding is single-threaded
 //	WithEncoderDictDelete        removes the dictionary (no C call)
 //	WithLowerEncoderMem          none; accepted, no effect on output
+//	WithHugePages                none (not a klauspost option); speed only
 //	WithSingleSegment            none; the frame header follows C's automatic
 //	                             choice (single segment iff window >= len(src))
 //	WithZeroFrames               none; decides whether empty input (or a
@@ -61,6 +62,7 @@ type encoderOptions struct {
 	noEntropy     bool
 	allLitEntropy bool
 	lowerMem      bool   // stored only, to reject a change in ResetWithOptions
+	hugePages     bool   // WithHugePages
 	dict          []byte // dictionary (private copy); nil = none
 	dictRaw       bool   // dict is raw content (WithEncoderDictRaw)
 	dictID        uint32 // WithEncoderDictRaw: the ID written into frame headers
@@ -331,6 +333,25 @@ func WithSingleSegment(b bool) EOption {
 // C: no equivalent. Accepted and ignored; it would not change output.
 func WithLowerEncoderMem(b bool) EOption {
 	return func(o *encoderOptions) error { o.lowerMem = b; return nil }
+}
+
+// WithHugePages backs the encoder's large match tables (the hash, chain or
+// binary-tree, and row tag tables of 1 MiB or more, which
+// SpeedBetterCompression and SpeedBestCompression use for large inputs) with transparent huge
+// pages: each such table gets its own 2 MiB-aligned anonymous mapping advised
+// with MADV_HUGEPAGE. This cuts the TLB misses of their random accesses.
+// The default is off.
+//
+// It is speed only: the output is identical with it on or off. It is Linux
+// only, and a no-op elsewhere; it needs the kernel's transparent huge pages
+// in "always" or "madvise" mode (/sys/kernel/mm/transparent_hugepage/enabled).
+// It may raise resident memory, since each table is rounded up to whole
+// 2 MiB pages. The mappings are released when the encoder's pooled contexts
+// are garbage collected. Cannot be changed with ResetWithOptions.
+//
+// C: no equivalent; not a klauspost/compress option.
+func WithHugePages(b bool) EOption {
+	return func(o *encoderOptions) error { o.hugePages = b; return nil }
 }
 
 // WithEncoderDict allows to register a dictionary that will be used for the encode.

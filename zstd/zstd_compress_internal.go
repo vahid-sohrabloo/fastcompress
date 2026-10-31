@@ -570,6 +570,7 @@ type matchState struct {
 	hashTable  []uint32
 	hashTable3 []uint32
 	chainTable []uint32
+	huge       *hugeTables // backs the large tables with huge pages (WithHugePages); nil = Go heap
 
 	// Row-based match finder state.
 	rowHashLog      uint32                   // hashLog - rowLog

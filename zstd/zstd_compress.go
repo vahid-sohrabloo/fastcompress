@@ -583,6 +583,7 @@ type cctx struct {
 	tmpWorkspace []byte   // C: tmpWorkspace, used for entropy
 	splitStats   *fpStats // pre-block-splitter workspace (C: tmpWorkspace too)
 	bmi2         bool
+	hugePages    bool // WithHugePages: back the large match tables with huge pages
 
 	// Streaming. C's inBufferMode and outBufferMode are always
 	// ZSTD_bm_buffered here (the stable modes are not exposed).
@@ -832,6 +833,9 @@ func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, load
 	c.dictID = 0
 
 	resetCompressedBlockState(c.blockState.prevCBlock)
+	if c.hugePages && c.blockState.matchState.huge == nil {
+		c.blockState.matchState.huge = newHugeTables(c)
+	}
 	resetMatchState(&c.blockState.matchState, &params.cParams, params.useRowMatchFinder, needsIndexReset, resetTargetCCtx)
 
 	// sequences storage
@@ -934,9 +938,9 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 	ms.opt.litLengthSum = 0 // force reset of btopt stats
 	ms.dictMatchState = nil
 
-	ms.hashTable = resizeTable(ms.hashTable, hSize)
-	ms.chainTable = resizeTable(ms.chainTable, chainSize)
-	ms.hashTable3 = resizeTable(ms.hashTable3, h3Size)
+	ms.hashTable = resizeHugeTable(ms.huge, hugeHash, ms.hashTable, hSize)
+	ms.chainTable = resizeHugeTable(ms.huge, hugeChain, ms.chainTable, chainSize)
+	ms.hashTable3 = resizeHugeTable(ms.huge, hugeHash3, ms.hashTable3, h3Size)
 	if forceResetIndex {
 		clear(ms.hashTable)
 		clear(ms.chainTable)
@@ -948,7 +952,7 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 		// We want to generate a new salt in case we reset a Cctx, but we
 		// always want to use 0 when we reset a Cdict.
 		if forWho == resetTargetCCtx {
-			ms.tagTable = resizeTagTable(ms.tagTable, hSize)
+			ms.tagTable = resizeHugeTagTable(ms.huge, ms.tagTable, hSize)
 			advanceHashSalt(ms)
 		} else {
 			// When we are not salting we want to always memset the memory

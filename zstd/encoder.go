@@ -127,6 +127,7 @@ func configureParams(c *cctx, o *encoderOptions) {
 	c.setChecksum(o.crc)
 	_ = c.setWindowLog(o.windowLog) // in range: validated by WithWindowSize
 	c.requestedParams.literalCompressionMode = o.literalCompressionMode()
+	c.hugePages = o.hugePages
 }
 
 // EncodeAll will encode all input in src and append it to dst.
@@ -378,8 +379,8 @@ func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
 			return err
 		}
 	}
-	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.concurrent != e.o.concurrent || o.concBlocks != e.o.concBlocks || o.lowerMem != e.o.lowerMem {
-		return errors.New("zstd: WithEncoderLevel, WithWindowSize, WithEncoderConcurrency, WithConcurrentBlocks and WithLowerEncoderMem cannot be changed with ResetWithOptions")
+	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.concurrent != e.o.concurrent || o.concBlocks != e.o.concBlocks || o.lowerMem != e.o.lowerMem || o.hugePages != e.o.hugePages {
+		return errors.New("zstd: WithEncoderLevel, WithWindowSize, WithEncoderConcurrency, WithConcurrentBlocks, WithLowerEncoderMem and WithHugePages cannot be changed with ResetWithOptions")
 	}
 	newDict := len(o.dict) != len(e.o.dict) || len(o.dict) > 0 && &o.dict[0] != &e.o.dict[0] ||
 		o.dictRaw != e.o.dictRaw || o.dictID != e.o.dictID

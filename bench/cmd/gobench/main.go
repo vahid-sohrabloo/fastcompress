@@ -33,18 +33,19 @@ func main() {
 	iters := flag.Int("iters", 1, "minimum number of counted ~1 s windows")
 	secs := flag.Float64("secs", 0, "also keep running until this many seconds of passes have been timed")
 	cpuprofile := flag.String("cpuprofile", "", "write a CPU profile of the timed passes to this file")
+	hugePages := flag.Bool("hugepages", false, "back the large match tables with huge pages (WithHugePages)")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: gobench [-level N] [-block N] [-iters N] [-secs S] [-cpuprofile F] FILE")
+		fmt.Fprintln(os.Stderr, "usage: gobench [-level N] [-block N] [-iters N] [-secs S] [-cpuprofile F] [-hugepages] FILE")
 		os.Exit(2)
 	}
-	if err := run(*level, *block, *iters, *secs, *cpuprofile, flag.Arg(0)); err != nil {
+	if err := run(*level, *block, *iters, *secs, *cpuprofile, *hugePages, flag.Arg(0)); err != nil {
 		fmt.Fprintln(os.Stderr, "gobench:", err)
 		os.Exit(1)
 	}
 }
 
-func run(level, block, iters int, secs float64, cpuprofile, path string) (err error) {
+func run(level, block, iters int, secs float64, cpuprofile string, hugePages bool, path string) (err error) {
 	var l zstd.EncoderLevel
 	switch level {
 	case 1:
@@ -68,7 +69,7 @@ func run(level, block, iters int, secs float64, cpuprofile, path string) (err er
 	if block <= 0 || block > len(src) {
 		block = len(src)
 	}
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(l), zstd.WithEncoderCRC(false))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(l), zstd.WithEncoderCRC(false), zstd.WithHugePages(hugePages))
 	if err != nil {
 		return err
 	}
