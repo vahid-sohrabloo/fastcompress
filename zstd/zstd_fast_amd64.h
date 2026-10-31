@@ -1,6 +1,22 @@
 // Code included by zstd_fast_amd64.s: the body of compressBlockFastAsm
 // and compressBlockFastAsmStale, which differ only in CANDIDATE(miss), the
 // test of the candidate at matchIdx (R13) against ip0 (current0 in AX).
+//
+// go vet's asmdecl does not read #included files, so it does not check
+// this body: every name+off(FP) here must match, by hand, the Go
+// declarations of compressBlockFastAsm and compressBlockFastAsmStale
+// (zstd_fast_amd64.go / _arm64.go) in offset and width (L/W loads and
+// stores for the 4-byte fields), and the TEXT frame sizes in the .s must
+// match too. Argument offsets (4-byte fields marked (4), the rest 8
+// bytes):
+//	hashTable+0 b+8 seqs+16 lits+24 ip0+32 istart+40 iend+48
+//	prefixStart+56 prefixStartIndex+64(4) baseIdx+68(4) rep1+72(4)
+//	rep2+76(4) stepSize+80 mlsShift+88 hShift+96 prime+104 anchor+112
+//	nSeq+120 nLits+128 rep1Out+136(4) rep2Out+140(4) llType+144(4)
+//	llPos+148(4); frame $40-152 on amd64, $8-152 on arm64.
+// No test checks the offsets as such: a mismatch shows up only through
+// TestAsmEquiv / TestCompress2* (output must equal C's) if it changes the
+// output on their inputs.
 
 	MOVQ hashTable+0(FP), DI
 	MOVQ b+8(FP), SI

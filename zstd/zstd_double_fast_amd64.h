@@ -1,6 +1,22 @@
 // Code included by zstd_double_fast_amd64.s: the body of
 // compressBlockDoubleFastAsm and compressBlockDoubleFastAsmStale, which
 // differ only in LONGCAND and SHORTCAND.
+//
+// go vet's asmdecl does not read #included files, so it does not check
+// this body: every name+off(FP) here must match, by hand, the Go
+// declarations of compressBlockDoubleFastAsm and
+// compressBlockDoubleFastAsmStale (zstd_double_fast_amd64.go / _arm64.go)
+// in offset and width (L/W loads and stores for the 4-byte fields), and
+// the TEXT frame sizes in the .s must match too. Argument offsets (4-byte
+// fields marked (4), the rest 8 bytes):
+//	hashLong+0 hashSmall+8 b+16 seqs+24 lits+32 ip+40 istart+48 iend+56
+//	prefixLowest+64 prefixLowestIndex+72(4) baseIdx+76(4) rep1+80(4)
+//	rep2+84(4) hShiftL+88 shiftS+96 hShiftS+104 primeS+112 anchor+120
+//	nSeq+128 nLits+136 rep1Out+144(4) rep2Out+148(4) llType+152(4)
+//	llPos+156(4); frame $88-160 on amd64, $16-160 on arm64.
+// No test checks the offsets as such: a mismatch shows up only through
+// TestAsmEquiv / TestCompress2* (output must equal C's) if it changes the
+// output on their inputs.
 
 	MOVQ hashLong+0(FP), DI
 	MOVQ hashSmall+8(FP), R15
