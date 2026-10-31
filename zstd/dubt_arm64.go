@@ -46,3 +46,11 @@ func insertBt1Asm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbCo
 //
 //go:noescape
 func btGetAllNoDictAsm(p *btAsmParams, ip int, rep *[repNum]uint32, ll0, lengthToBeat uint32) (mnum uint32, bad bool)
+
+// dubtFindBestMatchAsm is dubtFindBestMatch (with updateDUBT; noDict) for
+// the block set up in p, at ip; see dubtFindBestMatchFast for the
+// preconditions. bad reports a tree entry at or after the position being
+// sorted or searched (impossible).
+//
+//go:noescape
+func dubtFindBestMatchAsm(p *btAsmParams, ip int) (bestLength int, offBase uint32, bad bool)

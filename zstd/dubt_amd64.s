@@ -581,3 +581,209 @@ gend:
 gbad:
 	MOVB $1, bad+36(FP)
 	RET
+
+// func dubtFindBestMatchAsm(p *btAsmParams, ip int) (bestLength int, offBase uint32, bad bool)
+//
+// C: zstd_lazy.c:ZSTD_updateDUBT + ZSTD_DUBT_findBestMatch (noDict): insert
+// the positions up to ip as unsorted candidates, sort the unsorted ones of
+// ip's hash (insertDUBT1Asm), then search (dubtSearchAsm). The two loops are
+// called with their stack arguments at 0(SP) (insertDUBT1Asm: 0-57,
+// dubtSearchAsm: 0-80). Locals: 96(SP) p, 104(SP) curr, 108(SP)
+// unsortLimit, 112(SP) hash, 120(SP) nbCandidates, 124(SP) windowLow,
+// 128(SP) btLow, 132(SP) the next candidate to sort.
+//
+// Bounds: dubtFindBestMatchFast checks 0 < ip, ip + 8 <= iLimit, baseIdx
+// <= nextToUpdate and lowestValid <= curr; btAsmSetup the table sizes and
+// lowestValid >= baseIdx. The inserted positions are in [nextToUpdate, ip),
+// so their 8 hashed bytes lie in b[:ip+8]. A candidate sorted here is >
+// unsortLimit >= windowLow >= baseIdx, and must be < curr (else bad), so
+// it satisfies insertDUBT1Asm's preconditions with windowLow computed as
+// insertDUBT1 does (>= lowestValid >= baseIdx).
+TEXT ·dubtFindBestMatchAsm(SB), NOSPLIT, $144-29
+	MOVQ p+0(FP), R15
+	MOVQ R15, 96(SP)
+	MOVB $0, bad+28(FP)
+	MOVQ BP_B(R15), SI
+	MOVL BP_BASEIDX(R15), BX
+	MOVQ SI, R9
+	SUBQ BX, R9                 // b - baseIdx: an index addresses b directly
+	MOVQ ip+8(FP), R8
+	ADDL R8, BX
+	MOVL BX, 104(SP)            // curr
+	MOVQ BP_HASH(R15), R10
+	MOVQ BP_BT(R15), R11
+	MOVL BP_BTMASK(R15), R13
+	MOVQ BP_PRIME(R15), R14
+	MOVQ BP_HSHIFT(R15), CX
+
+	// updateDUBT: [nextToUpdate, curr) as unsorted candidates
+	MOVQ BP_NEXT(R15), AX
+	MOVL (AX), DX
+	JMP  uck
+
+uloop:
+	MOVQ  (R9)(DX*1), AX
+	IMULQ R14, AX
+	SHRQ  CX, AX
+	MOVL  (R10)(AX*4), R12
+	MOVL  DX, (R10)(AX*4)
+	MOVL  DX, AX
+	ANDL  R13, AX
+	MOVL  R12, (R11)(AX*8)      // bt[2*(idx&btMask)] = matchIndex
+	MOVL  $1, 4(R11)(AX*8)      // dubtUnsortedMark
+	INCL  DX
+
+uck:
+	CMPL DX, BX
+	JB   uloop
+	MOVQ BP_NEXT(R15), AX
+	MOVL BX, (AX)               // nextToUpdate = curr
+
+	MOVQ  (SI)(R8*1), AX
+	IMULQ R14, AX
+	SHRQ  CX, AX
+	MOVQ  AX, 112(SP)
+	MOVL  (R10)(AX*4), DX       // matchIndex
+
+	// windowLow (getLowestMatchIndex), btLow, unsortLimit = max(btLow, windowLow)
+	MOVL BP_LOWEST(R15), AX
+	MOVL BX, CX
+	SUBL AX, CX
+	CMPL CX, BP_MAXDIST(R15)
+	JLS  wlok
+	MOVL BX, AX
+	SUBL BP_MAXDIST(R15), AX
+
+wlok:
+	CMPL BP_ISDICT(R15), $0
+	JEQ  wlset
+	MOVL BP_LOWEST(R15), AX
+
+wlset:
+	MOVL    AX, 124(SP)
+	XORL    CX, CX
+	SUBL    R13, BX
+	CMOVLHI BX, CX
+	MOVL    CX, 128(SP)
+	CMPL    CX, AX
+	CMOVLLS AX, CX
+	MOVL    CX, 108(SP)
+
+	// reach the end of the unsorted candidates, reversing the chain
+	MOVL BP_NBCMP(R15), R12     // nbCandidates
+	XORL BX, BX                 // previousCandidate
+
+chain:
+	CMPL DX, CX
+	JLS  chaindone
+	MOVL DX, AX
+	ANDL R13, AX
+	CMPL 4(R11)(AX*8), $1
+	JNE  chaindone
+	CMPL R12, $1
+	JLS  nullify
+	MOVL BX, 4(R11)(AX*8)
+	MOVL DX, BX
+	MOVL (R11)(AX*8), DX
+	DECL R12
+	JMP  chain
+
+nullify:
+	// the last candidate is still unsorted: drop it
+	MOVQ $0, (R11)(AX*8)
+
+chaindone:
+	MOVL R12, 120(SP)
+	MOVL BX, 132(SP)
+
+batch:
+	// sort the stacked candidates, oldest first
+	MOVL  132(SP), DX
+	TESTL DX, DX
+	JEQ   search
+	MOVQ  96(SP), R15
+	MOVQ  BP_BT(R15), R11
+	MOVL  BP_BTMASK(R15), R13
+	MOVL  DX, AX
+	ANDL  R13, AX
+	MOVL  4(R11)(AX*8), CX
+	MOVL  CX, 132(SP)
+	CMPL  DX, 104(SP)
+	JAE   bad
+	MOVQ  R11, 0(SP)            // bt
+	MOVQ  BP_B(R15), AX
+	MOVQ  AX, 8(SP)             // b
+	MOVL  DX, AX
+	SUBL  BP_BASEIDX(R15), AX
+	MOVQ  AX, 16(SP)            // ip
+	MOVQ  BP_ILIMIT(R15), AX
+	MOVQ  AX, 24(SP)            // iend
+	MOVL  DX, 32(SP)            // curr
+	MOVL  BP_BASEIDX(R15), AX
+	MOVL  AX, 36(SP)            // baseIdx
+	MOVL  R13, 40(SP)           // btMask
+	MOVL  120(SP), AX
+	MOVL  AX, 44(SP)            // nbCompares = nbCandidates
+	MOVL  108(SP), AX
+	MOVL  AX, 48(SP)            // btLow = unsortLimit
+	MOVL  BP_LOWEST(R15), AX    // windowLow, as insertDUBT1
+	MOVL  DX, CX
+	SUBL  AX, CX
+	CMPL  CX, BP_MAXDIST(R15)
+	JLS   bwlok
+	MOVL  DX, AX
+	SUBL  BP_MAXDIST(R15), AX
+
+bwlok:
+	MOVL AX, 52(SP)
+	CALL ·insertDUBT1Asm(SB)
+	CMPB 56(SP), $0
+	JEQ  bad
+	INCL 120(SP)
+	JMP  batch
+
+search:
+	// find the longest match: matchIndex = hashTable[h]; hashTable[h] = curr
+	MOVQ 96(SP), R15
+	MOVQ BP_HASH(R15), AX
+	MOVQ 112(SP), CX
+	MOVL (AX)(CX*4), DX
+	MOVL 104(SP), BX
+	MOVL BX, (AX)(CX*4)
+	MOVQ BP_BT(R15), AX
+	MOVQ AX, 0(SP)
+	MOVQ BP_B(R15), AX
+	MOVQ AX, 8(SP)
+	MOVQ ip+8(FP), AX
+	MOVQ AX, 16(SP)
+	MOVQ BP_ILIMIT(R15), AX
+	MOVQ AX, 24(SP)
+	MOVL BX, 32(SP)             // curr
+	MOVL BP_BASEIDX(R15), AX
+	MOVL AX, 36(SP)
+	MOVL BP_BTMASK(R15), AX
+	MOVL AX, 40(SP)
+	MOVL BP_NBCMP(R15), AX
+	MOVL AX, 44(SP)
+	MOVL 128(SP), AX
+	MOVL AX, 48(SP)             // btLow
+	MOVL 124(SP), AX
+	MOVL AX, 52(SP)             // windowLow
+	MOVL DX, 56(SP)             // matchIndex
+	CALL ·dubtSearchAsm(SB)
+	MOVL  76(SP), AX            // matchEndIdx
+	TESTL AX, AX
+	JEQ   bad
+	SUBL  $8, AX
+	MOVQ  96(SP), R15
+	MOVQ  BP_NEXT(R15), CX
+	MOVL  AX, (CX)              // nextToUpdate = matchEndIdx - 8 (skip repetitive patterns)
+	MOVQ  64(SP), AX
+	MOVQ  AX, bestLength+16(FP)
+	MOVL  72(SP), AX
+	MOVL  AX, offBase+24(FP)
+	RET
+
+bad:
+	MOVB $1, bad+28(FP)
+	RET

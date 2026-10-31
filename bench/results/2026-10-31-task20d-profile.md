@@ -130,3 +130,18 @@ Tried and dropped: setting the next repcodes element by element (instead of
 newRep's array copy) after a perf annotate put 9.5% of the parser's cycles
 on that line: +0.6% against the hoisting alone (the time is the load
 latency of opt[prev], not the copy).
+
+### btlazy2: updateDUBT + dubtFindBestMatch in assembly (L11 -B128K)
+
+Profile before (faf2d5b), L11 tar4m -B128K, share of instructions / cycles:
+dubtFindBestMatch (Go) 24.5% / 18.9%, insertDUBT1Asm 24.4% / 31.3%,
+dubtSearchAsm 22.4% / 33.3%, updateDUBT (Go) 13.2% / 5.4%,
+compressBlockLazyGeneric 6.7% / 4.1%, the Go wrappers dubtSearch and
+insertDUBT1 3.8% / 4.0%. Go ran 485 instr/B against C's 336.
+
+dubtFindBestMatchAsm does updateDUBT, the unsorted-chain walk and the batch
+sort, calling the existing insertDUBT1Asm and dubtSearchAsm loops with
+stack arguments; its per-block parameters are ms.btAsm (as for btopt).
+
+L11 tar4m -B128K: **-7.2%** [-7.3..-7.2] (252.4 -> 234.3 cycles/B, C 226.9),
+instr/B 485 -> 374. -B16K (btopt, untouched): +0.4%.

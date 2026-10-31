@@ -399,6 +399,9 @@ func btFindBestMatch(ms *matchState, ip, iLimit int, mls uint32) (int, uint32) {
 	if uint32(ip)+ms.window.baseIdx < ms.nextToUpdate {
 		return 0, offBaseNotFound // skipped area
 	}
+	if bestLength, offBase, ok := dubtFindBestMatchFast(ms, ip, iLimit); ok {
+		return bestLength, offBase // the same, in assembly (set up by compressBlockLazyGeneric)
+	}
 	updateDUBT(ms, ip, mls)
 	return dubtFindBestMatch(ms, ip, iLimit, mls)
 }
@@ -610,6 +613,9 @@ func compressBlockLazyGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32,
 			// has nothing left to do (ip >= ilimit).
 			ip, anchor, offset1, offset2, _ = lazyRowRun(ms, ss, ip, anchor, iend, ilimit, prefixLowest, offset1, offset2, depth, mls, rowLog)
 		}
+	} else if method == searchBinaryTree {
+		btAsmSetup(ms, nil, mls, iend)
+		defer func() { ms.btAsm = btAsmParams{} }()
 	} else if method == searchHashChain {
 		hcAsmSetup(ms, iend)
 		defer func() { ms.rowAsm = rowAsmParams{} }()

@@ -539,3 +539,200 @@ gbad:
 	MOVD  $1, R19
 	MOVB  R19, bad+36(FP)
 	RET
+
+// func dubtFindBestMatchAsm(p *btAsmParams, ip int) (bestLength int, offBase uint32, bad bool)
+//
+// C: zstd_lazy.c:ZSTD_updateDUBT + ZSTD_DUBT_findBestMatch (noDict); see
+// dubt_amd64.s for the steps and bounds. The two loops are called with
+// their stack arguments at 8(RSP) (insertDUBT1Asm: 8-65, dubtSearchAsm:
+// 8-88). Locals: 96(RSP) p, 104(RSP) curr, 108(RSP) unsortLimit, 112(RSP)
+// hash, 120(RSP) nbCandidates, 124(RSP) windowLow, 128(RSP) btLow,
+// 132(RSP) the next candidate to sort.
+TEXT ·dubtFindBestMatchAsm(SB), NOSPLIT, $144-29
+	MOVD  p+0(FP), R25
+	MOVD  R25, 96(RSP)
+	MOVB  ZR, bad+28(FP)
+	MOVD  BP_B(R25), R1
+	MOVWU BP_BASEIDX(R25), R3
+	SUB   R3, R1, R9            // b - baseIdx (no GC safepoint while it lives)
+	MOVD  ip+8(FP), R2
+	ADDW  R2, R3, R3            // curr
+	MOVW  R3, 104(RSP)
+	MOVD  BP_HASH(R25), R10
+	MOVD  BP_BT(R25), R11
+	MOVWU BP_BTMASK(R25), R13
+	MOVD  BP_PRIME(R25), R14
+	MOVD  BP_HSHIFT(R25), R15
+
+	// updateDUBT: [nextToUpdate, curr) as unsorted candidates
+	MOVD  BP_NEXT(R25), R4
+	MOVWU (R4), R5
+	B     uck
+
+uloop:
+	MOVD  (R9)(R5), R6
+	MUL   R14, R6, R6
+	LSR   R15, R6, R6
+	MOVWU (R10)(R6<<2), R7
+	MOVW  R5, (R10)(R6<<2)
+	ANDW  R13, R5, R6
+	ADD   R6<<3, R11, R6
+	MOVW  R7, (R6)              // bt[2*(idx&btMask)] = matchIndex
+	MOVD  $1, R7
+	MOVW  R7, 4(R6)             // dubtUnsortedMark
+	ADDW  $1, R5
+
+uck:
+	CMPW  R3, R5
+	BLO   uloop
+	MOVW  R3, (R4)              // nextToUpdate = curr
+
+	ADD   R2, R1, R6
+	MOVD  (R6), R6
+	MUL   R14, R6, R6
+	LSR   R15, R6, R6
+	MOVD  R6, 112(RSP)
+	MOVWU (R10)(R6<<2), R5      // matchIndex
+
+	// windowLow (getLowestMatchIndex), btLow, unsortLimit = max(btLow, windowLow)
+	MOVWU BP_LOWEST(R25), R6
+	MOVWU BP_MAXDIST(R25), R7
+	SUBW  R6, R3, R8
+	CMPW  R7, R8
+	BLS   wlok
+	SUBW  R7, R3, R6
+
+wlok:
+	MOVWU BP_ISDICT(R25), R8
+	CBZW  R8, wlset
+	MOVWU BP_LOWEST(R25), R6
+
+wlset:
+	MOVW  R6, 124(RSP)
+	SUBSW R13, R3, R7
+	CSELW HI, R7, ZR, R7
+	MOVW  R7, 128(RSP)
+	CMPW  R6, R7
+	CSELW HI, R7, R6, R8
+	MOVW  R8, 108(RSP)
+
+	// reach the end of the unsorted candidates, reversing the chain
+	MOVWU BP_NBCMP(R25), R12    // nbCandidates
+	MOVD  ZR, R16               // previousCandidate
+
+chain:
+	CMPW  R8, R5
+	BLS   chaindone
+	ANDW  R13, R5, R6
+	ADD   R6<<3, R11, R6
+	MOVWU 4(R6), R7
+	CMPW  $1, R7
+	BNE   chaindone
+	CMPW  $1, R12
+	BLS   nullify
+	MOVW  R16, 4(R6)
+	MOVWU R5, R16
+	MOVWU (R6), R5
+	SUBW  $1, R12
+	B     chain
+
+nullify:
+	// the last candidate is still unsorted: drop it
+	MOVD  ZR, (R6)
+
+chaindone:
+	MOVW  R12, 120(RSP)
+	MOVW  R16, 132(RSP)
+
+batch:
+	// sort the stacked candidates, oldest first
+	MOVWU 132(RSP), R5
+	CBZW  R5, search
+	MOVD  96(RSP), R25
+	MOVD  BP_BT(R25), R11
+	MOVWU BP_BTMASK(R25), R13
+	ANDW  R13, R5, R6
+	ADD   R6<<3, R11, R6
+	MOVWU 4(R6), R7
+	MOVW  R7, 132(RSP)
+	MOVWU 104(RSP), R7
+	CMPW  R7, R5
+	BHS   bad
+	MOVD  R11, 8(RSP)           // bt
+	MOVD  BP_B(R25), R7
+	MOVD  R7, 16(RSP)           // b
+	MOVWU BP_BASEIDX(R25), R7
+	SUBW  R7, R5, R8
+	MOVD  R8, 24(RSP)           // ip
+	MOVD  BP_ILIMIT(R25), R8
+	MOVD  R8, 32(RSP)           // iend
+	MOVW  R5, 40(RSP)           // curr
+	MOVW  R7, 44(RSP)           // baseIdx
+	MOVW  R13, 48(RSP)          // btMask
+	MOVWU 120(RSP), R8
+	MOVW  R8, 52(RSP)           // nbCompares = nbCandidates
+	MOVWU 108(RSP), R8
+	MOVW  R8, 56(RSP)           // btLow = unsortLimit
+	MOVWU BP_LOWEST(R25), R8    // windowLow, as insertDUBT1
+	MOVWU BP_MAXDIST(R25), R7
+	SUBW  R8, R5, R6
+	CMPW  R7, R6
+	BLS   bwlok
+	SUBW  R7, R5, R8
+
+bwlok:
+	MOVW  R8, 60(RSP)
+	CALL  ·insertDUBT1Asm(SB)
+	MOVBU 64(RSP), R7
+	CBZW  R7, bad
+	MOVWU 120(RSP), R7
+	ADDW  $1, R7
+	MOVW  R7, 120(RSP)
+	B     batch
+
+search:
+	// find the longest match: matchIndex = hashTable[h]; hashTable[h] = curr
+	MOVD  96(RSP), R25
+	MOVD  BP_HASH(R25), R6
+	MOVD  112(RSP), R7
+	ADD   R7<<2, R6, R6
+	MOVWU (R6), R5
+	MOVWU 104(RSP), R8
+	MOVW  R8, (R6)
+	MOVD  BP_BT(R25), R7
+	MOVD  R7, 8(RSP)
+	MOVD  BP_B(R25), R7
+	MOVD  R7, 16(RSP)
+	MOVD  ip+8(FP), R7
+	MOVD  R7, 24(RSP)
+	MOVD  BP_ILIMIT(R25), R7
+	MOVD  R7, 32(RSP)
+	MOVW  R8, 40(RSP)           // curr
+	MOVWU BP_BASEIDX(R25), R7
+	MOVW  R7, 44(RSP)
+	MOVWU BP_BTMASK(R25), R7
+	MOVW  R7, 48(RSP)
+	MOVWU BP_NBCMP(R25), R7
+	MOVW  R7, 52(RSP)
+	MOVWU 128(RSP), R7
+	MOVW  R7, 56(RSP)           // btLow
+	MOVWU 124(RSP), R7
+	MOVW  R7, 60(RSP)           // windowLow
+	MOVW  R5, 64(RSP)           // matchIndex
+	CALL  ·dubtSearchAsm(SB)
+	MOVWU 84(RSP), R7           // matchEndIdx
+	CBZW  R7, bad
+	SUBW  $8, R7
+	MOVD  96(RSP), R25
+	MOVD  BP_NEXT(R25), R6
+	MOVW  R7, (R6)              // nextToUpdate = matchEndIdx - 8 (skip repetitive patterns)
+	MOVD  72(RSP), R7
+	MOVD  R7, bestLength+16(FP)
+	MOVWU 80(RSP), R7
+	MOVW  R7, offBase+24(FP)
+	RET
+
+bad:
+	MOVD  $1, R7
+	MOVB  R7, bad+28(FP)
+	RET

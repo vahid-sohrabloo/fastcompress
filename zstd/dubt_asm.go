@@ -58,8 +58,9 @@ func insertBt1Loop(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, b
 }
 
 // btAsmSetup prepares ms.btAsm for compressBlockOptGeneric's noDict
-// searches over a block ending at iend (a position in ms.window.base), for
-// mls 4 to 6 (mls 3 adds the hash3 table, left to the Go code).
+// searches (with their match table) or btlazy2's (matches nil) over a
+// block ending at iend (a position in ms.window.base), for mls 4 to 6 (mls
+// 3 adds the optimal parser's hash3 table, left to the Go code).
 func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int) {
 	p := &ms.btAsm
 	p.ok = false
@@ -74,7 +75,6 @@ func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int
 		bt:            &ms.chainTable[0],
 		b:             &b[0],
 		hashTable:     &ms.hashTable[0],
-		matches:       &matches[0],
 		nextToUpdate:  &ms.nextToUpdate,
 		prime:         saltedHashPrime[mls] << saltedHashShift[mls],
 		hShift:        uint64(64 - cParams.hashLog),
@@ -87,6 +87,9 @@ func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int
 		sufficientLen: min(cParams.targetLength, optNum-1),
 		iLimit:        iend,
 		ok:            true,
+	}
+	if matches != nil {
+		p.matches = &matches[0]
 	}
 	if ms.loadedDictEnd != 0 {
 		p.isDictionary = 1
@@ -101,7 +104,7 @@ func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int
 // candidates' lower bound is at most curr).
 func btGetAllNoDict(ms *matchState, ip, iLimit int, rep *[repNum]uint32, ll0 bool, lengthToBeat uint32) (uint32, bool) {
 	p := &ms.btAsm
-	if !p.ok || iLimit != p.iLimit || ip <= 0 || ip+8 > iLimit || lengthToBeat < 1 || p.lowestValid > uint32(ip)+p.baseIdx {
+	if !p.ok || p.matches == nil || iLimit != p.iLimit || ip <= 0 || ip+8 > iLimit || lengthToBeat < 1 || p.lowestValid > uint32(ip)+p.baseIdx {
 		return 0, false
 	}
 	var l uint32
@@ -113,4 +116,21 @@ func btGetAllNoDict(ms *matchState, ip, iLimit int, rep *[repNum]uint32, ll0 boo
 		panic("zstd: binary tree holds an index at or after the current position")
 	}
 	return mnum, true
+}
+
+// dubtFindBestMatchFast is updateDUBT + dubtFindBestMatch in assembly, with
+// ms.btAsm set up for this block. ok is false (nothing done) when it is not
+// set up or a precondition fails: 0 < ip, ip + 8 <= iend (the hash reads 8
+// bytes), baseIdx <= ms.nextToUpdate, and the window's lowLimit <= ip's
+// index.
+func dubtFindBestMatchFast(ms *matchState, ip, iend int) (int, uint32, bool) {
+	p := &ms.btAsm
+	if !p.ok || iend != p.iLimit || ip <= 0 || ip+8 > iend || ms.nextToUpdate < p.baseIdx || p.lowestValid > uint32(ip)+p.baseIdx {
+		return 0, 0, false
+	}
+	bestLength, offBase, bad := dubtFindBestMatchAsm(p, ip)
+	if bad {
+		panic("zstd: binary tree holds an index at or after the current position")
+	}
+	return bestLength, offBase, true
 }
