@@ -928,6 +928,7 @@ func resetMatchState(ms *matchState, cParams *compressionParameters, useRowMatch
 
 	// C: ZSTD_invalidateMatchState
 	windowClear(&ms.window)
+	ms.frameStart = ms.window.dictLimit
 	ms.nextToUpdate = ms.window.dictLimit
 	ms.loadedDictEnd = 0
 	ms.opt.litLengthSum = 0 // force reset of btopt stats
@@ -1014,6 +1015,7 @@ func overflowCorrectIfNeeded(ms *matchState, params *cctxParams, ipIdx, iendIdx 
 		} else {
 			ms.nextToUpdate -= correction
 		}
+		ms.frameStart -= min(ms.frameStart, correction)
 		// invalidate dictionaries on overflow correction
 		ms.loadedDictEnd = 0
 		ms.dictMatchState = nil

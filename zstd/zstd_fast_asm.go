@@ -63,7 +63,7 @@ func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 		litPtr = &lits[0]
 	}
 	asm := compressBlockFastAsm
-	if istart-prefixStart < staleTables<<hlog || ms.staleHint {
+	if int(srcIdx-ms.frameStart) < staleTables<<hlog || ms.staleHint {
 		asm = compressBlockFastAsmStale
 	}
 	anchor, nSeq, nLit, r1, r2, llType, llPos := asm(&ms.hashTable[0], &b[0], seqPtr, litPtr,
@@ -102,7 +102,10 @@ func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 // refreshed most of the tables; while they still hold many entries from
 // before the window (a context reused for a new frame), it mispredicts, and
 // the branchless loop is faster. The Stale loop runs while the frame has
-// covered fewer than staleTables table sizes, or after a block whose
+// covered fewer than staleTables table sizes (counted from the frame's
+// start, ms.frameStart, not from the window's low limit: with a small
+// window that distance stays below the threshold for the whole stream,
+// while the tables are fresh once one window has passed), or after a block whose
 // sequences' literals were under 1/staleLits* of it. That count leaves out
 // the block's trailing literals on purpose: it is low both when matches
 // cover the block (xml, nci) and when the finder found few matches, i.e.

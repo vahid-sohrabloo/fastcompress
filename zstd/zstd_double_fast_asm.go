@@ -58,7 +58,7 @@ func compressBlockDoubleFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]ui
 		litPtr = &lits[0]
 	}
 	asm := compressBlockDoubleFastAsm
-	if istart-prefixLowest < staleTables<<hBitsL || ms.staleHint {
+	if int(srcIdx-ms.frameStart) < staleTables<<hBitsL || ms.staleHint {
 		asm = compressBlockDoubleFastAsmStale
 	}
 	anchor, nSeq, nLit, r1, r2, llType, llPos := asm(&ms.hashTable[0], &ms.chainTable[0], &b[0], seqPtr, litPtr,
