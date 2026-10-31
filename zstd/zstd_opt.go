@@ -219,8 +219,20 @@ func litPrice(lit byte, o *optState) uint32 {
 }
 
 // litLengthPrice is the cost of the literalLength symbol.
-// C: zstd_opt.c:ZSTD_litLengthPrice
+// C: zstd_opt.c:ZSTD_litLengthPrice — split so that the common case
+// (dynamic statistics) is short.
 func litLengthPrice(litLength uint32, o *optState) uint32 {
+	if o.priceType == zopPredef || litLength == blockSizeMax {
+		return litLengthPriceSlow(litLength, o)
+	}
+	// dynamic statistics
+	llc := llCode(litLength)
+	return uint32(llBits[llc])*bitCostMultiplier + o.litLengthSumBasePrice - bitWeight(o.litLengthFreq[llc])
+}
+
+// litLengthPriceSlow is litLengthPrice for the predefined prices and
+// for blockSizeMax.
+func litLengthPriceSlow(litLength uint32, o *optState) uint32 {
 	if o.priceType == zopPredef {
 		return bitWeight(litLength)
 	}
@@ -228,12 +240,7 @@ func litLengthPrice(litLength uint32, o *optState) uint32 {
 	// because it isn't representable in the zstd format. So instead just
 	// pretend it would cost 1 bit more than blockSizeMax - 1. In such a
 	// case, the block would be all literals.
-	if litLength == blockSizeMax {
-		return bitCostMultiplier + litLengthPrice(blockSizeMax-1, o)
-	}
-	// dynamic statistics
-	llc := llCode(litLength)
-	return uint32(llBits[llc])*bitCostMultiplier + o.litLengthSumBasePrice - bitWeight(o.litLengthFreq[llc])
+	return bitCostMultiplier + litLengthPrice(blockSizeMax-1, o)
 }
 
 // llPrice. C: zstd_opt.c:LL_PRICE
@@ -249,27 +256,31 @@ func llIncPrice(litLength uint32, o *optState) int {
 // getMatchPrice provides the cost of the match part (offset + matchLength)
 // of a sequence; offBase uses storeSeq's numeric representation. optLevel
 // 0 (< 2) favors small offsets for decompression speed.
-// C: zstd_opt.c:ZSTD_getMatchPrice
+// C: zstd_opt.c:ZSTD_getMatchPrice — with dynamic statistics it is
+// offsetPrice + mlPrice (uint32 sums, so the order does not matter), which
+// the parser's loops hoist and inline.
 func getMatchPrice(offBase, matchLength uint32, o *optState) uint32 {
-	offCode := highbit32(offBase)
-	mlBase := matchLength - minMatch
-
 	if o.priceType == zopPredef { // fixed scheme, does not use statistics
-		return bitWeight(mlBase) + (16+offCode)*bitCostMultiplier // emulated offset cost
+		return bitWeight(matchLength-minMatch) + (16+highbit32(offBase))*bitCostMultiplier // emulated offset cost
 	}
+	return offsetPrice(offBase, o) + mlPrice(matchLength, o)
+}
 
-	// dynamic statistics
+// offsetPrice is getMatchPrice's offset part with dynamic statistics.
+func offsetPrice(offBase uint32, o *optState) uint32 {
+	offCode := highbit32(offBase)
 	price := offCode*bitCostMultiplier + (o.offCodeSumBasePrice - bitWeight(o.offCodeFreq[offCode]))
 	if offCode >= 20 { // C: optLevel < 2
 		price += (offCode - 19) * 2 * bitCostMultiplier // handicap for long distance offsets, favor decompression speed
 	}
-
-	// match Length
-	mlc := mlCode(mlBase)
-	price += uint32(mlBits[mlc])*bitCostMultiplier + (o.matchLengthSumBasePrice - bitWeight(o.matchLengthFreq[mlc]))
-
-	price += bitCostMultiplier / 5 // heuristic : make matches a bit more costly to favor less sequences -> faster decompression speed
 	return price
+}
+
+// mlPrice is getMatchPrice's match length part with dynamic statistics.
+func mlPrice(matchLength uint32, o *optState) uint32 {
+	mlc := mlCode(matchLength - minMatch)
+	return uint32(mlBits[mlc])*bitCostMultiplier + (o.matchLengthSumBasePrice - bitWeight(o.matchLengthFreq[mlc])) +
+		bitCostMultiplier/5 // heuristic : make matches a bit more costly to favor less sequences -> faster decompression speed
 }
 
 // updateStats counts a sequence into the statistics.
@@ -959,6 +970,7 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 
 	// init
 	rescaleFreqs(optStatePtr, src)
+	dynamic := optStatePtr.priceType != zopPredef // set by rescaleFreqs; getMatchPrice's two schemes
 	if ip == prefixStart {
 		ip++
 	}
@@ -1015,16 +1027,23 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 				opt[pos].mlen = 0
 				opt[pos].litlen = litlen + pos
 			}
+			ll0Price := llPrice(0, optStatePtr)
 			for matchNb := range nbMatches {
 				offBase := matches[matchNb].off
 				end := matches[matchNb].len
+				offPrice := offsetPrice(offBase, optStatePtr) // with dynamic statistics: getMatchPrice = offPrice + mlPrice
 				for ; pos <= end; pos++ {
-					matchPrice := int(getMatchPrice(offBase, pos, optStatePtr))
+					var matchPrice int
+					if dynamic {
+						matchPrice = int(offPrice + mlPrice(pos, optStatePtr))
+					} else {
+						matchPrice = int(getMatchPrice(offBase, pos, optStatePtr))
+					}
 					sequencePrice := opt[0].price + matchPrice
 					opt[pos].mlen = pos
 					opt[pos].off = offBase
 					opt[pos].litlen = 0 // end of match
-					opt[pos].price = sequencePrice + llPrice(0, optStatePtr)
+					opt[pos].price = sequencePrice + ll0Price
 				}
 			}
 			lastPos = pos - 1
@@ -1097,10 +1116,16 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 					if matchNb > 0 {
 						startML = matches[matchNb-1].len + 1
 					}
+					offPrice := offsetPrice(offset, optStatePtr)
 
 					for mlen := lastML; mlen >= startML; mlen-- { // scan downward
 						pos := cur + mlen
-						price := basePrice + int(getMatchPrice(offset, mlen, optStatePtr))
+						var price int
+						if dynamic {
+							price = basePrice + int(offPrice+mlPrice(mlen, optStatePtr))
+						} else {
+							price = basePrice + int(getMatchPrice(offset, mlen, optStatePtr))
+						}
 
 						if pos > lastPos || price < opt[pos].price {
 							for lastPos < pos {

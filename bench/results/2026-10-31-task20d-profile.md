@@ -117,3 +117,16 @@ L11 tar4m -B16K vs the insertBt1 commit: **-12.4%** [-12.4..-12.3] cycles
 Profile after (cycles): btGetAllNoDictAsm 34.8%, compressBlockOptGeneric
 26.0%, insertBt1Asm 8.8%, getMatchPrice 7.4%, litLengthPrice 6.2%,
 insertBt1 (Go part) 2.8%.
+
+### Price hoisting in the optimal parser
+
+With dynamic statistics, getMatchPrice is an offset part plus a match
+length part (uint32 sums); the parser's two price loops now compute the
+offset part once per match and inline the length part, and take
+llPrice(0) once per forward pass (the statistics only change between
+passes). L11 tar4m -B16K: -1.2% [-1.2..-0.8] (instr/B 718 -> 704).
+
+Tried and dropped: setting the next repcodes element by element (instead of
+newRep's array copy) after a perf annotate put 9.5% of the parser's cycles
+on that line: +0.6% against the hoisting alone (the time is the load
+latency of opt[prev], not the copy).
