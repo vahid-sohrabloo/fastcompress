@@ -305,20 +305,149 @@ bbad:
 
 // func btGetAllNoDictAsm(p *btAsmParams, ip int, rep *[repNum]uint32, ll0, lengthToBeat uint32) (mnum uint32, bad bool)
 //
-// C: zstd_opt.c:ZSTD_insertBtAndGetAllMatches (noDict, mls 4 to 6); see
-// dubt_amd64.s for the bounds. Registers as in the functions above, with
-// R15 matchLow; R21 bestLength, R22 mnum, R23 matchEndIdx, R24 curr,
-// R25 p. Frame: 8(RSP) dummy32, 16(RSP) hash, 24(RSP) windowLow.
+// C: zstd_opt.c:ZSTD_btGetAllMatches_internal (noDict, mls 4 to 6): the
+// skip check, the tree update (ZSTD_updateTree_internal with
+// ZSTD_insertBt1) and ZSTD_insertBtAndGetAllMatches, as dubt_amd64.s (see
+// it for the bounds). Registers as in the functions above, with R15
+// windowLow while updating, then matchLow; R21 bestLength, R22 mnum, R23
+// matchEndIdx, R24 curr, R25 p, R26 the position being inserted (C's idx).
+// Frame: 8(RSP) dummy32, 16(RSP) hash, 24(RSP) windowLow.
 TEXT ·btGetAllNoDictAsm(SB), NOSPLIT, $32-37
 	MOVD  p+0(FP), R25
 	MOVD  BP_BT(R25), R0
 	MOVD  BP_B(R25), R1
-	MOVD  ip+8(FP), R2
 	MOVD  BP_ILIMIT(R25), R3
-	ADD   R2, R1, R4
 	MOVWU BP_BTMASK(R25), R12
 	MOVWU BP_BASEIDX(R25), R13
+	MOVD  ip+8(FP), R2
 	ADDW  R2, R13, R24          // curr
+	MOVB  ZR, bad+36(FP)
+
+	// skipped area
+	MOVD  BP_NEXT(R25), R16
+	MOVWU (R16), R26            // nextToUpdate
+	CMPW  R26, R24
+	BHS   wlow
+	MOVW  ZR, mnum+32(FP)
+	RET
+
+wlow:
+	// windowLow = isDictionary ? lowestValid : withinWindow
+	MOVWU BP_LOWEST(R25), R16
+	MOVWU BP_MAXDIST(R25), R17
+	SUBW  R16, R24, R19
+	CMPW  R17, R19
+	BLS   wlok
+	SUBW  R17, R24, R16
+
+wlok:
+	MOVWU BP_ISDICT(R25), R19
+	CBZW  R19, wlset
+	MOVWU BP_LOWEST(R25), R16
+
+wlset:
+	MOVW  R16, 24(RSP)
+	MOVW  R16, R15
+
+	// update the tree: insert idx = nextToUpdate (R26) .. curr-1, each
+	// walk bounded by windowLow (C computes it from the target, curr)
+	CMPW  R24, R26
+	BHS   search
+
+uloop:
+	SUBW  R13, R26, R2          // its position
+	ADD   R2, R1, R4
+	MOVD  (R4), R16
+	MOVD  BP_PRIME(R25), R17
+	MUL   R17, R16, R16
+	MOVD  BP_HSHIFT(R25), R17
+	LSR   R17, R16, R16
+	MOVD  BP_HASH(R25), R17
+	MOVWU (R17)(R16<<2), R9     // matchIndex
+	MOVW  R26, (R17)(R16<<2)    // hashTable[h] = idx
+	SUBSW R12, R26, R14
+	CSELW HI, R14, ZR, R14      // btLow = btMask < idx ? idx - btMask : 0
+	MOVD  $8, R21               // bestLength
+	ADDW  $9, R26, R23          // matchEndIdx = idx + 8 + 1
+	ANDW  R12, R26, R16
+	ADD   R16<<3, R0, R7        // smallerPtr = &bt[2*(idx&btMask)]
+	ADD   $4, R7, R8            // largerPtr
+	MOVD  ZR, R5
+	MOVD  ZR, R6
+	MOVWU BP_NBCMP(R25), R10
+
+ubloop:
+	CBZW  R10, ubend
+	CMPW  R15, R9
+	BLO   ubend                 // matchIndex < windowLow
+	MATCHLEN(gbad, ubcnt8, ubcdiff, ubctail, ubcdone)
+	CMP   R21, R16
+	BLE   ubnotbetter
+	MOVD  R16, R21
+	SUBW  R9, R23, R19
+	CMP   R19, R16
+	BLS   ubnotbetter
+	ADDW  R16, R9, R23
+
+ubnotbetter:
+	ADD   R2, R16, R19
+	CMP   R3, R19
+	BEQ   ubend                 // equal: no way to know if inf or sup
+	MOVBU (R17)(R16), R19
+	MOVBU (R4)(R16), R20
+	CMPW  R20, R19
+	BHS   ublarger
+	MOVW  R9, (R7)
+	MOVD  R16, R5
+	CMPW  R14, R9
+	BLS   ubsmallstop
+	ADD   $4, R11, R7
+	MOVWU 4(R11), R9
+	SUBW  $1, R10
+	B     ubloop
+
+ubsmallstop:
+	ADD $8, RSP, R7
+	B   ubend
+
+ublarger:
+	MOVW  R9, (R8)
+	MOVD  R16, R6
+	CMPW  R14, R9
+	BLS   ublargestop
+	MOVD  R11, R8
+	MOVWU (R11), R9
+	SUBW  $1, R10
+	B     ubloop
+
+ublargestop:
+	ADD $8, RSP, R8
+
+ubend:
+	MOVW  ZR, (R8)
+	MOVW  ZR, (R7)
+
+	// idx += max(bestLength > 384 ? min(192, bestLength - 384) : 0, matchEndIdx - (idx + 8))
+	SUBW  R26, R23, R16
+	SUBW  $8, R16
+	SUBS  $384, R21, R17
+	BLE   ufwd
+	MOVD  $192, R19
+	CMP   R19, R17
+	CSEL  GT, R19, R17, R17
+	CMPW  R16, R17
+	CSELW HI, R17, R16, R16
+
+ufwd:
+	ADDW  R16, R26, R26
+	CMPW  R24, R26
+	BLO   uloop
+	MOVD  BP_NEXT(R25), R16
+	MOVW  R24, (R16)            // nextToUpdate = curr
+
+search:
+	MOVD  ip+8(FP), R2
+	ADD   R2, R1, R4
 
 	// hash, and the first candidate
 	MOVD  (R4), R16
@@ -334,21 +463,8 @@ TEXT ·btGetAllNoDictAsm(SB), NOSPLIT, $32-37
 	SUBSW R12, R24, R14
 	CSELW HI, R14, ZR, R14
 
-	// windowLow = isDictionary ? lowestValid : withinWindow; matchLow = windowLow or 1
-	MOVWU BP_LOWEST(R25), R16
-	MOVWU BP_MAXDIST(R25), R17
-	SUBW  R16, R24, R19
-	CMPW  R17, R19
-	BLS   wlok
-	SUBW  R17, R24, R16
-
-wlok:
-	MOVWU BP_ISDICT(R25), R19
-	CBZW  R19, wlset
-	MOVWU BP_LOWEST(R25), R16
-
-wlset:
-	MOVW  R16, 24(RSP)
+	// matchLow = windowLow or 1
+	MOVWU 24(RSP), R16
 	MOVW  $1, R15
 	CMPW  $0, R16
 	CSELW NE, R16, R15, R15
@@ -357,7 +473,6 @@ wlset:
 	MOVWU lengthToBeat+28(FP), R21
 	SUB   $1, R21               // bestLength (lengthToBeat >= 1)
 	ADDW  $9, R24, R23          // matchEndIdx = curr + 8 + 1
-	MOVB  ZR, bad+36(FP)
 
 	// repcodes: R7 repCode in [ll0, R8 = ll0 + 3)
 	MOVWU ll0+24(FP), R7

@@ -39,10 +39,12 @@ func dubtSearchAsm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbC
 //go:noescape
 func insertBt1Asm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbCompares, btLow, windowLow, matchIndex uint32) (bestLength int, matchEndIdx uint32)
 
-// btGetAllNoDictAsm is insertBtAndGetAllMatches (noDict, mls 4 to 6; see
-// it) for the block set up in p, at ip, with ll0 = 1 for true; see
-// btGetAllNoDict for the preconditions. bad reports a tree entry at or
-// after ip, or a full match table (both impossible).
+// btGetAllNoDictAsm is btGetAllMatches (noDict, mls 4 to 6; see it) for
+// the block set up in p, at ip, with ll0 = 1 for true: nothing in a
+// skipped area, else the tree updated up to ip (updateTreeInternal) and
+// insertBtAndGetAllMatches; see btGetAllNoDict and btGetAllMatchesFast for
+// the preconditions. bad reports a tree entry at or after the position
+// inserted or searched, or a full match table (both impossible).
 //
 //go:noescape
 func btGetAllNoDictAsm(p *btAsmParams, ip int, rep *[repNum]uint32, ll0, lengthToBeat uint32) (mnum uint32, bad bool)

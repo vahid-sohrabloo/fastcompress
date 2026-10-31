@@ -342,49 +342,51 @@ bbad:
 
 // func btGetAllNoDictAsm(p *btAsmParams, ip int, rep *[repNum]uint32, ll0, lengthToBeat uint32) (mnum uint32, bad bool)
 //
-// C: zstd_opt.c:ZSTD_insertBtAndGetAllMatches (noDict, mls 4 to 6).
+// C: zstd_opt.c:ZSTD_btGetAllMatches_internal (noDict, mls 4 to 6): no
+// matches in an area skipped after a long match (curr < nextToUpdate),
+// else ZSTD_updateTree_internal (each position from nextToUpdate up to ip
+// inserted with ZSTD_insertBt1, extDict 0) and
+// ZSTD_insertBtAndGetAllMatches. A caller that updated the tree first
+// (btGetAllNoDict) has nextToUpdate == curr, for which the update does
+// nothing.
 // Registers as in the functions above. Frame: 0(SP) dummy32, 8(SP)
 // nextPtr, 16(SP) bestLength, 24(SP) matchEndIdx, 28(SP) mnum, 32(SP)
 // curr, 36(SP) btLow, 40(SP) matchLow, 44(SP) windowLow, 48(SP) hash,
-// 56(SP) p, 64(SP) btMask, 68(SP) baseIdx, 72(SP) the first candidate.
+// 56(SP) p, 64(SP) btMask, 68(SP) baseIdx, 72(SP) the first candidate,
+// 80(SP) the position being inserted (C's idx), 84(SP) its btLow.
 //
 // Bounds: btGetAllNoDict checks 0 < ip, ip + 8 <= iLimit <= len(b) and
 // lowestValid <= curr; btAsmSetup checks the table sizes and lowestValid >=
 // baseIdx. So windowLow (>= lowestValid) and matchLow lie in [baseIdx,
 // curr]; a repcode is read only at an index in [windowLow, curr), and a
-// tree candidate only at one >= matchLow and (MATCHLEN) before ip.
-TEXT ·btGetAllNoDictAsm(SB), NOSPLIT, $80-37
+// tree candidate only at one >= matchLow (>= windowLow while updating)
+// and (MATCHLEN) before the position searched. The inserted positions are
+// in [nextToUpdate, ip) with baseIdx <= nextToUpdate (checked by the
+// callers that update here), so their 8 hashed bytes lie in b[:ip+8].
+TEXT ·btGetAllNoDictAsm(SB), NOSPLIT, $96-37
 	MOVQ p+0(FP), AX
 	MOVQ AX, 56(SP)
 	MOVQ BP_BT(AX), DI
 	MOVQ BP_B(AX), SI
-	MOVQ ip+8(FP), R8
 	MOVQ BP_ILIMIT(AX), R9
-	LEAQ (SI)(R8*1), BX
 	MOVL BP_BTMASK(AX), CX
 	MOVL CX, 64(SP)
 	MOVL BP_BASEIDX(AX), CX
 	MOVL CX, 68(SP)
+	MOVQ ip+8(FP), R8
 	ADDL R8, CX
 	MOVL CX, 32(SP)             // curr
+	MOVB $0, bad+36(FP)
 
-	// hash, and the first candidate
-	MOVQ  (BX), DX
-	IMULQ BP_PRIME(AX), DX
-	MOVQ  BP_HSHIFT(AX), CX
-	SHRQ  CX, DX
-	MOVQ  DX, 48(SP)
-	MOVQ  BP_HASH(AX), CX
-	MOVL  (CX)(DX*4), CX
-	MOVL  CX, 72(SP)
+	// skipped area
+	MOVQ BP_NEXT(AX), DX
+	MOVL (DX), R12              // nextToUpdate
+	CMPL CX, R12
+	JAE  wlow
+	MOVL $0, mnum+32(FP)
+	RET
 
-	// btLow = btMask < curr ? curr - btMask : 0
-	XORL    DX, DX
-	MOVL    32(SP), CX
-	SUBL    64(SP), CX
-	CMOVLHI CX, DX
-	MOVL    DX, 36(SP)
-
+wlow:
 	// windowLow = isDictionary ? lowestValid : withinWindow; matchLow = windowLow or 1
 	MOVL BP_LOWEST(AX), DX
 	MOVL 32(SP), CX
@@ -406,6 +408,112 @@ wlset:
 	CMOVLNE DX, CX
 	MOVL    CX, 40(SP)
 
+	// update the tree: insert idx = nextToUpdate (R12) .. curr-1, each
+	// walk bounded by windowLow (C computes it from the target, curr)
+	CMPL R12, 32(SP)
+	JAE  search
+	MOVL R12, 80(SP)
+
+uloop:
+	MOVL  80(SP), R12
+	MOVL  R12, R8
+	SUBL  68(SP), R8            // its position (zero-extended)
+	LEAQ  (SI)(R8*1), BX
+	MOVQ  (BX), DX
+	IMULQ BP_PRIME(AX), DX
+	MOVQ  BP_HSHIFT(AX), CX
+	SHRQ  CX, DX
+	MOVQ  BP_HASH(AX), CX
+	MOVL  (CX)(DX*4), R14       // matchIndex
+	MOVL  R12, (CX)(DX*4)       // hashTable[h] = idx
+
+	// btLow = btMask < idx ? idx - btMask : 0
+	XORL    DX, DX
+	MOVL    R12, CX
+	SUBL    64(SP), CX
+	CMOVLHI CX, DX
+	MOVL    DX, 84(SP)
+	LEAL    9(R12), CX
+	MOVL    CX, 24(SP)          // matchEndIdx = idx + 8 + 1
+	MOVQ    $8, 16(SP)          // bestLength
+	ANDL    64(SP), R12
+	LEAQ    (DI)(R12*8), R12    // smallerPtr = &bt[2*(idx&btMask)]
+	LEAQ    4(R12), R13         // largerPtr
+	XORL    R10, R10
+	XORL    R11, R11
+	MOVL    BP_NBCMP(AX), R15
+
+ubloop:
+	TESTL R15, R15
+	JEQ   ubend
+	CMPL  R14, 44(SP)
+	JB    ubend                 // matchIndex < windowLow
+	MATCHLEN(64(SP), 68(SP), gbad, ubcnt8, ubcdiff, ubctail, ubcdone)
+	CMPQ  DX, 16(SP)
+	JLE   ubnotbetter
+	MOVQ  DX, 16(SP)
+	MOVL  24(SP), AX
+	SUBL  R14, AX
+	CMPQ  DX, AX
+	JLS   ubnotbetter
+	LEAL  (R14)(DX*1), AX
+	MOVL  AX, 24(SP)
+
+ubnotbetter:
+	LEAQ  (R8)(DX*1), AX
+	CMPQ  AX, R9
+	JEQ   ubend                 // equal: no way to know if inf or sup
+	TREEWALK(84(SP), ubloop, ubend, ubsmallstop, ublarger, ublargestop)
+
+ubend:
+	MOVL $0, (R13)
+	MOVL $0, (R12)
+
+	// idx += max(bestLength > 384 ? min(192, bestLength - 384) : 0, matchEndIdx - (idx + 8))
+	MOVL  80(SP), CX
+	MOVL  24(SP), DX
+	SUBL  CX, DX
+	SUBL  $8, DX
+	MOVQ  16(SP), AX
+	SUBQ  $384, AX
+	JLE   ufwd
+	MOVL  $192, R12
+	CMPQ  AX, R12
+	CMOVQGT R12, AX
+	CMPL  AX, DX
+	CMOVLHI AX, DX
+
+ufwd:
+	ADDL DX, CX
+	MOVL CX, 80(SP)
+	MOVQ 56(SP), AX
+	CMPL CX, 32(SP)
+	JB   uloop
+	MOVQ BP_NEXT(AX), CX
+	MOVL 32(SP), DX
+	MOVL DX, (CX)               // nextToUpdate = curr
+
+search:
+	MOVQ ip+8(FP), R8
+	LEAQ (SI)(R8*1), BX
+
+	// hash, and the first candidate
+	MOVQ  (BX), DX
+	IMULQ BP_PRIME(AX), DX
+	MOVQ  BP_HSHIFT(AX), CX
+	SHRQ  CX, DX
+	MOVQ  DX, 48(SP)
+	MOVQ  BP_HASH(AX), CX
+	MOVL  (CX)(DX*4), CX
+	MOVL  CX, 72(SP)
+
+	// btLow = btMask < curr ? curr - btMask : 0
+	XORL    DX, DX
+	MOVL    32(SP), CX
+	SUBL    64(SP), CX
+	CMOVLHI CX, DX
+	MOVL    DX, 36(SP)
+
 	MOVL     $0, 28(SP)         // mnum
 	MOVL     lengthToBeat+28(FP), CX
 	DECQ     CX                 // (the 32-bit load zero-extends; lengthToBeat >= 1)
@@ -413,7 +521,6 @@ wlset:
 	MOVL     32(SP), CX
 	ADDL     $9, CX
 	MOVL     CX, 24(SP)         // matchEndIdx = curr + 8 + 1
-	MOVB     $0, bad+36(FP)
 
 	// repcodes: for repCode in [ll0, ll0 + 3)
 	MOVL ll0+24(FP), R10

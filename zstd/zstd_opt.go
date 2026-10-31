@@ -904,6 +904,11 @@ func insertBtAndGetAllMatchesExtDict(matches *[optSize]optMatch, ms *matchState,
 // dictMode and mls (ZSTD_selectBtGetAllMatches), here both are parameters.
 func btGetAllMatches(matches *[optSize]optMatch, ms *matchState, nextToUpdate3 *uint32, ip, iHighLimit int,
 	rep *[repNum]uint32, ll0 bool, lengthToBeat, mls uint32, mode dictMode) uint32 {
+	if mode == noDict {
+		if n, ok := btGetAllMatchesFast(matches, ms, ip, iHighLimit, rep, ll0, lengthToBeat); ok {
+			return n // all of it, in assembly (set up by compressBlockOptGeneric)
+		}
+	}
 	if uint32(ip)+ms.window.baseIdx < ms.nextToUpdate {
 		return 0 // skipped area
 	}

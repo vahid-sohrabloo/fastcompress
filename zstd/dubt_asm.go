@@ -120,6 +120,29 @@ func btGetAllNoDict(matches *[optSize]optMatch, ms *matchState, ip, iLimit int, 
 	return mnum, true
 }
 
+// btGetAllMatchesFast is btGetAllMatches for dictMode noDict in assembly
+// (btGetAllNoDictAsm also updates the tree), with ms.btAsm set up for this
+// block. ok is false (nothing done) when it is not set up or a
+// precondition fails: btGetAllNoDict's, and baseIdx <= ms.nextToUpdate (the
+// positions inserted lie in the window's buffer).
+func btGetAllMatchesFast(matches *[optSize]optMatch, ms *matchState, ip, iLimit int, rep *[repNum]uint32, ll0 bool, lengthToBeat uint32) (uint32, bool) {
+	p := &ms.btAsm
+	if !p.ok || p.matches != &matches[0] || iLimit != p.iLimit || ip <= 0 || ip+8 > iLimit || lengthToBeat < 1 ||
+		p.lowestValid > uint32(ip)+p.baseIdx || ms.nextToUpdate < p.baseIdx {
+		return 0, false
+	}
+	var l uint32
+	if ll0 {
+		l = 1
+	}
+	mnum, bad := btGetAllNoDictAsm(p, ip, rep, l, lengthToBeat)
+	if bad {
+		panic("zstd: binary tree holds an index at or after the current position")
+	}
+	ms.asmCalls++
+	return mnum, true
+}
+
 // lazyBtRun runs compressBlockLazyGeneric's match loop (binary-tree
 // finder, noDict) in assembly from ip until ilimit, storing into ss, and
 // returns the new ip, anchor and repcodes. It returns ok = false, doing
