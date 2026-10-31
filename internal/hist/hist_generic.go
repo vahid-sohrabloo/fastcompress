@@ -39,3 +39,20 @@ func countStripesGeneric(ws *[4 * 256]uint32, src []byte) {
 		c1[src[ip]]++
 	}
 }
+
+// countMergeGeneric adds tables 1-3 of ws into table 0 and returns the
+// largest sum.
+func countMergeGeneric(ws *[4 * 256]uint32) uint32 {
+	c1 := (*[256]uint32)(ws[0:256])
+	c2 := (*[256]uint32)(ws[256:512])
+	c3 := (*[256]uint32)(ws[512:768])
+	c4 := (*[256]uint32)(ws[768:1024])
+	var maxCount uint32
+	for s := range c1 {
+		c1[s] += c2[s] + c3[s] + c4[s]
+		if c1[s] > maxCount {
+			maxCount = c1[s]
+		}
+	}
+	return maxCount
+}

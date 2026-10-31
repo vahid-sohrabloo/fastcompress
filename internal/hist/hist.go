@@ -47,18 +47,8 @@ func countParallel(count *[256]uint32, maxSymbol *uint32, src []byte, check bool
 	}
 	var ws [4 * 256]uint32
 	countStripes(&ws, src)
+	maxCount := countMerge(&ws, n)
 	c1 := (*[256]uint32)(ws[0:256])
-	c2 := (*[256]uint32)(ws[256:512])
-	c3 := (*[256]uint32)(ws[512:768])
-	c4 := (*[256]uint32)(ws[768:1024])
-
-	var maxCount uint32
-	for s := range c1 {
-		c1[s] += c2[s] + c3[s] + c4[s]
-		if c1[s] > maxCount {
-			maxCount = c1[s]
-		}
-	}
 
 	maxSymbolValue := uint32(255)
 	for c1[maxSymbolValue] == 0 {

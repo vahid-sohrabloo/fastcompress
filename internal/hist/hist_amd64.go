@@ -16,3 +16,17 @@ func init() {
 //
 //go:noescape
 func countStripesAsm(ws *[4 * 256]uint32, src *byte, n int)
+
+// countMergeAsm adds tables 1-3 of ws into table 0, 4 lanes at a time, and
+// returns the largest sum. Precondition: every sum is below 2^31.
+//
+//go:noescape
+func countMergeAsm(ws *[4 * 256]uint32) uint32
+
+// countMerge is countMergeGeneric, in assembly when it is on.
+func countMerge(ws *[4 * 256]uint32, n int) uint32 {
+	if !useHistAsm || n >= 1<<31 {
+		return countMergeGeneric(ws)
+	}
+	return countMergeAsm(ws)
+}
