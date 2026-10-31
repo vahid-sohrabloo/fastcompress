@@ -110,7 +110,7 @@ repmatch:
 	MOVQ  iend+56(FP), R13
 	SUBQ  R8, R13
 	SUBQ  $5, R13
-	CALL  ·fastCount(SB)
+	COUNTI(cnt1call, cnt1done)
 	LEAQ  4(R11), AX
 	INCQ  R8
 	MOVQ  R8, R9
@@ -129,7 +129,7 @@ longmatch:
 	MOVQ iend+56(FP), R13
 	SUBQ R8, R13
 	SUBQ $8, R13
-	CALL ·fastCount(SB)
+	COUNTI(cnt2call, cnt2done)
 	LEAQ 8(R11), AX
 	MOVQ R8, R12
 	SUBQ DX, R12            // offset
@@ -145,7 +145,7 @@ searchlong:
 	MOVQ iend+56(FP), R13
 	SUBQ R8, R13
 	SUBQ $4, R13
-	CALL ·fastCount(SB)
+	COUNTI(cnt3call, cnt3done)
 	LEAQ 4(R11), AX         // mLength
 	MOVQ R8, R12
 	SUBQ DX, R12            // offset
@@ -170,7 +170,7 @@ searchlong:
 	SUBQ $8, R13
 	LEAQ 8(SI)(R9*1), R9
 	LEAQ 8(SI)(CX*1), R10
-	CALL ·fastCount(SB)
+	COUNTI(cnt4call, cnt4done)
 	LEAQ 8(R11), R11        // l1len
 	MOVQ MATCHL1, BX
 	MOVQ MLEN, AX
@@ -259,7 +259,7 @@ reploop:
 	MOVQ  iend+56(FP), R13
 	SUBQ  R8, R13
 	SUBQ  $4, R13
-	CALL  ·fastCount(SB)
+	COUNTI(cnt5call, cnt5done)
 	LEAQ  4(R11), AX
 	MOVL  rep2+84(FP), CX   // swap offset2 <=> offset1
 	MOVL  R14, rep2+84(FP)

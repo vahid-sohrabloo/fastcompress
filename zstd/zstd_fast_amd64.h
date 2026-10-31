@@ -173,7 +173,7 @@ match:
 	ADDQ SI, R9
 	LEAQ (DX)(AX*1), R10
 	ADDQ SI, R10
-	CALL ·fastCount(SB)
+	COUNTI(cnt1call, cnt1done)
 	ADDQ R11, AX
 
 	// storeSeq(ss, ip0-anchor, b[anchor:], offBase, mLength)
@@ -220,7 +220,7 @@ reploop:
 	MOVQ iend+48(FP), R13
 	SUBQ R8, R13
 	SUBQ $4, R13
-	CALL ·fastCount(SB)
+	COUNTI(cnt2call, cnt2done)
 	LEAQ 4(R11), AX
 	// swap rep1 and rep2
 	MOVL rep2+76(FP), CX

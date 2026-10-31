@@ -14,6 +14,23 @@
 	MOVQ hShift+96(FP), CX; \
 	HASHF(pos, dst)
 
+// COUNTI(call, done): R11 = fastCount (the common prefix length of
+// R9[0:R13] and R10[0:R13]), with the first 8 bytes compared here: most
+// matches end within them, without the call. Clobbers CX (and, through
+// the call, BX and Y0).
+#define COUNTI(call, done) \
+	CMPQ R13, $8; \
+	JLT  call; \
+	MOVQ (R10), CX; \
+	XORQ (R9), CX; \
+	JEQ  call; \
+	BSFQ CX, R11; \
+	SHRQ $3, R11; \
+	JMP  done; \
+call: \
+	CALL ·fastCount(SB); \
+done:
+
 // func compressBlockFastAsm(hashTable *uint32, b *byte, seqs *seqDef, lits *byte,
 //	ip0, istart, iend, prefixStart int, prefixStartIndex, baseIdx, rep1, rep2 uint32,
 //	stepSize int, mlsShift, hShift, prime uint64) (anchor, nSeq, nLits int, rep1Out, rep2Out, llType, llPos uint32)
