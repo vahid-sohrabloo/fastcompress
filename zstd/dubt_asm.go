@@ -120,6 +120,62 @@ func btGetAllNoDict(matches *[optSize]optMatch, ms *matchState, ip, iLimit int, 
 	return mnum, true
 }
 
+// lazyBtRun runs compressBlockLazyGeneric's match loop (binary-tree
+// finder, noDict) in assembly from ip until ilimit, storing into ss, and
+// returns the new ip, anchor and repcodes. It returns ok = false, doing
+// nothing, when ms.btAsm is not set up for this block (btAsmSetup: the
+// assembly is on, mls 4 to 6, the tables' sizes) or a precondition fails:
+// 0 < ip, anchor <= ip, ilimit + 8 <= iend == the block's end (every
+// searched position has 8 bytes to hash), room in ss for every literal and
+// a sequence per 4 input bytes (every match is >= 4), baseIdx <=
+// ms.nextToUpdate, and the window's lowLimit <= ip's index: then every
+// search the loop makes (at increasing positions up to ilimit) meets
+// dubtFindBestMatchFast's preconditions.
+func lazyBtRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLowest int,
+	offset1, offset2 uint32, depth int) (int, int, uint32, uint32, bool) {
+	bp := &ms.btAsm
+	nLits, nSeqs := len(ss.literals), len(ss.sequences)
+	if !bp.ok || ip <= 0 || anchor > ip || ilimit+8 > iend || iend != bp.iLimit ||
+		ms.nextToUpdate < bp.baseIdx || bp.lowestValid > uint32(ip)+bp.baseIdx ||
+		prefixLowest < 0 || depth < 0 || depth > 2 ||
+		cap(ss.literals)-nLits < iend-anchor || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
+		return ip, anchor, offset1, offset2, false
+	}
+	p := &ms.rowAsm
+	*p = rowAsmParams{
+		b:            bp.b,
+		nextToUpdate: &ms.nextToUpdate,
+		baseIdx:      bp.baseIdx,
+		bt:           bp,
+	}
+	if ms.lazySkipping {
+		p.skip = 1
+	}
+	seqs := ss.sequences[nSeqs:cap(ss.sequences)]
+	lits := ss.literals[nLits:cap(ss.literals)]
+	var seqPtr *seqDef
+	if len(seqs) > 0 {
+		seqPtr = &seqs[0]
+	}
+	var litPtr *byte
+	if len(lits) > 0 {
+		litPtr = &lits[0]
+	}
+	ipOut, anchorOut, nSeq, nLit, r1, r2, llType, llPos := lazyBt(p, seqPtr, litPtr, ip, anchor, iend, ilimit, prefixLowest, offset1, offset2, depth)
+	if nSeq < 0 {
+		panic("zstd: binary tree holds an index at or after the current position")
+	}
+	ms.lazySkipping = p.skip != 0
+	ss.sequences = ss.sequences[:nSeqs+nSeq]
+	ss.literals = ss.literals[:nLits+nLit]
+	if llType != lltNone {
+		ss.longLengthType = int(llType)
+		ss.longLengthPos = uint32(nSeqs) + llPos
+	}
+	ms.asmCalls++
+	return ipOut, anchorOut, r1, r2, true
+}
+
 // dubtFindBestMatchFast is updateDUBT + dubtFindBestMatch in assembly, with
 // ms.btAsm set up for this block. ok is false (nothing done) when it is not
 // set up or a precondition fails: 0 < ip, ip + 8 <= iend (the hash reads 8

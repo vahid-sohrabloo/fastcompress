@@ -22,6 +22,7 @@
 #define P_SKIP 104(R15)
 #define P_CHAIN 112(R15)
 #define P_CHAINMASK 120(R15)
+#define P_BT 128(R15)
 
 // Search frame (after the 256-byte candidate buffer).
 #define S_CURR 256(SP)

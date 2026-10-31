@@ -20,6 +20,11 @@ func btGetAllNoDict(matches *[optSize]optMatch, ms *matchState, ip, iLimit int, 
 	return 0, false
 }
 
+func lazyBtRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLowest int,
+	offset1, offset2 uint32, depth int) (int, int, uint32, uint32, bool) {
+	return ip, anchor, offset1, offset2, false
+}
+
 func dubtFindBestMatchFast(ms *matchState, ip, iend int) (int, uint32, bool) {
 	return 0, 0, false
 }

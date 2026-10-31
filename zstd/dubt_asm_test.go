@@ -17,7 +17,9 @@ import (
 // with the assembly, each on its own copy of the same match state, for mls
 // 4 to 6, the dictionary flag with the window starting after the first
 // index (C's isDictionary candidate bound; see TestHcAsmLazyEquiv for why
-// no public API reaches it), and random table sizes and window logs. The
+// no public API reaches it), and random table sizes and window logs, over
+// text, random bytes and short-period runs (long matches overlapping their
+// source, after which the searches skip positions below nextToUpdate). The
 // sequences, literals, repcodes and final tables must agree, and the
 // assembly must have run. On an AVX2 host it runs again without AVX2.
 func TestBtAsmBlockEquiv(t *testing.T) {
@@ -37,6 +39,13 @@ func testBtAsmBlockEquiv(t *testing.T) {
 		if r.IntN(16) == 0 {
 			for range 2048 + r.IntN(4096) {
 				src = append(src, byte(r.Uint32()))
+			}
+		}
+		if r.IntN(8) == 0 { // a run of a short period: matches overlapping their source skip positions (nextToUpdate > curr)
+			period := src[len(src)-1-r.IntN(8):]
+			for range 64 + r.IntN(1024) {
+				src = append(src, period[0])
+				period = src[len(src)-len(period):]
 			}
 		}
 		chunk := text[r.IntN(len(text)/2):]
@@ -109,11 +118,11 @@ func testBtAsmBlockEquiv(t *testing.T) {
 						t.Fatalf("strategy %d mls %d dict %v %+v block [%d, %d): asm differs from Go (%d vs %d sequences)",
 							strat, mls, dict, cp, pos, pos+n, len(ssAsm.sequences), len(ssGo.sequences))
 					}
+					if !slices.Equal(msAsm.hashTable, msGo.hashTable) || !slices.Equal(msAsm.chainTable, msGo.chainTable) ||
+						msAsm.nextToUpdate != msGo.nextToUpdate {
+						t.Fatalf("strategy %d mls %d dict %v block [%d, %d): the tables differ from Go's", strat, mls, dict, pos, pos+n)
+					}
 					pos += n
-				}
-				if !slices.Equal(msAsm.hashTable, msGo.hashTable) || !slices.Equal(msAsm.chainTable, msGo.chainTable) ||
-					msAsm.nextToUpdate != msGo.nextToUpdate {
-					t.Fatalf("strategy %d mls %d dict %v: the tables differ from Go's", strat, mls, dict)
 				}
 				if msGo.asmCalls != 0 || msAsm.asmCalls == 0 {
 					t.Fatalf("strategy %d mls %d dict %v: the assembly ran %d times (Go side %d)", strat, mls, dict, msAsm.asmCalls, msGo.asmCalls)

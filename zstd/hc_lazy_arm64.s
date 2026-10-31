@@ -23,6 +23,7 @@
 #define P_SKIP 104(R21)
 #define P_CHAIN 112(R21)
 #define P_CHAINMASK 120(R21)
+#define P_BT 128(R21)
 
 // Search frame (after the 256-byte candidate buffer at 8(RSP)).
 #define S_CURR 264(RSP)

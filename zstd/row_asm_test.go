@@ -34,6 +34,7 @@ func TestRowAsmParamsLayout(t *testing.T) {
 		{"skip", unsafe.Offsetof(p.skip), 104},
 		{"chainTable", unsafe.Offsetof(p.chainTable), 112},
 		{"chainMask", unsafe.Offsetof(p.chainMask), 120},
+		{"bt", unsafe.Offsetof(p.bt), 128},
 	} {
 		if c.got != c.want {
 			t.Errorf("rowAsmParams.%s at offset %d, the assembly expects %d", c.name, c.got, c.want)

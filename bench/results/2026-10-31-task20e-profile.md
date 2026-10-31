@@ -34,3 +34,42 @@ Paired A/B, off vs on (5 rounds), Go cycles/B:
 | L7 mozilla | 37.51 | 37.05 | **-1.8%** [-2.0..-1.2] |
 
 Instructions are unchanged (output is identical; TestHugePagesOutput).
+
+## Step 4: review minors (cost check)
+
+matchState.asmCalls (a counter per successful lazyHcRun /
+btGetAllNoDict / dubtFindBestMatchFast call) and btGetAllNoDict's check
+of the matches table, paired A/B vs f812a38 (5 rounds, tar4m = first
+4 MiB of silesia.tar): L11 -B16K +0.1% [-0.2..+0.8], L11 -B128K -0.3%
+[-0.8..-0.1], L7 -B16K -0.2% [-0.3..+0.2]. Kept (noise).
+
+## Step 3b: btlazy2 (L11 at 128 KiB blocks)
+
+Before (2337128), tar32m = first 32 MiB of silesia.tar, -B128K:
+
+| side | cycles/B | instr/B | dtlb walk cyc/B | l1d pend cyc/B | br-miss/B |
+|---|---|---|---|---|---|
+| C | 144.65 | 250.3 | 0.00 | 14.40 | 2.36 |
+| Go | 152.39 | 288.7 | 0.02 | 14.32 | 2.38 |
+
+Misses equal C's: the gap is instructions. Instructions profile
+(`perf record -e instructions`), in instr/B: C ZSTD_DUBT_findBestMatch 212
++ ZSTD_BtFindBestMatch 16.6, ZSTD_compressBlock_btlazy2 10.6; Go finder
+assembly (dubtFindBestMatchAsm, insertDUBT1Asm, dubtSearchAsm) 236.6,
+compressBlockLazyGeneric 30.5, the Go wrappers (dubtFindBestMatchFast,
+btFindBestMatch, searchMax) 12.7. The lazy parser and its wrappers ran
+43 instr/B against C's 10.6.
+
+Fix: the lazy parser in assembly with the binary-tree finder (lazyBt,
+generated from the hc/row lazy template by gen_row_{amd64,arm64}.go into
+bt_lazy_*.s), whose finder btSearch checks the skipped area and calls
+dubtFindBestMatchAsm.
+
+| config | before | after | change | C |
+|---|---|---|---|---|
+| L11 tar4m -B128K cycles/B | 232.46 | 224.20 | **-3.8%** [-4.1..-3.5] | 226.9 (20d) |
+| L11 tar4m -B128K instr/B | 375.2 | 313.3 | | |
+| L11 tar32m -B128K cycles/B | 152.60 | 145.91 | **-4.4%** [-4.4..-4.4] | 144.65 |
+| L11 tar32m -B128K instr/B | 288.7 | 234.4 | | 250.3 |
+
+Output identical (sha256 of L11 -B128K, L13 whole, L15 -B64K on tar4m).

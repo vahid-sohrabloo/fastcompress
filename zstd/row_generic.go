@@ -122,4 +122,5 @@ type rowAsmParams struct {
 	skip         uint32                    // 104: lazySkipping, while lazyRow* or lazyHc* runs
 	chainTable   *uint32                   // 112: lazyHc* only (tagTable, cache and entropy are then unused)
 	chainMask    uint32                    // 120: lazyHc* only
+	bt           *btAsmParams              // 128: lazyBt only (its finder's parameters)
 }

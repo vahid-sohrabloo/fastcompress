@@ -618,7 +618,11 @@ func compressBlockLazyGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32,
 		}
 	} else if method == searchBinaryTree {
 		btAsmSetup(ms, nil, mls, iend)
-		defer func() { ms.btAsm = btAsmParams{} }()
+		defer func() { ms.btAsm, ms.rowAsm = btAsmParams{}, rowAsmParams{} }()
+		if ms.btAsm.ok {
+			// As above, with the binary-tree finder.
+			ip, anchor, offset1, offset2, _ = lazyBtRun(ms, ss, ip, anchor, iend, ilimit, prefixLowest, offset1, offset2, depth)
+		}
 	} else if method == searchHashChain {
 		hcAsmSetup(ms, iend)
 		defer func() { ms.rowAsm = rowAsmParams{} }()
