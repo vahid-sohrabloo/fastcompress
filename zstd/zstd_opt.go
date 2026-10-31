@@ -249,7 +249,21 @@ func llPrice(litLength uint32, o *optState) int {
 }
 
 // llIncPrice. C: zstd_opt.c:LL_INCPRICE
+//
+// With dynamic statistics and 1 <= litLength < 64 (the common case in the
+// parser's loop) it reads the two codes from llCodeTable directly: the
+// litLengthSumBasePrice terms cancel (each price is at least 0, as
+// litLengthSumBasePrice >= bitWeight of any one frequency, so the uint32
+// prices do not wrap), and equal codes cost the same.
 func llIncPrice(litLength uint32, o *optState) int {
+	if o.priceType != zopPredef && litLength-1 < 63 {
+		c1, c0 := llCodeTable[litLength], llCodeTable[litLength-1]
+		if c1 == c0 {
+			return 0
+		}
+		return int(llBits[c1])*bitCostMultiplier - int(bitWeight(o.litLengthFreq[c1])) -
+			(int(llBits[c0])*bitCostMultiplier - int(bitWeight(o.litLengthFreq[c0])))
+	}
 	return llPrice(litLength, o) - llPrice(litLength-1, o)
 }
 

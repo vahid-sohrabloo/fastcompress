@@ -145,3 +145,12 @@ stack arguments; its per-block parameters are ms.btAsm (as for btopt).
 
 L11 tar4m -B128K: **-7.2%** [-7.3..-7.2] (252.4 -> 234.3 cycles/B, C 226.9),
 instr/B 485 -> 374. -B16K (btopt, untouched): +0.4%.
+
+### llIncPrice without litLengthPrice calls
+
+litLengthPrice (not inlined) was 6.2% of L11 -B16K cycles, called twice per
+parser position by llIncPrice. With dynamic statistics and a literal
+length below 64, llIncPrice now reads both codes from llCodeTable and
+returns 0 when they are equal; otherwise the difference of the two
+bits*256 - bitWeight(freq) terms (the base price cancels and the uint32
+prices cannot wrap). L11 tar4m -B16K: -2.7% [-2.8..-2.5] (instr/B 706 -> 677).
