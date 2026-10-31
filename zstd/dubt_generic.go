@@ -138,3 +138,27 @@ func dubtSearchGeneric(ms *matchState, ip, iend int, curr, matchIndex, nbCompare
 
 	return bestLength, offBase, matchEndIdx
 }
+
+// btAsmParams holds what the assembly btGetAllNoDictAsm reads for one
+// block; ok is false when it is not set up (always, without assembly). The
+// layout is fixed: dubt_amd64.s and dubt_arm64.s read the fields by offset
+// (checked by TestBtAsmParamsLayout).
+type btAsmParams struct {
+	bt            *uint32   // 0: ms.chainTable
+	b             *byte     // 8: ms.window.base
+	hashTable     *uint32   // 16
+	matches       *optMatch // 24: the optSize match table
+	nextToUpdate  *uint32   // 32
+	prime         uint64    // 40: hash = le64(ip) * prime >> hShift (C's (le64 << shift) * prime)
+	hShift        uint64    // 48
+	baseIdx       uint32    // 56
+	btMask        uint32    // 60
+	nbCompares    uint32    // 64
+	lowestValid   uint32    // 68
+	maxDistance   uint32    // 72
+	isDictionary  uint32    // 76
+	dictLimit     uint32    // 80
+	sufficientLen uint32    // 84
+	iLimit        int       // 88: the end of the input
+	ok            bool      // 96
+}

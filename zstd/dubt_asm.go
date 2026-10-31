@@ -56,3 +56,61 @@ func insertBt1Loop(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, b
 	}
 	return bestLength, matchEndIdx, true
 }
+
+// btAsmSetup prepares ms.btAsm for compressBlockOptGeneric's noDict
+// searches over a block ending at iend (a position in ms.window.base), for
+// mls 4 to 6 (mls 3 adds the hash3 table, left to the Go code).
+func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int) {
+	p := &ms.btAsm
+	p.ok = false
+	cParams := &ms.cParams
+	b := ms.window.base
+	btMask := uint32(1)<<(cParams.chainLog-1) - 1
+	if !useDubtAsm || mls < 4 || mls > 6 || len(ms.hashTable) < 1<<cParams.hashLog || len(ms.chainTable) < 2*int(btMask+1) ||
+		iend > len(b) || len(b) == 0 || ms.window.lowLimit < ms.window.baseIdx {
+		return
+	}
+	*p = btAsmParams{
+		bt:            &ms.chainTable[0],
+		b:             &b[0],
+		hashTable:     &ms.hashTable[0],
+		matches:       &matches[0],
+		nextToUpdate:  &ms.nextToUpdate,
+		prime:         saltedHashPrime[mls] << saltedHashShift[mls],
+		hShift:        uint64(64 - cParams.hashLog),
+		baseIdx:       ms.window.baseIdx,
+		btMask:        btMask,
+		nbCompares:    1 << cParams.searchLog,
+		lowestValid:   ms.window.lowLimit,
+		maxDistance:   1 << cParams.windowLog,
+		dictLimit:     ms.window.dictLimit,
+		sufficientLen: min(cParams.targetLength, optNum-1),
+		iLimit:        iend,
+		ok:            true,
+	}
+	if ms.loadedDictEnd != 0 {
+		p.isDictionary = 1
+	}
+}
+
+// btGetAllNoDict is insertBtAndGetAllMatches (noDict, mls 4 to 6) in
+// assembly, with ms.btAsm set up for this block and matches the table it
+// names. ok is false (nothing done) when it is not set up or a
+// precondition fails: 0 < ip, ip + 8 <= iLimit (the hash reads 8 bytes),
+// lengthToBeat >= 1, and the window's lowLimit <= ip's index (so the
+// candidates' lower bound is at most curr).
+func btGetAllNoDict(ms *matchState, ip, iLimit int, rep *[repNum]uint32, ll0 bool, lengthToBeat uint32) (uint32, bool) {
+	p := &ms.btAsm
+	if !p.ok || iLimit != p.iLimit || ip <= 0 || ip+8 > iLimit || lengthToBeat < 1 || p.lowestValid > uint32(ip)+p.baseIdx {
+		return 0, false
+	}
+	var l uint32
+	if ll0 {
+		l = 1
+	}
+	mnum, bad := btGetAllNoDictAsm(p, ip, rep, l, lengthToBeat)
+	if bad {
+		panic("zstd: binary tree holds an index at or after the current position")
+	}
+	return mnum, true
+}

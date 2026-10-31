@@ -121,3 +121,33 @@ func TestRowAsmFinderEquiv(t *testing.T) {
 		}
 	}
 }
+
+// TestBtAsmParamsLayout pins the field offsets dubt_*.s use (BP_* macros).
+func TestBtAsmParamsLayout(t *testing.T) {
+	var p btAsmParams
+	for _, c := range []struct {
+		name      string
+		got, want uintptr
+	}{
+		{"bt", unsafe.Offsetof(p.bt), 0},
+		{"b", unsafe.Offsetof(p.b), 8},
+		{"hashTable", unsafe.Offsetof(p.hashTable), 16},
+		{"matches", unsafe.Offsetof(p.matches), 24},
+		{"nextToUpdate", unsafe.Offsetof(p.nextToUpdate), 32},
+		{"prime", unsafe.Offsetof(p.prime), 40},
+		{"hShift", unsafe.Offsetof(p.hShift), 48},
+		{"baseIdx", unsafe.Offsetof(p.baseIdx), 56},
+		{"btMask", unsafe.Offsetof(p.btMask), 60},
+		{"nbCompares", unsafe.Offsetof(p.nbCompares), 64},
+		{"lowestValid", unsafe.Offsetof(p.lowestValid), 68},
+		{"maxDistance", unsafe.Offsetof(p.maxDistance), 72},
+		{"isDictionary", unsafe.Offsetof(p.isDictionary), 76},
+		{"dictLimit", unsafe.Offsetof(p.dictLimit), 80},
+		{"sufficientLen", unsafe.Offsetof(p.sufficientLen), 84},
+		{"iLimit", unsafe.Offsetof(p.iLimit), 88},
+	} {
+		if c.got != c.want {
+			t.Errorf("btAsmParams.%s at offset %d, the assembly expects %d", c.name, c.got, c.want)
+		}
+	}
+}

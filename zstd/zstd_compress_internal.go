@@ -580,6 +580,7 @@ type matchState struct {
 	lazySkipping    bool                     // the lazy parser only inserts the positions it searches
 	frameStart      uint32                   // index of the current frame's first byte (set on reset; picks the fast/dfast loop, see staleTables)
 	rowAsm          rowAsmParams             // set up for the row finder's assembly during a block
+	btAsm           btAsmParams              // set up for the optimal parser's assembly btGetAllMatches during a block
 
 	// staleHint: the last fast or double-fast assembly block's sequences had
 	// few literals (see staleTables), so the next block runs the Stale loop.

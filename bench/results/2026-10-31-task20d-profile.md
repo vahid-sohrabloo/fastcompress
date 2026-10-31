@@ -102,3 +102,18 @@ Tried and dropped: insertBtAndGetAllMatches' tree walk alone in assembly
 profile showed why: the Go code around the walk (repcode checks, hash,
 setup, the call) ran about 280 instructions per call, more than the walk
 itself (170); C's whole btGetAllMatches_noDict_4 is 238 per byte.
+
+### insertBtAndGetAllMatches (noDict, mls 4-6) in assembly
+
+The whole function (repcode checks, hash, tree walk; C:
+ZSTD_insertBtAndGetAllMatches) as btGetAllNoDictAsm, with its per-block
+parameters in ms.btAsm (set up by compressBlockOptGeneric for noDict) so a
+call passes only ip, rep, ll0 and lengthToBeat. mls 3 (hash3 table) stays
+in Go.
+
+L11 tar4m -B16K vs the insertBt1 commit: **-12.4%** [-12.4..-12.3] cycles
+(284.8 -> 249.5; C 209.8), instr/B 1004 -> 718 (C 526).
+
+Profile after (cycles): btGetAllNoDictAsm 34.8%, compressBlockOptGeneric
+26.0%, insertBt1Asm 8.8%, getMatchPrice 7.4%, litLengthPrice 6.2%,
+insertBt1 (Go part) 2.8%.

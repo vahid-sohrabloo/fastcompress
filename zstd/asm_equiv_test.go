@@ -65,6 +65,7 @@ var crefTests = []struct {
 	{"DictTinyRaw", TestDictTinyRaw},
 	{"Compress2AliasedInputs", TestCompress2AliasedInputs},
 	{"ConcurrentBlocks", TestConcurrentBlocks},
+	{"AsmEquivParams", TestAsmEquivParams},
 }
 
 // TestAsmEquiv runs every C-reference test with the assembly routines off,
@@ -238,4 +239,82 @@ func FuzzEncodeAsmEquiv(f *testing.F) {
 			t.Fatalf("cctx L%d mode %d: C decode mismatch", lv, mode)
 		}
 	})
+}
+
+// TestAsmEquivParams compresses one input with explicit compression
+// parameters that no level table reaches (every strategy from fast to
+// btopt with minMatch 3 to 7, so the hash-chain and btopt assembly run
+// with mls 6, and random table sizes; hash chain or row for the lazy
+// strategies) with the assembly off, on and (on an AVX2 host) on without
+// AVX2. The frames must be equal; the Go bodies match C (the cref tests).
+func TestAsmEquivParams(t *testing.T) {
+	text := readTestdata(t, "dickens-32k.raw")
+	r := rand.New(rand.NewPCG(11, 12))
+	src := make([]byte, 0, 300<<10)
+	for len(src) < 300<<10 {
+		if r.IntN(16) == 0 {
+			for range 1024 + r.IntN(4096) {
+				src = append(src, byte(r.Uint32()))
+			}
+		}
+		chunk := text[r.IntN(len(text)/2):]
+		chunk = chunk[:min(len(chunk), 1+r.IntN(4096))]
+		src = append(src, chunk...)
+		if r.IntN(4) == 0 {
+			src = append(src, byte(r.Uint32()))
+		}
+	}
+	type pcase struct {
+		cp  compressionParameters
+		row paramSwitch
+		n   int
+	}
+	var cases []pcase
+	for s := zstdFast; s <= zstdBtopt; s++ {
+		for mm := uint32(3); mm <= 7; mm++ {
+			for _, row := range []paramSwitch{psDisable, psEnable} {
+				if row == psEnable && (s < zstdGreedy || s > zstdLazy2) {
+					continue
+				}
+				wl := uint32(10 + r.IntN(7))
+				cases = append(cases, pcase{compressionParameters{
+					windowLog: wl, chainLog: uint32(6 + r.IntN(int(wl)-5)), hashLog: uint32(6 + r.IntN(int(wl)-5)),
+					searchLog: uint32(1 + r.IntN(7)), minMatch: mm, targetLength: uint32(r.IntN(64)), strategy: s,
+				}, row, 1 + r.IntN(len(src))})
+			}
+		}
+	}
+	compress := func(c pcase) ([]byte, error) {
+		cc := newCCtx()
+		cc.setLevel(3)
+		cc.requestedParams.cParams = c.cp
+		cc.requestedParams.useRowMatchFinder = c.row
+		return cc.compress2(nil, src[:c.n])
+	}
+	want := make([][]byte, len(cases))
+	withAsm(t, false, func() {
+		for i, c := range cases {
+			want[i], _ = compress(c)
+		}
+	})
+	check := func(name string) {
+		for i, c := range cases {
+			got, err := compress(c)
+			if err != nil {
+				if want[i] != nil {
+					t.Fatalf("%s %+v: %v", name, c, err)
+				}
+				continue
+			}
+			if !bytes.Equal(got, want[i]) {
+				t.Fatalf("%s %+v row %d n %d: the frame differs from the Go code's%s", name, c.cp, c.row, c.n, firstDiff(got, want[i]))
+			}
+		}
+	}
+	withAsm(t, true, func() { check("asm=on") })
+	if cpu.X86.HasAVX2 {
+		restore := cpu.DisableAVX2()
+		defer restore()
+		withAsm(t, true, func() { check("asm=on,avx2=off") })
+	}
 }

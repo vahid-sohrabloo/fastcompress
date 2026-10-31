@@ -13,3 +13,9 @@ func dubtSearch(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLo
 func insertBt1Loop(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLow, windowLow uint32) (int, uint32, bool) {
 	return 0, 0, false
 }
+
+func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int) {}
+
+func btGetAllNoDict(ms *matchState, ip, iLimit int, rep *[repNum]uint32, ll0 bool, lengthToBeat uint32) (uint32, bool) {
+	return 0, false
+}

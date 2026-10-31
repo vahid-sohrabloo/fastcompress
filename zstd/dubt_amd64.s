@@ -321,3 +321,263 @@ bend:
 bbad:
 	MOVL $0, matchEndIdx+72(FP)
 	RET
+
+// Fields of btAsmParams (see dubt_generic.go; TestBtAsmParamsLayout).
+#define BP_BT 0
+#define BP_B 8
+#define BP_HASH 16
+#define BP_MATCHES 24
+#define BP_NEXT 32
+#define BP_PRIME 40
+#define BP_HSHIFT 48
+#define BP_BASEIDX 56
+#define BP_BTMASK 60
+#define BP_NBCMP 64
+#define BP_LOWEST 68
+#define BP_MAXDIST 72
+#define BP_ISDICT 76
+#define BP_DICTLIMIT 80
+#define BP_SUFF 84
+#define BP_ILIMIT 88
+
+// func btGetAllNoDictAsm(p *btAsmParams, ip int, rep *[repNum]uint32, ll0, lengthToBeat uint32) (mnum uint32, bad bool)
+//
+// C: zstd_opt.c:ZSTD_insertBtAndGetAllMatches (noDict, mls 4 to 6).
+// Registers as in the functions above. Frame: 0(SP) dummy32, 8(SP)
+// nextPtr, 16(SP) bestLength, 24(SP) matchEndIdx, 28(SP) mnum, 32(SP)
+// curr, 36(SP) btLow, 40(SP) matchLow, 44(SP) windowLow, 48(SP) hash,
+// 56(SP) p, 64(SP) btMask, 68(SP) baseIdx, 72(SP) the first candidate.
+//
+// Bounds: btGetAllNoDict checks 0 < ip, ip + 8 <= iLimit <= len(b) and
+// lowestValid <= curr; btAsmSetup checks the table sizes and lowestValid >=
+// baseIdx. So windowLow (>= lowestValid) and matchLow lie in [baseIdx,
+// curr]; a repcode is read only at an index in [windowLow, curr), and a
+// tree candidate only at one >= matchLow and (MATCHLEN) before ip.
+TEXT ·btGetAllNoDictAsm(SB), NOSPLIT, $80-37
+	MOVQ p+0(FP), AX
+	MOVQ AX, 56(SP)
+	MOVQ BP_BT(AX), DI
+	MOVQ BP_B(AX), SI
+	MOVQ ip+8(FP), R8
+	MOVQ BP_ILIMIT(AX), R9
+	LEAQ (SI)(R8*1), BX
+	MOVL BP_BTMASK(AX), CX
+	MOVL CX, 64(SP)
+	MOVL BP_BASEIDX(AX), CX
+	MOVL CX, 68(SP)
+	ADDL R8, CX
+	MOVL CX, 32(SP)             // curr
+
+	// hash, and the first candidate
+	MOVQ  (BX), DX
+	IMULQ BP_PRIME(AX), DX
+	MOVQ  BP_HSHIFT(AX), CX
+	SHRQ  CX, DX
+	MOVQ  DX, 48(SP)
+	MOVQ  BP_HASH(AX), CX
+	MOVL  (CX)(DX*4), CX
+	MOVL  CX, 72(SP)
+
+	// btLow = btMask < curr ? curr - btMask : 0
+	XORL    DX, DX
+	MOVL    32(SP), CX
+	SUBL    64(SP), CX
+	CMOVLHI CX, DX
+	MOVL    DX, 36(SP)
+
+	// windowLow = isDictionary ? lowestValid : withinWindow; matchLow = windowLow or 1
+	MOVL BP_LOWEST(AX), DX
+	MOVL 32(SP), CX
+	SUBL DX, CX
+	CMPL CX, BP_MAXDIST(AX)
+	JLS  wlok
+	MOVL 32(SP), DX
+	SUBL BP_MAXDIST(AX), DX
+
+wlok:
+	CMPL BP_ISDICT(AX), $0
+	JEQ  wlset
+	MOVL BP_LOWEST(AX), DX
+
+wlset:
+	MOVL    DX, 44(SP)
+	MOVL    $1, CX
+	TESTL   DX, DX
+	CMOVLNE DX, CX
+	MOVL    CX, 40(SP)
+
+	MOVL     $0, 28(SP)         // mnum
+	MOVL     lengthToBeat+28(FP), CX
+	DECQ     CX                 // (the 32-bit load zero-extends; lengthToBeat >= 1)
+	MOVQ     CX, 16(SP)         // bestLength
+	MOVL     32(SP), CX
+	ADDL     $9, CX
+	MOVL     CX, 24(SP)         // matchEndIdx = curr + 8 + 1
+	MOVB     $0, bad+36(FP)
+
+	// repcodes: for repCode in [ll0, ll0 + 3)
+	MOVL ll0+24(FP), R10
+	LEAL 3(R10), R11
+
+reploop:
+	CMPL R10, R11
+	JAE  repdone
+	MOVQ rep+16(FP), CX
+	CMPL R10, $3
+	JNE  repn
+	MOVL (CX), DX
+	DECL DX                     // rep[0] - 1
+	JMP  repgot
+
+repn:
+	MOVL (CX)(R10*4), DX
+
+repgot:
+	// if repOffset-1 < curr-dictLimit (discards 0 and -1) && repIndex >= windowLow
+	LEAL -1(DX), CX
+	MOVL 32(SP), R12
+	SUBL BP_DICTLIMIT(AX), R12
+	CMPL CX, R12
+	JAE  repnext
+	MOVL 32(SP), CX
+	SUBL DX, CX
+	CMPL CX, 44(SP)
+	JB   repnext
+	MOVQ R8, R12
+	SUBQ DX, R12                // ip - repOffset (DX zero-extended)
+	MOVL (SI)(R12*1), CX
+	CMPL CX, (BX)
+	JNE  repnext
+	// repLen = count(ip+4, ip+4-repOffset, iLimit) + 4
+	LEAQ 4(SI)(R12*1), R12
+	MOVQ R9, R15
+	SUBQ R8, R15
+	SUBQ $4, R15
+	XORL R13, R13
+
+rc8:
+	LEAQ 8(R13), CX
+	CMPQ CX, R15
+	JA   rctail
+	MOVQ (R12)(R13*1), CX
+	XORQ 4(BX)(R13*1), CX
+	JNE  rcdiff
+	ADDQ $8, R13
+	JMP  rc8
+
+rcdiff:
+	BSFQ CX, CX
+	SHRQ $3, CX
+	ADDQ CX, R13
+	JMP  rcdone
+
+rctail:
+	CMPQ    R13, R15
+	JAE     rcdone
+	MOVBLZX (R12)(R13*1), CX
+	CMPB    CX, 4(BX)(R13*1)
+	JNE     rcdone
+	INCQ    R13
+	JMP     rctail
+
+rcdone:
+	ADDQ $4, R13                // repLen
+	CMPQ R13, 16(SP)
+	JLE  repnext
+	MOVQ R13, 16(SP)
+	MOVL 28(SP), CX
+	MOVQ BP_MATCHES(AX), R12
+	LEAQ (R12)(CX*8), R12
+	MOVL R10, DX
+	SUBL ll0+24(FP), DX
+	INCL DX
+	MOVL DX, (R12)              // off = repCode - ll0 + 1
+	MOVL R13, 4(R12)            // len
+	INCL 28(SP)
+	MOVL BP_SUFF(AX), CX
+	CMPQ R13, CX
+	JA   repret                 // repLen > sufficientLen: best possible
+	LEAQ (R8)(R13*1), CX
+	CMPQ CX, R9
+	JEQ  repret
+
+repnext:
+	INCL R10
+	JMP  reploop
+
+repret:
+	MOVL 28(SP), CX
+	MOVL CX, mnum+32(FP)
+	RET
+
+repdone:
+	// hashTable[h] = curr
+	MOVQ BP_HASH(AX), CX
+	MOVQ 48(SP), DX
+	MOVL 32(SP), R12
+	MOVL R12, (CX)(DX*4)
+
+	XORL R10, R10
+	XORL R11, R11
+	MOVL 32(SP), CX
+	ANDL 64(SP), CX
+	LEAQ (DI)(CX*8), R12        // smallerPtr = &bt[2*(curr&btMask)]
+	LEAQ 4(R12), R13            // largerPtr
+	MOVL 72(SP), R14
+	MOVL BP_NBCMP(AX), R15
+
+gloop:
+	TESTL R15, R15
+	JEQ   gend
+	CMPL  R14, 40(SP)
+	JB    gend                  // matchIndex < matchLow
+	MATCHLEN(64(SP), 68(SP), gbad, gcnt8, gcdiff, gctail, gcdone)
+	CMPQ  DX, 16(SP)
+	JLE   gnext
+	MOVL  24(SP), AX
+	SUBL  R14, AX
+	CMPQ  DX, AX
+	JLS   gme
+	LEAL  (R14)(DX*1), AX
+	MOVL  AX, 24(SP)
+
+gme:
+	MOVQ  DX, 16(SP)            // bestLength
+	MOVL  28(SP), AX
+	CMPL  AX, $4099             // optSize
+	JAE   gbad
+	MOVQ  56(SP), CX
+	MOVQ  BP_MATCHES(CX), CX
+	LEAQ  (CX)(AX*8), CX
+	MOVL  DX, 4(CX)             // len
+	MOVL  32(SP), AX
+	SUBL  R14, AX
+	ADDL  $3, AX
+	MOVL  AX, (CX)              // off = offsetToOffBase(curr - matchIndex)
+	INCL  28(SP)
+	MOVL  R14, CX
+	SUBL  68(SP), CX            // re-derive the match position
+	CMPQ  DX, $4096
+	JA    gend                  // matchLength > optNum
+	LEAQ  (R8)(DX*1), AX
+	CMPQ  AX, R9
+	JEQ   gend                  // equal: no way to know if inf or sup
+
+gnext:
+	TREEWALK(36(SP), gloop, gend, gsmallstop, glarger, glargestop)
+
+gend:
+	MOVL $0, (R13)
+	MOVL $0, (R12)
+	MOVQ 56(SP), AX
+	MOVQ BP_NEXT(AX), CX
+	MOVL 24(SP), DX
+	SUBL $8, DX
+	MOVL DX, (CX)               // nextToUpdate = matchEndIdx - 8
+	MOVL 28(SP), AX
+	MOVL AX, mnum+32(FP)
+	RET
+
+gbad:
+	MOVB $1, bad+36(FP)
+	RET

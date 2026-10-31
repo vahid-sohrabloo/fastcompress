@@ -888,6 +888,9 @@ func btGetAllMatches(matches *[optSize]optMatch, ms *matchState, nextToUpdate3 *
 	case dictMatchState:
 		return insertBtAndGetAllMatchesDictMatchState(matches, ms, nextToUpdate3, ip, iHighLimit, rep, ll0, lengthToBeat, mls)
 	}
+	if n, ok := btGetAllNoDict(ms, ip, iHighLimit, rep, ll0, lengthToBeat); ok {
+		return n // the same, in assembly (set up by compressBlockOptGeneric)
+	}
 	return insertBtAndGetAllMatches(matches, ms, nextToUpdate3, ip, iHighLimit, rep, ll0, lengthToBeat, mls)
 }
 
@@ -946,6 +949,13 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 	opt := optStatePtr.priceTable
 	matches := optStatePtr.matchTable
 	var lastStretch optimal
+
+	if mode == noDict {
+		btAsmSetup(ms, matches, mls, iend)
+		// Do not keep the window and tables reachable through ms.btAsm
+		// once the block is done.
+		defer func() { ms.btAsm = btAsmParams{} }()
+	}
 
 	// init
 	rescaleFreqs(optStatePtr, src)
