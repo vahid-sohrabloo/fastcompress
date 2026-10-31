@@ -15,8 +15,14 @@ import (
 // finder block by block with the Go loop and with the assembly lazyHc*, each
 // on its own copy of the same match state, for every mls (6 is not reached
 // from any level table), depth, dictionary flag and random table sizes.
-// The sequences, literals, repcodes and final tables must agree. On an
-// AVX2 host it runs again without AVX2 (the scalar count).
+// With the dictionary flag the window also starts after the first index
+// (lowLimit > baseIdx), so the candidates' lower bound is the window's
+// lowLimit, not curr - maxDistance (C's isDictionary): a state no public
+// API reaches (a dictionary is copied, so the first block after it runs
+// extDict, and lowLimit only passes the dictionary when loadedDictEnd is
+// cleared), checked here against the Go loop. The sequences, literals,
+// repcodes and final tables must agree, and the assembly must have run. On
+// an AVX2 host it runs again without AVX2 (the scalar count).
 func TestHcAsmLazyEquiv(t *testing.T) {
 	withAsm(t, true, func() { testHcAsmLazyEquiv(t) })
 	if cpu.X86.HasAVX2 {
@@ -49,6 +55,10 @@ func testHcAsmLazyEquiv(t *testing.T) {
 		for depth := range 3 {
 			for _, dict := range []bool{false, true} {
 				const baseIdx = 5
+				start := 0 // the window's first position in src
+				if dict {
+					start = 1 + r.IntN(4096)
+				}
 				cp := compressionParameters{
 					windowLog: uint32(10 + r.IntN(8)),
 					chainLog:  uint32(6 + r.IntN(11)),
@@ -58,13 +68,14 @@ func testHcAsmLazyEquiv(t *testing.T) {
 				}
 				mk := func() *matchState {
 					ms := &matchState{}
-					ms.window = window{base: src, baseIdx: baseIdx, dictLimit: baseIdx, lowLimit: baseIdx}
+					lowLimit := baseIdx + uint32(start)
+					ms.window = window{base: src, baseIdx: baseIdx, dictLimit: lowLimit, lowLimit: lowLimit}
 					ms.cParams = cp
 					ms.hashTable = make([]uint32, 1<<cp.hashLog)
 					ms.chainTable = make([]uint32, 1<<cp.chainLog)
-					ms.nextToUpdate = baseIdx
+					ms.nextToUpdate = lowLimit
 					if dict {
-						ms.loadedDictEnd = baseIdx + 1
+						ms.loadedDictEnd = lowLimit + 1
 					}
 					return ms
 				}
@@ -75,7 +86,7 @@ func testHcAsmLazyEquiv(t *testing.T) {
 					ss.literals = make([]byte, 0, 1<<17)
 					ss.sequences = make([]seqDef, 0, 1<<15)
 				}
-				for pos := 0; pos < len(src); {
+				for pos := start; pos < len(src); {
 					n := min(len(src)-pos, 1+r.IntN(1<<17))
 					blk := src[pos : pos+n]
 					resetSeqStore(&ssGo)
@@ -95,6 +106,9 @@ func testHcAsmLazyEquiv(t *testing.T) {
 				if !slices.Equal(msAsm.hashTable, msGo.hashTable) || !slices.Equal(msAsm.chainTable, msGo.chainTable) ||
 					msAsm.nextToUpdate != msGo.nextToUpdate {
 					t.Fatalf("mls %d depth %d dict %v: the tables differ from Go's", mls, depth, dict)
+				}
+				if msGo.asmCalls != 0 || msAsm.asmCalls == 0 {
+					t.Fatalf("mls %d depth %d dict %v: the assembly ran %d times (Go side %d)", mls, depth, dict, msAsm.asmCalls, msGo.asmCalls)
 				}
 			}
 		}

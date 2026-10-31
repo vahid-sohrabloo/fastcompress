@@ -913,7 +913,7 @@ func btGetAllMatches(matches *[optSize]optMatch, ms *matchState, nextToUpdate3 *
 	case dictMatchState:
 		return insertBtAndGetAllMatchesDictMatchState(matches, ms, nextToUpdate3, ip, iHighLimit, rep, ll0, lengthToBeat, mls)
 	}
-	if n, ok := btGetAllNoDict(ms, ip, iHighLimit, rep, ll0, lengthToBeat); ok {
+	if n, ok := btGetAllNoDict(matches, ms, ip, iHighLimit, rep, ll0, lengthToBeat); ok {
 		return n // the same, in assembly (set up by compressBlockOptGeneric)
 	}
 	return insertBtAndGetAllMatches(matches, ms, nextToUpdate3, ip, iHighLimit, rep, ll0, lengthToBeat, mls)

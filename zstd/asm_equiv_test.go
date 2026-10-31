@@ -2,7 +2,9 @@ package zstd
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand/v2"
+	"strconv"
 	"testing"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
@@ -66,6 +68,7 @@ var crefTests = []struct {
 	{"Compress2AliasedInputs", TestCompress2AliasedInputs},
 	{"ConcurrentBlocks", TestConcurrentBlocks},
 	{"AsmEquivParams", TestAsmEquivParams},
+	{"RowDictMinMatch3Cref", TestRowDictMinMatch3Cref},
 }
 
 // TestAsmEquiv runs every C-reference test with the assembly routines off,
@@ -243,10 +246,18 @@ func FuzzEncodeAsmEquiv(f *testing.F) {
 
 // TestAsmEquivParams compresses one input with explicit compression
 // parameters that no level table reaches (every strategy from fast to
-// btopt with minMatch 3 to 7, so the hash-chain and btopt assembly run
-// with mls 6, and random table sizes; hash chain or row for the lazy
-// strategies) with the assembly off, on and (on an AVX2 host) on without
-// AVX2. The frames must be equal; the Go bodies match C (the cref tests).
+// btopt with minMatch 3 to 7, so the hash-chain and binary-tree assembly
+// run with mls 6, and random table sizes; hash chain or row for the lazy
+// strategies), each without and with a raw-content dictionary loaded into
+// the context, and requires C's frame (cref -cparams/-row). The inputs
+// with a dictionary are over 32 KiB, so C copies the dictionary's tables
+// (their blocks then run the Go extDict code until the window has left
+// the dictionary; TestHcAsmLazyEquiv and TestBtAsmBlockEquiv cover the
+// assembly's isDictionary bound); small windows over the 300 KiB input
+// raise lowLimit above the first index. As a crefTests entry it runs with
+// the assembly off, on, without BMI2 and without AVX2. With the assembly
+// on, the hash-chain and binary-tree cases without a dictionary must have
+// run it.
 func TestAsmEquivParams(t *testing.T) {
 	text := readTestdata(t, "dickens-32k.raw")
 	r := rand.New(rand.NewPCG(11, 12))
@@ -265,9 +276,10 @@ func TestAsmEquivParams(t *testing.T) {
 		}
 	}
 	type pcase struct {
-		cp  compressionParameters
-		row paramSwitch
-		n   int
+		cp   compressionParameters
+		row  paramSwitch
+		n    int
+		dict []byte
 	}
 	var cases []pcase
 	for s := zstdFast; s <= zstdBtopt; s++ {
@@ -276,45 +288,54 @@ func TestAsmEquivParams(t *testing.T) {
 				if row == psEnable && (s < zstdGreedy || s > zstdLazy2) {
 					continue
 				}
-				wl := uint32(10 + r.IntN(7))
-				cases = append(cases, pcase{compressionParameters{
-					windowLog: wl, chainLog: uint32(6 + r.IntN(int(wl)-5)), hashLog: uint32(6 + r.IntN(int(wl)-5)),
-					searchLog: uint32(1 + r.IntN(7)), minMatch: mm, targetLength: uint32(r.IntN(64)), strategy: s,
-				}, row, 1 + r.IntN(len(src))})
+				for _, withDict := range []bool{false, true} {
+					wl := uint32(10 + r.IntN(7))
+					c := pcase{cp: compressionParameters{
+						windowLog: wl, chainLog: uint32(6 + r.IntN(int(wl)-5)), hashLog: uint32(6 + r.IntN(int(wl)-5)),
+						searchLog: uint32(1 + r.IntN(7)), minMatch: mm, targetLength: uint32(r.IntN(64)), strategy: s,
+					}, row: row, n: 1 + r.IntN(len(src))}
+					if withDict {
+						c.dict = text[:1024*(4+r.IntN(29))]
+						c.n = 40<<10 + r.IntN(len(src)-40<<10) // > 32 KiB: C copies the dictionary
+					}
+					cases = append(cases, c)
+				}
 			}
 		}
 	}
-	compress := func(c pcase) ([]byte, error) {
+	asmOn := func(name string) bool {
+		for _, a := range cpu.AsmRoutines() {
+			if a.Name == name {
+				return *a.Use
+			}
+		}
+		return false
+	}
+	for _, c := range cases {
 		cc := newCCtx()
 		cc.setLevel(3)
 		cc.requestedParams.cParams = c.cp
 		cc.requestedParams.useRowMatchFinder = c.row
-		return cc.compress2(nil, src[:c.n])
-	}
-	want := make([][]byte, len(cases))
-	withAsm(t, false, func() {
-		for i, c := range cases {
-			want[i], _ = compress(c)
-		}
-	})
-	check := func(name string) {
-		for i, c := range cases {
-			got, err := compress(c)
-			if err != nil {
-				if want[i] != nil {
-					t.Fatalf("%s %+v: %v", name, c, err)
-				}
-				continue
+		args := []string{"compress", "-level", "3", "-pledged", "1", "-row", strconv.Itoa(int(c.row)), "-cparams",
+			fmt.Sprintf("%d,%d,%d,%d,%d,%d,%d", c.cp.windowLog, c.cp.chainLog, c.cp.hashLog, c.cp.searchLog,
+				c.cp.minMatch, c.cp.targetLength, c.cp.strategy)}
+		if c.dict != nil {
+			if err := cc.loadDictionary(c.dict, dctRawContent); err != nil {
+				t.Fatal(err)
 			}
-			if !bytes.Equal(got, want[i]) {
-				t.Fatalf("%s %+v row %d n %d: the frame differs from the Go code's%s", name, c.cp, c.row, c.n, firstDiff(got, want[i]))
-			}
+			args = append(args, dictCase{dict: c.dict, raw: true}.crefArgs(t)...)
 		}
-	}
-	withAsm(t, true, func() { check("asm=on") })
-	if cpu.X86.HasAVX2 {
-		restore := cpu.DisableAVX2()
-		defer restore()
-		withAsm(t, true, func() { check("asm=on,avx2=off") })
+		got, err := cc.compress2(nil, src[:c.n])
+		if err != nil {
+			t.Fatalf("%+v: %v", c.cp, err)
+		}
+		if want := creftest.Run(t, src[:c.n], args...); !bytes.Equal(got, want) {
+			t.Fatalf("%+v row %d n %d dict %d: the frame differs from C's%s", c.cp, c.row, c.n, len(c.dict), firstDiff(got, want))
+		}
+		hc := c.cp.strategy >= zstdGreedy && c.cp.strategy <= zstdLazy2 && c.row == psDisable && asmOn("hc")
+		bt := c.cp.strategy == zstdBtlazy2 && asmOn("dubt") || c.cp.strategy == zstdBtopt && c.cp.minMatch > 3 && asmOn("dubt")
+		if (hc || bt) && c.dict == nil && cc.blockState.matchState.asmCalls == 0 {
+			t.Fatalf("%+v row %d n %d dict %d: the assembly never ran", c.cp, c.row, c.n, len(c.dict))
+		}
 	}
 }

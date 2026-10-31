@@ -97,14 +97,15 @@ func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int
 }
 
 // btGetAllNoDict is insertBtAndGetAllMatches (noDict, mls 4 to 6) in
-// assembly, with ms.btAsm set up for this block and matches the table it
-// names. ok is false (nothing done) when it is not set up or a
-// precondition fails: 0 < ip, ip + 8 <= iLimit (the hash reads 8 bytes),
-// lengthToBeat >= 1, and the window's lowLimit <= ip's index (so the
-// candidates' lower bound is at most curr).
-func btGetAllNoDict(ms *matchState, ip, iLimit int, rep *[repNum]uint32, ll0 bool, lengthToBeat uint32) (uint32, bool) {
+// assembly, writing into matches, with ms.btAsm set up for this block. ok
+// is false (nothing done) when it is not set up or a precondition fails:
+// matches is the table btAsmSetup was given (the assembly writes there),
+// 0 < ip, ip + 8 <= iLimit (the hash reads 8 bytes), lengthToBeat >= 1, and
+// the window's lowLimit <= ip's index (so the candidates' lower bound is at
+// most curr).
+func btGetAllNoDict(matches *[optSize]optMatch, ms *matchState, ip, iLimit int, rep *[repNum]uint32, ll0 bool, lengthToBeat uint32) (uint32, bool) {
 	p := &ms.btAsm
-	if !p.ok || p.matches == nil || iLimit != p.iLimit || ip <= 0 || ip+8 > iLimit || lengthToBeat < 1 || p.lowestValid > uint32(ip)+p.baseIdx {
+	if !p.ok || p.matches != &matches[0] || iLimit != p.iLimit || ip <= 0 || ip+8 > iLimit || lengthToBeat < 1 || p.lowestValid > uint32(ip)+p.baseIdx {
 		return 0, false
 	}
 	var l uint32
@@ -115,6 +116,7 @@ func btGetAllNoDict(ms *matchState, ip, iLimit int, rep *[repNum]uint32, ll0 boo
 	if bad {
 		panic("zstd: binary tree holds an index at or after the current position")
 	}
+	ms.asmCalls++
 	return mnum, true
 }
 
@@ -132,5 +134,6 @@ func dubtFindBestMatchFast(ms *matchState, ip, iend int) (int, uint32, bool) {
 	if bad {
 		panic("zstd: binary tree holds an index at or after the current position")
 	}
+	ms.asmCalls++
 	return bestLength, offBase, true
 }

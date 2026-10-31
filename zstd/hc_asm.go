@@ -77,6 +77,7 @@ func lazyHcRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLow
 		panic("zstd: hash chain holds an index at or after the current position")
 	}
 	ms.lazySkipping = p.skip != 0
+	ms.asmCalls++
 	ss.sequences = ss.sequences[:nSeqs+nSeq]
 	ss.literals = ss.literals[:nLits+nLit]
 	if llType != lltNone {
