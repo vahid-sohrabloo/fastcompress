@@ -10,7 +10,7 @@ import (
 	"unsafe"
 )
 
-// TestRowAsmParamsLayout pins the field offsets row_lazy_amd64.s and row_lazy_arm64.s use (P_* macros).
+// TestRowAsmParamsLayout pins the field offsets row_lazy_*.s and hc_lazy_*.s use (P_* macros).
 func TestRowAsmParamsLayout(t *testing.T) {
 	var p rowAsmParams
 	for _, c := range []struct {
@@ -32,6 +32,8 @@ func TestRowAsmParamsLayout(t *testing.T) {
 		{"isDictionary", unsafe.Offsetof(p.isDictionary), 80},
 		{"iLimit", unsafe.Offsetof(p.iLimit), 96},
 		{"skip", unsafe.Offsetof(p.skip), 104},
+		{"chainTable", unsafe.Offsetof(p.chainTable), 112},
+		{"chainMask", unsafe.Offsetof(p.chainMask), 120},
 	} {
 		if c.got != c.want {
 			t.Errorf("rowAsmParams.%s at offset %d, the assembly expects %d", c.name, c.got, c.want)

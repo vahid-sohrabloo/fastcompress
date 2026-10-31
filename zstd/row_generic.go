@@ -98,10 +98,10 @@ func rowSearchGeneric(ms *matchState, ip, iLimit int, relRow, tag, rowLog, nbAtt
 	return ml, best
 }
 
-// rowAsmParams holds what the assembly lazyRow* reads for one block; ok is
-// false when it is not set up (always, without assembly). The layout is
-// fixed: row_lazy_amd64.s and row_lazy_arm64.s read the fields by offset
-// (checked by TestRowAsmParamsLayout).
+// rowAsmParams holds what the assembly lazyRow* (or, set up by hcAsmSetup,
+// lazyHc*) reads for one block; ok is false when it is not set up (always,
+// without assembly). The layout is fixed: row_lazy_*.s and hc_lazy_*.s read
+// the fields by offset (checked by TestRowAsmParamsLayout).
 type rowAsmParams struct {
 	hashTable    *uint32                   // 0
 	tagTable     *byte                     // 8
@@ -119,5 +119,7 @@ type rowAsmParams struct {
 	ok           bool                      // 84
 	bLen         int                       // 88: positions up to bLen-16 may be searched
 	iLimit       int                       // 96: the end of the input, for the searches' ZSTD_count
-	skip         uint32                    // 104: lazySkipping, while lazyRow* runs
+	skip         uint32                    // 104: lazySkipping, while lazyRow* or lazyHc* runs
+	chainTable   *uint32                   // 112: lazyHc* only (tagTable, cache and entropy are then unused)
+	chainMask    uint32                    // 120: lazyHc* only
 }

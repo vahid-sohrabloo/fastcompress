@@ -610,6 +610,13 @@ func compressBlockLazyGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32,
 			// has nothing left to do (ip >= ilimit).
 			ip, anchor, offset1, offset2, _ = lazyRowRun(ms, ss, ip, anchor, iend, ilimit, prefixLowest, offset1, offset2, depth, mls, rowLog)
 		}
+	} else if method == searchHashChain {
+		hcAsmSetup(ms, iend)
+		defer func() { ms.rowAsm = rowAsmParams{} }()
+		if ms.rowAsm.ok {
+			// As above, with the hash-chain finder.
+			ip, anchor, offset1, offset2, _ = lazyHcRun(ms, ss, ip, anchor, iend, ilimit, prefixLowest, offset1, offset2, depth, mls)
+		}
 	}
 
 	// Match Loop
