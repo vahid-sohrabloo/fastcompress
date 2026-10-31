@@ -69,7 +69,7 @@ func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 	anchor, nSeq, nLit, r1, r2, llType, llPos := asm(&ms.hashTable[0], &b[0], seqPtr, litPtr,
 		ip0, istart, iend, prefixStart, prefixStartIndex, baseIdx, repOffset1, repOffset2,
 		stepSize, uint64(hShift), uint64(64-hlog), prime)
-	ms.staleHint = nLit*staleLitsFast < iend-istart
+	ms.staleHint = nLit*staleLitsFast < iend-istart // sequences' literals only (see staleTables)
 	if nSeq < 0 {
 		panic("zstd: fast hash table holds an index at or after the current position")
 	}
@@ -103,10 +103,16 @@ func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 // before the window (a context reused for a new frame), it mispredicts, and
 // the branchless loop is faster. The Stale loop runs while the frame has
 // covered fewer than staleTables table sizes, or after a block whose
-// literals were under 1/staleLits* of it (nearly all matches, so few
-// positions were inserted and old entries survive). Measured on silesia:
-// the branchless loop alone made whole files 1-4% slower at L1 and up to
-// 4% at L3; these choices are at or below the branchy loop on every file.
+// sequences' literals were under 1/staleLits* of it. That count leaves out
+// the block's trailing literals on purpose: it is low both when matches
+// cover the block (xml, nci) and when the finder found few matches, i.e.
+// skipped through incompressible data with a growing step; in both cases
+// few positions are inserted and old entries survive. Counting the
+// trailing literals too picked the branchy loop on incompressible input,
+// which measured 9-19% slower there (4 MiB of random bytes, zstd -3
+// output of mozilla; L1 and L3). Measured on silesia: the branchless loop
+// alone made whole files 1-4% slower at L1 and up to 4% at L3; these
+// choices are at or below the branchy loop on every file.
 const (
 	staleTables     = 4
 	staleLitsFast   = 16
