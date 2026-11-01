@@ -51,6 +51,7 @@ outer:
 	JGT  cleanup
 	HASHL(R8, R12)
 	MOVL (DI)(R12*4), R13   // idxl0
+	MOVQ (SI)(R8*1), R11    // read64(ip)
 	// inner starts 16 bytes past a 64-byte boundary (PCALIGN $64 also
 	// aligns the function to 64): of the four 16-byte offsets, the one that
 	// measured fastest, and it keeps the loop's layout independent of where
@@ -61,10 +62,12 @@ outer:
 
 	// The search loop keeps its state in registers, as C's does (no stores
 	// but the two table updates): AX curr, DX idxs0, R12 hl0 then hl1,
-	// R13 idxl0 then idxl1. The hit paths save curr, hl1 and idxl1 to
-	// CURR, HL1 and IDXL1 for the code after the match.
+	// R13 idxl0 then idxl1, R11 read64(ip) and, from norep, BX
+	// read64(ip1), which becomes the next position's R11 (each position's
+	// 8 bytes are read once, as C carries them). The hit paths save curr,
+	// hl1 and idxl1 to CURR, HL1 and IDXL1 for the code after the match.
 inner:
-	MOVQ  (SI)(R8*1), BX
+	MOVQ  R11, BX
 	IMULQ PRIMES, BX
 	MOVQ  hShiftS+104(FP), CX
 	SHRQ  CX, BX            // hs0
@@ -84,7 +87,8 @@ inner:
 	JEQ  maybeRep
 
 norep:
-	MOVQ  (SI)(R9*1), R12
+	MOVQ  (SI)(R9*1), BX    // read64(ip1)
+	MOVQ  BX, R12
 	IMULQ PRIMEL, R12
 	MOVQ  hShiftL+88(FP), CX
 	SHRQ  CX, R12           // hl1 (hl0 is no longer needed)
@@ -105,6 +109,7 @@ noshort:
 
 nostep:
 	MOVQ R9, R8             // ip = ip1; hl0 = hl1 and idxl0 = idxl1 are in place
+	MOVQ BX, R11
 	ADDQ STEP, R9           // ip1 += step
 	CMPQ R9, ILIMIT
 	JLE  inner

@@ -63,11 +63,11 @@ done:
 // the helpers clobber it; no calls in the search loop, so the GC never sees
 // it), step in STEP,
 // R12 hl0, R13 idxl0, R14 offset1, AX curr (copied to CX before the
-// candidates, which use AX as scratch), DX idxs0; BX/R11 scratch;
-// nextStep in NEXTSTEP.
+// candidates, which use AX as scratch), DX idxs0, R11 read64(ip), BX
+// scratch then read64(ip1); nextStep in NEXTSTEP.
 // offset2, anchor, nSeq and nLits live in their argument/result slots.
 // For a match: R8 ip, DX match position, AX mLength, R12 offBase.
-// LONGCAND compares the 8 bytes at idxl0 (R13) with ip's, going to
+// LONGCAND compares the 8 bytes at idxl0 (R13) with ip's (R11), going to
 // longmatch if they match (a miss falls through to nolong, which follows
 // it); SHORTCAND the 4 bytes at idxs0 (DX), going to searchlong if they
 // match. CX = curr. Every entry is below curr (else
@@ -88,7 +88,7 @@ done:
 	CMPL R13, CX; \
 	JAE  bad; \
 	MOVQ (R10)(R13*1), AX; \
-	CMPQ AX, (SI)(R8*1); \
+	CMPQ AX, R11; \
 	JEQ  longmatch
 
 #define SHORTCAND \
@@ -97,7 +97,7 @@ done:
 	CMPL DX, CX; \
 	JAE  bad; \
 	MOVL (R10)(DX*1), AX; \
-	CMPL AX, (SI)(R8*1); \
+	CMPL AX, R11; \
 	JEQ  searchlong
 
 TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $104-160
@@ -112,7 +112,7 @@ TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $104-160
 	CMOVLCS CX, R13; \
 	MOVQ    (R10)(R13*1), AX; \
 	ADCQ    $0, AX; \
-	CMPQ    AX, (SI)(R8*1); \
+	CMPQ    AX, R11; \
 	JEQ     longmatch
 
 #define SHORTCAND \
@@ -122,7 +122,7 @@ TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $104-160
 	CMOVLCS CX, DX; \
 	MOVL    (R10)(DX*1), AX; \
 	ADCL    $0, AX; \
-	CMPL    AX, (SI)(R8*1); \
+	CMPL    AX, R11; \
 	JEQ     searchlong
 
 // func compressBlockDoubleFastAsmStale: compressBlockDoubleFastAsm without
