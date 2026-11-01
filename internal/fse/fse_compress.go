@@ -554,11 +554,16 @@ func stateAt(t []uint32, i uint32) uint32 { return t[i>>1] >> ((i & 1) * 16) & 0
 // C: fse.h:FSE_initCState2
 func (s *CState) InitCState2(ct CTable, symbol uint32) {
 	s.InitCState(ct)
-	deltaFindState := int32(s.symbolTT[2*symbol])
-	deltaNbBits := s.symbolTT[2*symbol+1]
+	s.value = firstState(s.stateTable, s.symbolTT, symbol)
+}
+
+// firstState is InitCState2's state value for symbol.
+func firstState(stateTable, symbolTT []uint32, symbol uint32) uint32 {
+	deltaFindState := int32(symbolTT[2*symbol])
+	deltaNbBits := symbolTT[2*symbol+1]
 	nbBitsOut := (deltaNbBits + 1<<15) >> 16
-	s.value = nbBitsOut<<16 - deltaNbBits
-	s.value = stateAt(s.stateTable, s.value>>nbBitsOut+uint32(deltaFindState))
+	value := nbBitsOut<<16 - deltaNbBits
+	return stateAt(stateTable, value>>nbBitsOut+uint32(deltaFindState))
 }
 
 // EncodeSymbol. C: fse.h:FSE_encodeSymbol
@@ -615,19 +620,23 @@ func compressUsingCTableGeneric(dst, src []byte, ct CTable, fast bool) int {
 		}
 	}
 
+	// InitCState2, spelled out: assigning the states whole, not through a
+	// pointer, keeps a caller's stack ct (huf's weights table) off the heap.
+	c1 = CState{stateTable: ct[1:], symbolTT: ct.SymbolTT(), stateLog: uint(ct[0] & 0xFFFF)}
+	c2 = c1
 	if len(src)&1 != 0 {
 		ip--
-		c1.InitCState2(ct, uint32(src[ip]))
+		c1.value = firstState(c1.stateTable, c1.symbolTT, uint32(src[ip]))
 		ip--
-		c2.InitCState2(ct, uint32(src[ip]))
+		c2.value = firstState(c2.stateTable, c2.symbolTT, uint32(src[ip]))
 		ip--
 		EncodeSymbol(&bitC, &c1, uint32(src[ip]))
 		flush()
 	} else {
 		ip--
-		c2.InitCState2(ct, uint32(src[ip]))
+		c2.value = firstState(c2.stateTable, c2.symbolTT, uint32(src[ip]))
 		ip--
-		c1.InitCState2(ct, uint32(src[ip]))
+		c1.value = firstState(c1.stateTable, c1.symbolTT, uint32(src[ip]))
 	}
 
 	// join to mod 4 (64-bit container: 64 > MaxTableLog*4+7)
