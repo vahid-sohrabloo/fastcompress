@@ -53,6 +53,13 @@ start:
 	HASHF(R8, R11)
 	HASHF(R9, R12)
 	MOVL (DI)(R11*4), R13
+	// inner starts 16 bytes past a 64-byte boundary (PCALIGN $64 also
+	// aligns the function to 64): of the four 16-byte offsets, the one that
+	// measured fastest, and it keeps the loop's layout independent of where
+	// the linker puts the function. The padding is jumped over.
+	JMP  inner
+	PCALIGN $64
+	LONG $0x90909090; LONG $0x90909090; LONG $0x90909090; LONG $0x90909090
 
 inner:
 	// rval = read32(ip2 - rep1)
