@@ -154,3 +154,100 @@ func TestOptAsmEquiv(t *testing.T) {
 		}
 	}
 }
+
+// TestOptAsmOptNumBound drives optParseAsm's forward pass to its optNum exit
+// (cur + longestML >= optNum, the bound that keeps its writes inside
+// priceTable): a 2-symbol alphabet makes literals cheap and short matches
+// plentiful, and sparse copies of up to 5000 bytes give long ones, so with
+// sufficientLen below optNum (targetLength 64 and 4095) last_pos climbs to
+// optNum. priceTable and matchTable sit inside larger arrays with sentinel
+// entries on both sides, checked after every block, and the assembly must
+// match the Go loop. Changing the exit's 4096 to 4097 makes the output
+// differ; to 4200, the writes overrun. (Adapted from the Task 20f review's
+// canary test.)
+func TestOptAsmOptNumBound(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 9))
+	var src []byte
+	for len(src) < 1<<20 {
+		if r.IntN(50) == 0 && len(src) > 5000 {
+			d := 1 + r.IntN(len(src)-1)
+			for range 4 + r.IntN(5000) {
+				src = append(src, src[len(src)-d])
+			}
+			continue
+		}
+		src = append(src, "ab"[r.IntN(2)])
+	}
+	savedOpt, savedDubt := useOptAsm, useDubtAsm
+	defer func() { useOptAsm, useDubtAsm = savedOpt, savedDubt }()
+	useDubtAsm = true
+	const pad = 8
+	sentinel := optimal{price: -12345, off: 0xdeadbeef, mlen: 0xdeadbeef, litlen: 0xdeadbeef, rep: [3]uint32{1, 2, 3}}
+	for _, mls := range []uint32{4, 5, 6} {
+		for _, tl := range []uint32{64, 4095} {
+			for _, ws := range [][2]uint32{{10, 6}, {17, 1}, {23, 3}} { // windowLog, searchLog
+				const baseIdx = 3
+				cp := compressionParameters{windowLog: ws[0], chainLog: 16, hashLog: 17, searchLog: ws[1], minMatch: mls, targetLength: tl, strategy: zstdBtopt}
+				type padded struct {
+					ms    *matchState
+					price []optimal
+					match []optMatch
+				}
+				mk := func() padded {
+					ms := &matchState{}
+					ms.window = window{base: src, baseIdx: baseIdx, dictLimit: baseIdx, lowLimit: baseIdx}
+					ms.cParams = cp
+					ms.hashTable = make([]uint32, 1<<cp.hashLog)
+					ms.chainTable = make([]uint32, 1<<cp.chainLog)
+					ms.nextToUpdate = baseIdx
+					pt := make([]optimal, optSize+2*pad)
+					mt := make([]optMatch, optSize+2*pad)
+					for i := range pt {
+						pt[i] = sentinel
+						mt[i] = optMatch{0xdeadbeef, 0xdeadbeef}
+					}
+					ms.opt.priceTable = (*[optSize]optimal)(pt[pad : pad+optSize])
+					ms.opt.matchTable = (*[optSize]optMatch)(mt[pad : pad+optSize])
+					ms.opt.symbolCosts = &entropyCTables{}
+					return padded{ms, pt, mt}
+				}
+				check := func(c padded, which string, pos int) {
+					for i := range pad {
+						for _, j := range []int{i, pad + optSize + i} {
+							if c.price[j] != sentinel || c.match[j] != (optMatch{0xdeadbeef, 0xdeadbeef}) {
+								t.Fatalf("%+v block at %d: %s wrote the sentinel at table index %d", cp, pos, which, j-pad)
+							}
+						}
+					}
+				}
+				pg, pa := mk(), mk()
+				repGo, repAsm := [repNum]uint32{1, 4, 8}, [repNum]uint32{1, 4, 8}
+				var ssGo, ssAsm seqStore
+				for _, ss := range []*seqStore{&ssGo, &ssAsm} {
+					ss.literals = make([]byte, 0, blockSizeMax)
+					ss.sequences = make([]seqDef, 0, blockSizeMax/3)
+				}
+				for pos := 0; pos < len(src); {
+					n := min(len(src)-pos, blockSizeMax)
+					blk := src[pos : pos+n]
+					resetSeqStore(&ssGo)
+					resetSeqStore(&ssAsm)
+					useOptAsm = false
+					litGo := compressBlockBtopt(pg.ms, &ssGo, &repGo, blk, uint32(pos)+baseIdx)
+					runs := pa.ms.asmLoopRuns
+					useOptAsm = true
+					litAsm := compressBlockBtopt(pa.ms, &ssAsm, &repAsm, blk, uint32(pos)+baseIdx)
+					check(pa, "the assembly", pos)
+					check(pg, "the Go loop", pos)
+					if litGo != litAsm || repGo != repAsm || !slices.Equal(ssGo.sequences, ssAsm.sequences) || !bytes.Equal(ssGo.literals, ssAsm.literals) {
+						t.Fatalf("%+v block at %d: asm differs from Go", cp, pos)
+					}
+					if pa.ms.asmLoopRuns == runs {
+						t.Fatalf("%+v block at %d: the assembly parser did not run", cp, pos)
+					}
+					pos += n
+				}
+			}
+		}
+	}
+}
