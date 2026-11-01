@@ -613,7 +613,8 @@ func BuildCTable(ct CTable, count *[256]uint32, maxSymbol, maxNbBits uint, wksp 
 	return uint(n), err
 }
 
-func buildCTable(ct CTable, count *[256]uint32, maxSymbolValue, maxNbBits uint32) (uint32, error) {
+// buildCTableGeneric is the Go body of buildCTable.
+func buildCTableGeneric(ct CTable, count *[256]uint32, maxSymbolValue, maxNbBits uint32) (uint32, error) {
 	var (
 		huffNode0    [2 * (SymbolValueMax + 1)]nodeElt
 		rankPosition [rankPositionTableSize]rankPos
