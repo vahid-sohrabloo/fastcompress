@@ -142,9 +142,13 @@ func BuildCTable(ct CTable, norm []int16, maxSymbol, tableLog uint, wksp []byte)
 	// Build table: u16 sorted by symbol order, gives next state value. As in
 	// C, the u16s go straight into the state table, viewed as u16s (the
 	// even state of a pair is the low half of its word).
-	tableU16 := unsafe.Slice((*uint16)(unsafe.Pointer(&stateTable[0])), 2*len(stateTable))
+	// The view is cut at tableSize, so an invalid norm (cumul past
+	// tableSize) panics instead of writing into symbolTT; swap is a local so
+	// the loop does not reload the package variable after each store.
+	tableU16 := unsafe.Slice((*uint16)(unsafe.Pointer(&stateTable[0])), 2*len(stateTable))[:tableSize]
+	swap := stateHalfSwap
 	for u, s := range tableSymbol[:tableSize] {
-		tableU16[cumul[s]^stateHalfSwap] = uint16(tableSize + uint32(u))
+		tableU16[cumul[s]^swap] = uint16(tableSize + uint32(u))
 		cumul[s]++
 	}
 
