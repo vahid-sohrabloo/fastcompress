@@ -45,9 +45,15 @@ func countParallel(count *[256]uint32, maxSymbol *uint32, src []byte, check bool
 		*maxSymbol = 0
 		return 0
 	}
-	var ws [4 * 256]uint32
-	countStripes(&ws, src)
-	maxCount := countMerge(&ws, n)
+	// The [0]uint64 field aligns ws to 8 bytes: the compiler zeroes it with
+	// REP STOSQ, which is much slower on a 4-byte-aligned address.
+	var w struct {
+		_  [0]uint64
+		ws [4 * 256]uint32
+	}
+	ws := &w.ws
+	countStripes(ws, src)
+	maxCount := countMerge(ws, n)
 	c1 := (*[256]uint32)(ws[0:256])
 
 	maxSymbolValue := uint32(255)
