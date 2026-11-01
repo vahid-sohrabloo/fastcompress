@@ -31,6 +31,8 @@
 #define MLEN 64(SP)
 #define MATCHL1 72(SP)
 #define PRIMES 80(SP)
+#define NEXTSTEP 88(SP)
+#define PRIMEL 96(SP)
 
 // COUNTI(call, done): R11 = fastCount (the common prefix length of
 // R9[0:R13] and R10[0:R13]), with the first 8 bytes compared here: most
@@ -60,12 +62,14 @@ done:
 // R10 b - baseIdx (so an index addresses b directly; reloaded at outer, as
 // the helpers clobber it; no calls in the search loop, so the GC never sees
 // it), step in STEP,
-// R11 nextStep, R12 hl0, R13 idxl0, R14 offset1; AX/BX/CX/DX scratch.
+// R12 hl0, R13 idxl0, R14 offset1, AX curr (copied to CX before the
+// candidates, which use AX as scratch), DX idxs0; BX/R11 scratch;
+// nextStep in NEXTSTEP.
 // offset2, anchor, nSeq and nLits live in their argument/result slots.
 // For a match: R8 ip, DX match position, AX mLength, R12 offBase.
 // LONGCAND compares the 8 bytes at idxl0 (R13) with ip's, going to
 // longmatch if they match (a miss falls through to nolong, which follows
-// it); SHORTCAND the 4 bytes at idxs0 (BX), going to searchlong if they
+// it); SHORTCAND the 4 bytes at idxs0 (DX), going to searchlong if they
 // match. CX = curr. Every entry is below curr (else
 // bad), so with idx >= prefixLowestIndex >= baseIdx (the Go caller checks
 // the latter), R10 + idx lies in b[:ip].
@@ -88,15 +92,15 @@ done:
 	JEQ  longmatch
 
 #define SHORTCAND \
-	CMPL BX, prefixLowestIndex+72(FP); \
+	CMPL DX, prefixLowestIndex+72(FP); \
 	JB   noshort; \
-	CMPL BX, CX; \
+	CMPL DX, CX; \
 	JAE  bad; \
-	MOVL (R10)(BX*1), AX; \
+	MOVL (R10)(DX*1), AX; \
 	CMPL AX, (SI)(R8*1); \
 	JEQ  searchlong
 
-TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $88-160
+TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $104-160
 #include "zstd_double_fast_amd64.h"
 
 #undef LONGCAND
@@ -112,16 +116,16 @@ TEXT ·compressBlockDoubleFastAsm(SB), NOSPLIT, $88-160
 	JEQ     longmatch
 
 #define SHORTCAND \
-	CMPL    BX, CX; \
+	CMPL    DX, CX; \
 	JAE     bad; \
-	CMPL    BX, prefixLowestIndex+72(FP); \
-	CMOVLCS CX, BX; \
-	MOVL    (R10)(BX*1), AX; \
+	CMPL    DX, prefixLowestIndex+72(FP); \
+	CMOVLCS CX, DX; \
+	MOVL    (R10)(DX*1), AX; \
 	ADCL    $0, AX; \
 	CMPL    AX, (SI)(R8*1); \
 	JEQ     searchlong
 
 // func compressBlockDoubleFastAsmStale: compressBlockDoubleFastAsm without
 // a branch on the candidates' indices (see LONGCAND).
-TEXT ·compressBlockDoubleFastAsmStale(SB), NOSPLIT, $88-160
+TEXT ·compressBlockDoubleFastAsmStale(SB), NOSPLIT, $104-160
 #include "zstd_double_fast_amd64.h"

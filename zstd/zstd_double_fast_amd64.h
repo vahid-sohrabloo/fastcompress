@@ -13,7 +13,7 @@
 //	prefixLowest+64 prefixLowestIndex+72(4) baseIdx+76(4) rep1+80(4)
 //	rep2+84(4) hShiftL+88 shiftS+96 hShiftS+104 primeS+112 anchor+120
 //	nSeq+128 nLits+136 rep1Out+144(4) rep2Out+148(4) llType+152(4)
-//	llPos+156(4); frame $88-160 on amd64, $16-160 on arm64.
+//	llPos+156(4); frame $104-160 on amd64, $16-160 on arm64.
 // No test checks the offsets as such: a mismatch shows up only through
 // TestAsmEquiv / TestCompress2* (output must equal C's) if it changes the
 // output on their inputs.
@@ -36,13 +36,16 @@
 	MOVQ shiftS+96(FP), CX
 	SHLQ CX, AX
 	MOVQ AX, PRIMES
+	MOVQ $0xCF1BBCDCB7A56463, AX
+	MOVQ AX, PRIMEL
 
 outer:
 	MOVQ $1, STEP
 	MOVL baseIdx+76(FP), AX
 	MOVQ SI, R10
 	SUBQ AX, R10
-	LEAQ 256(R8), R11       // nextStep = ip + kStepIncr
+	LEAQ 256(R8), AX
+	MOVQ AX, NEXTSTEP       // nextStep = ip + kStepIncr
 	LEAQ 1(R8), R9          // ip1
 	CMPQ R9, ILIMIT
 	JGT  cleanup
@@ -56,51 +59,53 @@ outer:
 	PCALIGN $64
 	LONG $0x90909090; LONG $0x90909090; LONG $0x90909090; LONG $0x90909090
 
+	// The search loop keeps its state in registers, as C's does (no stores
+	// but the two table updates): AX curr, DX idxs0, R12 hl0 then hl1,
+	// R13 idxl0 then idxl1. The hit paths save curr, hl1 and idxl1 to
+	// CURR, HL1 and IDXL1 for the code after the match.
 inner:
-	HASHS(R8, BX)
-	MOVL (R15)(BX*4), DX
-	MOVL DX, IDXS0
-	MOVL baseIdx+76(FP), AX
-	ADDL R8, AX
-	MOVL AX, CURR
-	MOVL AX, (DI)(R12*4)    // hashLong[hl0] = curr
-	MOVL AX, (R15)(BX*4)    // hashSmall[hs0] = curr
+	MOVQ  (SI)(R8*1), BX
+	IMULQ PRIMES, BX
+	MOVQ  hShiftS+104(FP), CX
+	SHRQ  CX, BX            // hs0
+	MOVL  baseIdx+76(FP), AX
+	ADDL  R8, AX            // curr
+	MOVL  (R15)(BX*4), DX   // idxs0
+	MOVL  AX, (DI)(R12*4)   // hashLong[hl0] = curr
+	MOVL  AX, (R15)(BX*4)   // hashSmall[hs0] = curr
 
-	// repcode at ip+1. The misses fall through: the loop's only taken
-	// branch is then the one back to inner (C's layout).
-	TESTL R14, R14
-	JEQ   norep
-	LEAQ  1(R8), AX
-	SUBQ  R14, AX
-	MOVL  (SI)(AX*1), DX
-	CMPL  DX, 1(SI)(R8*1)
-	JEQ   repmatch
+	// repcode at ip+1: C compares first and tests offset1 > 0 only on
+	// equality. The misses fall through: the loop's only taken branch is
+	// then the one back to inner (C's layout).
+	MOVQ R8, BX
+	SUBQ R14, BX            // ip - offset1
+	MOVL 1(SI)(BX*1), CX
+	CMPL CX, 1(SI)(R8*1)
+	JEQ  maybeRep
 
 norep:
-	HASHL(R9, BX)
-	MOVL BX, HL1
+	MOVQ  (SI)(R9*1), R12
+	IMULQ PRIMEL, R12
+	MOVQ  hShiftL+88(FP), CX
+	SHRQ  CX, R12           // hl1 (hl0 is no longer needed)
 
 	// long match at ip (see LONGCAND)
-	MOVL CURR, CX
+	MOVL AX, CX
 	LONGCAND
 
 nolong:
-	MOVL (DI)(BX*4), AX
-	MOVL AX, IDXL1          // idxl1 = hashLong[hl1]
+	MOVL (DI)(R12*4), R13   // idxl1 = hashLong[hl1] (idxl0 is no longer needed)
 
 	// short match at ip (see SHORTCAND)
-	MOVL IDXS0, BX
 	SHORTCAND
 
 noshort:
-	CMPQ R9, R11
+	CMPQ R9, NEXTSTEP
 	JGE  stepinc
 
 nostep:
-	MOVQ R9, R8             // ip = ip1
+	MOVQ R9, R8             // ip = ip1; hl0 = hl1 and idxl0 = idxl1 are in place
 	ADDQ STEP, R9           // ip1 += step
-	MOVL HL1, R12           // hl0 = hl1
-	MOVL IDXL1, R13         // idxl0 = idxl1
 	CMPQ R9, ILIMIT
 	JLE  inner
 	JMP  cleanup
@@ -109,12 +114,17 @@ stepinc:
 	PREFETCHT0 64(SI)(R9*1)  // C: PREFETCH_L1(ip1 + 64), PREFETCH_L1(ip1 + 128)
 	PREFETCHT0 128(SI)(R9*1)
 	INCQ STEP
-	ADDQ $256, R11
+	ADDQ $256, NEXTSTEP
 	JMP  nostep
+
+maybeRep:
+	TESTL R14, R14
+	JEQ   norep
+	MOVL  AX, CURR
 
 repmatch:
 	// mLength = count(b, ip+1+4, ip+1+4-offset1, iend) + 4
-	LEAQ  4(SI)(AX*1), R10  // ip+1+4-offset1 (step is not needed after a repcode)
+	LEAQ  5(SI)(BX*1), R10  // ip+1+4-offset1 (step is not needed after a repcode)
 	LEAQ  5(SI)(R8*1), R9
 	MOVQ  iend+56(FP), R13
 	SUBQ  R8, R13
@@ -129,6 +139,8 @@ repmatch:
 	JMP   store
 
 longmatch:
+	MOVL CX, CURR
+	MOVL R12, HL1
 	MOVL R13, DX
 	SUBL baseIdx+76(FP), DX  // matchl0
 	MOVQ R9, IP1
@@ -146,7 +158,9 @@ longmatch:
 
 searchlong:
 	// C: _search_next_long.
-	MOVL BX, DX
+	MOVL CX, CURR
+	MOVL R12, HL1
+	MOVL R13, IDXL1
 	SUBL baseIdx+76(FP), DX // matchs0
 	MOVQ R9, IP1
 	LEAQ 4(SI)(R8*1), R9
