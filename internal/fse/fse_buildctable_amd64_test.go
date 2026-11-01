@@ -253,3 +253,42 @@ func TestCompressWeightsAsmEquiv(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildCTableSmallTableLog: at tableLog 1-4 C's step can be a multiple
+// of the table size (tableLog 1 and 3), so its spread leaves tableSymbol
+// mostly unwritten and the build then indexes cumul and the state table
+// with stale workspace bytes. BuildCTable must not write past ct or wksp
+// there (the Go body runs those logs; it may panic, recoverably).
+func TestBuildCTableSmallTableLog(t *testing.T) {
+	for tl := uint(1); tl <= 4; tl++ {
+		maxSym := uint(1)<<tl - 1
+		norm := make([]int16, maxSym+1)
+		for s := range norm {
+			norm[s] = 1
+		}
+		ctSize := CTableSizeU32(tl, maxSym)
+		wkspSize := BuildCTableWorkspaceSize(maxSym, tl) + 8
+		ct := make([]uint32, ctSize+4096)
+		for j := range ct {
+			ct[j] = 0xDEADBEEF
+		}
+		wksp := make([]byte, wkspSize+4096)
+		for j := range wksp {
+			wksp[j] = 0xC3 // stale workspace: symbol 0xC3
+		}
+		func() {
+			defer func() { _ = recover() }()
+			_ = BuildCTable(CTable(ct[:ctSize]), norm, maxSym, tl, wksp[:wkspSize])
+		}()
+		for j := ctSize; j < len(ct); j++ {
+			if ct[j] != 0xDEADBEEF {
+				t.Fatalf("tableLog %d: word %d past ct written", tl, j-ctSize)
+			}
+		}
+		for j := wkspSize; j < len(wksp); j++ {
+			if wksp[j] != 0xC3 {
+				t.Fatalf("tableLog %d: byte %d past wksp written", tl, j-wkspSize)
+			}
+		}
+	}
+}
