@@ -13,9 +13,11 @@ func init() {
 
 // buildCTableAsm is gcc's HUF_buildCTable_wksp (v1.5.7, ref/zstd/programs/zstd),
 // transliterated: it builds ct from count and returns C's result, maxNbBits or
-// an error code (-46 maxSymbolValue too large, -1 generic), or -2 when every
-// count is zero (undefined in C). Preconditions (checked by buildCTable):
-// len(ct) > maxSymbolValue+1 when maxSymbolValue <= 255, and maxNbBits <= 12.
+// an error code (-46 maxSymbolValue too large, -1 generic), -2 when every
+// count is zero, or -3 when maxNbBits is infeasible (more than 2^maxNbBits
+// nonzero counts); C's behaviour is undefined for both. Preconditions
+// (checked by buildCTable): len(ct) > maxSymbolValue+1 when maxSymbolValue
+// <= 255, and maxNbBits <= 12.
 //
 //go:noescape
 func buildCTableAsm(ct *CElt, count *[256]uint32, maxSymbolValue, maxNbBits uint32) uint64
@@ -32,6 +34,10 @@ func buildCTable(ct CTable, count *[256]uint32, maxSymbolValue, maxNbBits uint32
 		return 0, ErrGeneric
 	case -2:
 		panic("huf: BuildCTable with every count zero")
+	case -3:
+		// Infeasible maxNbBits: the Go body raises its own panic (index out
+		// of range in setMaxHeight), as before the assembly.
+		return buildCTableGeneric(ct, count, maxSymbolValue, maxNbBits)
 	default:
 		return uint32(r), nil
 	}

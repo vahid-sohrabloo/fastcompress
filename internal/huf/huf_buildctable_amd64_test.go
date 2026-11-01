@@ -20,7 +20,11 @@ func histogram(r *rand.Rand, count *[256]uint32, maxSym int, mode int) int {
 			c = 7
 		case 2: // skewed powers of two
 			c = 1 << r.IntN(17)
-		case 3: // Fibonacci-like: deep trees
+		case 3: // Fibonacci-like: deep trees. Keep totals below 2^31: a tree
+			// deeper than maxNbBits+31 makes setMaxHeight shift by 32 or
+			// more, which gcc masks and Go does not (C: undefined), so the
+			// two bodies differ there. Blocks are at most 128 KiB, so the
+			// depth stays near 25 in use.
 			a, b := uint32(1), uint32(1)
 			for i := 0; i < s%25; i++ {
 				a, b = b, a+b
@@ -112,5 +116,42 @@ func TestBuildCTableAsmErrors(t *testing.T) {
 	count = [256]uint32{}
 	if r := int64(buildCTableAsm(&ct[0], &count, 255, 11)); r != -2 {
 		t.Errorf("all-zero histogram: %d, want -2", r)
+	}
+}
+
+// TestBuildCTableInfeasibleMaxNbBits: more than 2^maxNbBits nonzero
+// symbols cannot fit maxNbBits. setMaxHeight then runs out of ranks and C
+// indexes huffNode with rankLast's noSymbol (undefined behaviour). Both
+// bodies must panic recoverably instead (the Go body with an index out of
+// range), never fault or write out of bounds.
+func TestBuildCTableInfeasibleMaxNbBits(t *testing.T) {
+	var count [256]uint32
+	for mnb := uint32(1); mnb <= 7; mnb++ {
+		for _, nsym := range []int{3, 17, 100, 256} {
+			if 1<<mnb >= nsym {
+				continue
+			}
+			for s := range count {
+				count[s] = 0
+				if s < nsym {
+					count[s] = uint32(1 + s*s)
+				}
+			}
+			for _, body := range []string{"go", "dispatch"} {
+				ct := make(CTable, CTableSize(255))
+				var p any
+				func() {
+					defer func() { p = recover() }()
+					if body == "go" {
+						buildCTableGeneric(ct, &count, 255, mnb)
+					} else {
+						buildCTable(ct, &count, 255, mnb)
+					}
+				}()
+				if p == nil {
+					t.Errorf("maxNbBits %d, %d symbols, %s: no panic", mnb, nsym, body)
+				}
+			}
+		}
 	}
 }

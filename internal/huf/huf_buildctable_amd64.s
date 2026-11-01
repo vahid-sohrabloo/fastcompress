@@ -18,6 +18,9 @@
 //   - MOVOU/MOVUPS for C's movdqa/movaps: Go does not 16-align SP;
 //   - an all-zero histogram returns -2 (C scans below huffNode0 there,
 //     undefined behaviour; buildCTable panics as the Go body does);
+//   - an infeasible maxNbBits (more than 2^maxNbBits nonzero symbols)
+//     returns -3 where setMaxHeight would index huffNode with noSymbol
+//     (C: undefined behaviour; buildCTable runs the Go body, which panics);
 //   - the call to HUF_simpleQuickSort keeps C's calling convention (DI = arr,
 //     SI = low, DX = high; BX, BP and R12-R15 preserved).
 //
@@ -469,7 +472,9 @@ L15581:
 	SUBL $0x1000, AX                         // 1566c subl   $0x1000,%eax
 	MOVL $13, R11                            // 15671 movl   $0xd,%r11d
 	MOVL $12, R8                             // 15677 movl   $0xc,%r8d
-	ADDB $1, 0x7(BX)(CX*8)                   // 1567d addb   $0x1,0x7(%rbx,%rcx,8)
+	CMPL CX, $-0xf0f0f10                     // (not in C) rankLast[12] == noSymbol: infeasible
+	JEQ infeasible
+	ADDB $1, 0x7(BX)(CX*8)                  // 1567d addb   $0x1,0x7(%rbx,%rcx,8)
 	MOVQ CX, DI                              // 15682 movq   %rcx,%rdi
 
 L15685:
@@ -834,6 +839,10 @@ L15b03:
 
 allzero:
 	MOVQ $-2, ret+24(FP)
+	RET
+
+infeasible:
+	MOVQ $-3, ret+24(FP)
 	RET
 
 // hufSimpleQuickSort is gcc's HUF_simpleQuickSort (0x10a60-0x10cf8, the
