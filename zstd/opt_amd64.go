@@ -54,15 +54,17 @@ func optParseAsm(p *optAsmParams) (status int)
 // optParseFast is compressBlockOptGeneric's match loop (noDict, from ip,
 // with the statistics set by rescaleFreqs) in assembly, storing into ss and
 // returning the last literals' size. It returns ok = false, doing nothing,
-// when the assembly is off or a precondition fails: ms.btAsm set up for
-// this block with mls 4 to 6 (btAsmSetup), dynamic prices with compressed
+// when the assembly is off or a precondition fails: ms.btAsm set up for this
+// block with mls 4 to 6 (btAsmSetup), dynamic prices with compressed
 // literals, minMatch 3 or 4 (minML), 0 < ip, a block of at most
-// blockSizeMax, and the finder's preconditions at ip (btGetAllMatchesFast's),
-// which then hold at every later position searched.
+// blockSizeMax, sufficientLen below optNum, and the finder's preconditions
+// at ip (btGetAllMatchesFast's), which then hold at every later position
+// searched.
 func optParseFast(ms *matchState, ss *seqStore, rep *[repNum]uint32, ip, anchor, iend int, minML, sufficientLen uint32) (int, bool) {
 	o := &ms.opt
 	bp := &ms.btAsm
 	if !useOptAsm || !bp.ok || bp.matches != &o.matchTable[0] || bp.iLimit != iend || ip <= 0 || anchor > ip ||
+		sufficientLen >= optNum || // bounds the first stage's writes (opt[1..maxML+1], maxML <= sufficientLen)
 		iend-anchor > blockSizeMax || o.priceType == zopPredef || !compressedLiterals(o) || (minML != 3 && minML != 4) ||
 		bp.lowestValid > uint32(ip)+bp.baseIdx || ms.nextToUpdate < bp.baseIdx {
 		return 0, false

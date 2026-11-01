@@ -42,6 +42,13 @@
 // minML, 88 ll0Price (LL_PRICE(0)), 96 matchLengthSumBasePrice + 51, 100
 // sufficientLen, 104 b+ip, 112-143 lastStretch, 144 ilimit-ip, 152
 // iend-ip, 160 the match table, 168 rep.
+// p (40), b+ip (104), the match table (160) and rep (168) are pointers
+// held in untyped locals across CALL ·btGetAllNoDictAsm. That is safe only
+// because both functions are NOSPLIT assembly: the runtime never
+// async-preempts assembly and a NOSPLIT frame never grows the stack, so
+// no stack scan or copy happens while they are live. If the callee became
+// a Go function or lost NOSPLIT, this frame would need a stack map
+// (NO_LOCAL_POINTERS is not enough once the stack can move).
 #define F_P 40(SP)
 #define F_IP 48(SP)
 #define F_ANCHOR 56(SP)
@@ -276,9 +283,14 @@ lljoin:
 	MOVL -4(BX)(CX*8), R10      // maxML
 	CMPL R10, F_SUFF
 	JLS  firstprices
+	// lastStretch = {litlen 0, maxML, maxOffBase}; its price and rep are
+	// never read (the Go save loop reads litlen, mlen and off), zeroed so
+	// that the opt[storeEnd] copy below holds no stale stack bytes
+	PXOR   X0, X0
+	MOVUPS X0, F_LS(SP)
+	MOVUPS X0, F_LS+16(SP)
 	MOVL DX, F_LS+O_OFF(SP)
 	MOVL R10, F_LS+O_MLEN(SP)
-	MOVL $0, F_LS+O_LITLEN(SP)
 	MOVQ $0, F_CUR
 	MOVQ R10, F_LASTPOS
 	JMP  shortest
@@ -574,11 +586,14 @@ inc256:
 cstop:
 	// longest match ends the forward pass: lastStretch = {litlen 0, its
 	// mlen and offBase}, lastPos = cur + longestML
+	// (price and rep zeroed as for the immediate encoding)
+	PXOR   X0, X0
+	MOVUPS X0, F_LS(SP)
+	MOVUPS X0, F_LS+16(SP)
 	MOVL F_NB, CX
 	MOVL -8(BX)(CX*8), AX
 	MOVL AX, F_LS+O_OFF(SP)
 	MOVL DX, F_LS+O_MLEN(SP)
-	MOVL $0, F_LS+O_LITLEN(SP)
 	ADDL R9, DX
 	MOVL R9, F_CUR
 	MOVL DX, F_LASTPOS
