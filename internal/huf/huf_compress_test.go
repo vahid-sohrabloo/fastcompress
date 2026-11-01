@@ -355,3 +355,17 @@ func TestWriteCTableRoundHeader(t *testing.T) {
 		t.Errorf("small wksp: err=%v", err)
 	}
 }
+
+// TestBuildCTableAllZeroPanics: an all-zero histogram must panic, not loop
+// forever on buildTree's masked indices.
+func TestBuildCTableAllZeroPanics(t *testing.T) {
+	var count [256]uint32
+	ct := make(CTable, CTableSize(255))
+	wksp := make([]byte, CTableWorkspaceSize)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("BuildCTable returned for an all-zero histogram")
+		}
+	}()
+	BuildCTable(ct, &count, 255, 11, wksp)
+}

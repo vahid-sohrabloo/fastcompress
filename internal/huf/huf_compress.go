@@ -501,8 +501,11 @@ const startNode = SymbolValueMax + 1 // C: STARTNODE
 func buildTree(tbl *[2 * (SymbolValueMax + 1)]nodeElt, maxSymbolValue uint32) int {
 	const mask = len(tbl) - 1
 	tNonNull := int(maxSymbolValue) + 1
-	for tbl[tNonNull&mask].count == 0 {
+	for tNonNull > 0 && tbl[tNonNull&mask].count == 0 {
 		tNonNull--
+	}
+	if tNonNull == 0 {
+		panic("huf: BuildCTable with every count zero") // C: undefined; the masks would loop forever
 	}
 	tNodeNb := startNode + 1
 	tLowS := tNonNull
