@@ -292,3 +292,52 @@ func TestBuildCTableSmallTableLog(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeCountAsmLowCounts compares normalizeCount's assembly with
+// the Go body on histograms of ones (and a few twos) whose total is close
+// to the table size: each proba rounds up, the overshoot sends them to
+// normalizeM2, and there they reach the all-low branch (no zero holes) and
+// the total == 0 round robin (with holes). (Small nbSeq can do this in
+// ZSTD_NCountCost.)
+func TestNormalizeCountAsmLowCounts(t *testing.T) {
+	if !useFSENormAsm {
+		t.Skip("fse-norm assembly is off")
+	}
+	r := rand.New(rand.NewPCG(15, 16))
+	var count [256]uint32
+	var normA, normG [256]int16
+	for tl := uint(MinTableLog); tl <= MaxTableLog; tl++ {
+		ts := 1 << tl
+		for n := ts / 3; n < ts && n <= 256; n++ {
+			for holes := 0; holes < 2; holes++ {
+				for twos := 0; twos < 3; twos++ {
+					count = [256]uint32{}
+					maxSym, total, placed := 0, 0, 0
+					for s := 0; s < 256 && placed < n; s++ {
+						if holes == 1 && s%3 == 1 && 255-s > n-placed {
+							continue
+						}
+						c := uint32(1)
+						if twos > 0 && r.IntN(4*twos) == 0 {
+							c = 2
+						}
+						count[s] = c
+						total += int(c)
+						placed++
+						maxSym = s
+					}
+					if maxSym == 0 {
+						continue
+					}
+					for _, low := range []bool{false, true} {
+						gotG, errG := normalizeCountGeneric(normG[:maxSym+1], tl, count[:maxSym+1], total, uint(maxSym), low)
+						gotA, errA := normalizeCount(normA[:maxSym+1], tl, count[:maxSym+1], total, uint(maxSym), low)
+						if gotA != gotG || errA != errG || (errG == nil && normA != normG) {
+							t.Fatalf("tableLog %d, %d symbols, holes %d, twos %d, total %d: asm %d %v, Go %d %v", tl, n, holes, twos, total, gotA, errA, gotG, errG)
+						}
+					}
+				}
+			}
+		}
+	}
+}
