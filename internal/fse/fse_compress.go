@@ -70,9 +70,15 @@ func highbit32(v uint32) uint { return uint(bits.Len32(v)) - 1 } // C: bits.h:ZS
 
 // BuildCTable builds the compression table from a normalized count. wksp must
 // be at least BuildCTableWorkspaceSize bytes.
-// C: fse_compress.c:FSE_buildCTable_wksp. Deviation: the cumul array is a
-// local stack array instead of part of the workspace (cannot change output).
+// C: fse_compress.c:FSE_buildCTable_wksp
 func BuildCTable(ct CTable, norm []int16, maxSymbol, tableLog uint, wksp []byte) error {
+	return buildCTable(ct, norm, maxSymbol, tableLog, wksp)
+}
+
+// buildCTableGeneric is the Go body of BuildCTable. Deviation: the cumul
+// array is a local stack array instead of part of the workspace (cannot
+// change output).
+func buildCTableGeneric(ct CTable, norm []int16, maxSymbol, tableLog uint, wksp []byte) error {
 	tableSize := uint32(1) << tableLog
 	tableMask := tableSize - 1
 	step := tableSize>>1 + tableSize>>3 + 3 // C: FSE_TABLESTEP
