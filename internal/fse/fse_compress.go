@@ -633,18 +633,42 @@ func compressUsingCTableGeneric(dst, src []byte, ct CTable, fast bool) int {
 		flush()
 	}
 
-	// 4 encodings per loop
-	for ip > 0 {
-		ip--
-		EncodeSymbol(&bitC, &c2, uint32(src[ip]))
-		ip--
-		EncodeSymbol(&bitC, &c1, uint32(src[ip]))
-		ip--
-		EncodeSymbol(&bitC, &c2, uint32(src[ip]))
-		ip--
-		EncodeSymbol(&bitC, &c1, uint32(src[ip]))
-		flush()
+	// 4 encodings per loop (ip is a multiple of 4 here). The stream and the
+	// states live in locals: through the structs, every step would reload
+	// what the previous one stored. Each step is EncodeSymbol, each flush
+	// FlushBits (FlushBitsFast when fast).
+	container, bitPos, ptr, endPtr := bitC.Raw()
+	buf := bitC.Buf()
+	stateTable, symbolTT := c1.stateTable, c1.symbolTT
+	v1, v2 := c1.value, c2.value
+	// nbBitsOut <= MaxTableLog+1, so bitPos stays below 7 + 4*13 < 64 and a
+	// flush moves at most 7 bytes: the &31 and &63 change no shift, they
+	// spare the compiler's large-shift fix-ups.
+	enc := func(v uint32, sym byte) uint32 {
+		tt := symbolTT[2*uint(sym) : 2*uint(sym)+2]
+		nbBitsOut := (v + tt[1]) >> 16 & 31
+		container |= uint64(v) & (1<<nbBitsOut - 1) << (bitPos & 63)
+		bitPos += uint(nbBitsOut)
+		return stateAt(stateTable, v>>nbBitsOut+tt[0])
 	}
+	for ip > 0 {
+		ip -= 4
+		s := src[ip : ip+4]
+		v2 = enc(v2, s[3])
+		v1 = enc(v1, s[2])
+		v2 = enc(v2, s[1])
+		v1 = enc(v1, s[0])
+		nbBytes := int(bitPos >> 3)
+		binary.LittleEndian.PutUint64(buf[ptr:], container)
+		ptr += nbBytes
+		if !fast && ptr > endPtr {
+			ptr = endPtr
+		}
+		bitPos &= 7
+		container >>= uint(nbBytes) * 8 & 63
+	}
+	bitC.SetRaw(container, bitPos, ptr)
+	c1.value, c2.value = v1, v2
 
 	FlushCState(&bitC, &c2)
 	FlushCState(&bitC, &c1)
