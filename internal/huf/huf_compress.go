@@ -99,10 +99,8 @@ func setNbBits(e *CElt, nbBits uint) { *e = CElt(nbBits) }
 
 // C: HUF_setValue
 func setValue(e *CElt, value uint) {
-	nbBits := getNbBits(*e)
-	if nbBits > 0 {
-		*e |= CElt(uint64(value) << (64 - nbBits))
-	}
+	// C skips nbBits 0; in Go a shift by 64 gives 0, so that case needs no branch.
+	*e |= CElt(uint64(value) << (64 - getNbBits(*e)))
 }
 
 func highbit32(v uint32) uint32 { return uint32(bits.Len32(v)) - 1 } // C: bits.h:ZSTD_highbit32 (v != 0)
@@ -433,10 +431,12 @@ func sortSymbols(huffNode []nodeElt, count *[256]uint32, maxSymbolValue uint32, 
 		rankPosition[lowerRank].base++
 	}
 
-	// Set up the rankPosition table
+	// Set up the rankPosition table (the running sum stays in a register)
+	sum := rankPosition[rankPositionTableSize-1].base
 	for n := rankPositionTableSize - 1; n > 0; n-- {
-		rankPosition[n-1].base += rankPosition[n].base
-		rankPosition[n-1].curr = rankPosition[n-1].base
+		sum += rankPosition[n-1].base
+		rankPosition[n-1].base = sum
+		rankPosition[n-1].curr = sum
 	}
 
 	// Insert each symbol into their appropriate bucket
@@ -463,83 +463,91 @@ const startNode = SymbolValueMax + 1 // C: STARTNODE
 
 // buildTree builds an unlimited-depth Huffman tree in the sorted array and
 // returns the smallest node. tbl is C's huffNode0; C's huffNode is tbl[1:] and
-// index -1 (the barrier) is tbl[0], so C index i is tbl[i+1] here.
+// index -1 (the barrier) is tbl[0]. The t-prefixed indices below are tbl
+// indices, C's index plus 1, and parent holds a tbl index too (only this
+// function reads it). Every index is below len(tbl), a power of 2, so the
+// masks change no index and drop the bounds checks.
 // C: huf_compress.c:HUF_buildTree
 func buildTree(tbl *[2 * (SymbolValueMax + 1)]nodeElt, maxSymbolValue uint32) int {
-	h := func(i int) *nodeElt { return &tbl[i+1] } // C: huffNode[i], i >= -1
-
-	nonNullRank := int(maxSymbolValue)
-	for h(nonNullRank).count == 0 {
-		nonNullRank--
+	const mask = len(tbl) - 1
+	tNonNull := int(maxSymbolValue) + 1
+	for tbl[tNonNull&mask].count == 0 {
+		tNonNull--
 	}
-	nodeNb := startNode
-	lowS := nonNullRank
-	nodeRoot := nodeNb + lowS - 1
-	lowN := nodeNb
-	h(nodeNb).count = h(lowS).count + h(lowS-1).count
-	h(lowS).parent = uint16(nodeNb)
-	h(lowS - 1).parent = uint16(nodeNb)
-	nodeNb++
-	lowS -= 2
-	for n := nodeNb; n <= nodeRoot; n++ {
-		h(n).count = 1 << 30
+	tNodeNb := startNode + 1
+	tLowS := tNonNull
+	tNodeRoot := tNodeNb + tLowS - 2 // C: nodeRoot = nodeNb + lowS - 1
+	tLowN := tNodeNb
+	tbl[tNodeNb&mask].count = tbl[tLowS&mask].count + tbl[(tLowS-1)&mask].count
+	tbl[tLowS&mask].parent = uint16(tNodeNb)
+	tbl[(tLowS-1)&mask].parent = uint16(tNodeNb)
+	tNodeNb++
+	tLowS -= 2
+	for t := tNodeNb; t <= tNodeRoot; t++ {
+		tbl[t&mask].count = 1 << 30
 	}
-	h(-1).count = 1 << 31 // fake entry, strong barrier
+	tbl[0].count = 1 << 31 // fake entry, strong barrier
 
-	// create parents
-	for nodeNb <= nodeRoot {
-		var n1, n2 int
-		if h(lowS).count < h(lowN).count {
-			n1 = lowS
-			lowS--
+	// create parents (the counts already loaded are reused, as gcc does)
+	for tNodeNb <= tNodeRoot {
+		var t1, t2 int
+		var c1, c2 uint32
+		cS, cN := tbl[tLowS&mask].count, tbl[tLowN&mask].count
+		if cS < cN {
+			t1, c1 = tLowS, cS
+			tLowS--
+			cS = tbl[tLowS&mask].count
 		} else {
-			n1 = lowN
-			lowN++
+			t1, c1 = tLowN, cN
+			tLowN++
+			cN = tbl[tLowN&mask].count
 		}
-		if h(lowS).count < h(lowN).count {
-			n2 = lowS
-			lowS--
+		if cS < cN {
+			t2, c2 = tLowS, cS
+			tLowS--
 		} else {
-			n2 = lowN
-			lowN++
+			t2, c2 = tLowN, cN
+			tLowN++
 		}
-		h(nodeNb).count = h(n1).count + h(n2).count
-		h(n1).parent = uint16(nodeNb)
-		h(n2).parent = uint16(nodeNb)
-		nodeNb++
+		tbl[tNodeNb&mask].count = c1 + c2
+		tbl[t1&mask].parent = uint16(tNodeNb)
+		tbl[t2&mask].parent = uint16(tNodeNb)
+		tNodeNb++
 	}
 
 	// distribute weights (unlimited tree height)
-	h(nodeRoot).nbBits = 0
-	for n := nodeRoot - 1; n >= startNode; n-- {
-		h(n).nbBits = h(int(h(n).parent)).nbBits + 1
+	tbl[tNodeRoot&mask].nbBits = 0
+	for t := tNodeRoot - 1; t >= startNode+1; t-- {
+		tbl[t&mask].nbBits = tbl[int(tbl[t&mask].parent)&mask].nbBits + 1
 	}
-	for n := 0; n <= nonNullRank; n++ {
-		h(n).nbBits = h(int(h(n).parent)).nbBits + 1
+	for t := 1; t <= tNonNull; t++ {
+		tbl[t&mask].nbBits = tbl[int(tbl[t&mask].parent)&mask].nbBits + 1
 	}
-	return nonNullRank
+	return tNonNull - 1
 }
 
 // buildCTableFromTree. C: huf_compress.c:HUF_buildCTableFromTree
 func buildCTableFromTree(ct CTable, huffNode []nodeElt, nonNullRank int, maxSymbolValue, maxNbBits uint32) {
-	var nbPerRank, valPerRank [TableLogMax + 1]uint16
+	// Every nbBits here is at most maxNbBits <= TableLogMax < 16, so the &15
+	// masks change no index and drop the bounds checks.
+	var nbPerRank, valPerRank [16]uint16
 	alphabetSize := int(maxSymbolValue + 1)
-	for n := 0; n <= nonNullRank; n++ {
-		nbPerRank[huffNode[n].nbBits]++
+	for _, e := range huffNode[:nonNullRank+1] {
+		nbPerRank[e.nbBits&15]++
 	}
 	// determine starting value per rank
 	var min uint16
 	for n := int(maxNbBits); n > 0; n-- {
-		valPerRank[n] = min // get starting value within each rank
-		min += nbPerRank[n]
+		valPerRank[n&15] = min // get starting value within each rank
+		min += nbPerRank[n&15]
 		min >>= 1
 	}
-	elts := ct[1:]
-	for n := 0; n < alphabetSize; n++ {
-		setNbBits(&elts[huffNode[n].byte], uint(huffNode[n].nbBits)) // push nbBits per symbol, symbol order
+	elts := ct[1 : alphabetSize+1]
+	for _, e := range huffNode[:alphabetSize] {
+		setNbBits(&elts[e.byte], uint(e.nbBits)) // push nbBits per symbol, symbol order
 	}
-	for n := 0; n < alphabetSize; n++ { // assign value within rank, symbol order
-		nb := getNbBits(elts[n])
+	for n := range elts { // assign value within rank, symbol order
+		nb := getNbBits(elts[n]) & 15
 		setValue(&elts[n], uint(valPerRank[nb]))
 		valPerRank[nb]++
 	}
