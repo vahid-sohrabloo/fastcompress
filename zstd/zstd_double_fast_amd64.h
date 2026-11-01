@@ -140,7 +140,6 @@ repmatch:
 	MOVQ  R8, R9
 	SUBQ  anchor+120(FP), R9
 	MOVL  $1, R12           // repcode1ToOffBase
-	MOVQ  $0, RETSEL           // return to matchstored
 	JMP   store
 
 longmatch:
@@ -240,8 +239,53 @@ matchfound:
 nohl1:
 	MOVQ R8, R9
 	SUBQ anchor+120(FP), R9
-	MOVQ $0, RETSEL
-	JMP  store
+
+	// store: R9 litLen (literals from anchor), R12 offBase, AX matchLength;
+	// falls through to matchstored. Clobbers R9-R11, R13, BX, CX, X0.
+store:
+	TESTQ R9, R9
+	JEQ   storeseq
+	MOVQ  lits+32(FP), R10
+	ADDQ  nLits+136(FP), R10
+	MOVQ  anchor+120(FP), R11
+	ADDQ  R9, nLits+136(FP)
+	// up to 16 literals: one 16-byte copy (C: ZSTD_storeSeq's ZSTD_copy16).
+	// The literal buffer has 16 bytes of slack (compressBlockDoubleFastNoDict
+	// checks), and the source must hold the 16 bytes (else fastCopyLits).
+	CMPQ  R9, $16
+	JA    litcall
+	LEAQ  16(R11), CX
+	CMPQ  CX, iend+56(FP)
+	JA    litcall
+	MOVOU (SI)(R11*1), X0
+	MOVOU X0, (R10)
+	JMP   storeseq
+
+litcall:
+	ADDQ  SI, R11
+	CALL  ·fastCopyLits(SB)
+
+storeseq:
+	MOVQ seqs+24(FP), R10
+	MOVQ nSeq+128(FP), R11
+	MOVL R12, (R10)(R11*8)     // offBase
+	MOVW R9, 4(R10)(R11*8)     // litLength
+	LEAQ -3(AX), CX            // mlBase = matchLength - MINMATCH
+	MOVW CX, 6(R10)(R11*8)
+	CMPQ R9, $0xFFFF
+	JLS  nolongll
+	MOVL $1, llType+152(FP)    // lltLiteralLength
+	MOVL R11, llPos+156(FP)
+
+nolongll:
+	CMPQ CX, $0xFFFF
+	JLS  nolongml
+	MOVL $2, llType+152(FP)    // lltMatchLength
+	MOVL R11, llPos+156(FP)
+
+nolongml:
+	INCQ R11
+	MOVQ R11, nSeq+128(FP)
 
 matchstored:
 	ADDQ AX, R8             // ip += mLength
@@ -298,66 +342,23 @@ reploop:
 	MOVL  DX, (R15)(BX*4)   // hashSmall[hashS(ip)] = idx(ip)
 	HASHL(R8, BX)
 	MOVL  DX, (DI)(BX*4)    // hashLong[hashL(ip)] = idx(ip)
-	XORL  R9, R9            // no literals
-	MOVL  $1, R12           // repcode1ToOffBase
-	MOVQ  $1, RETSEL           // return to afterrep
-	JMP   store
+	// store the sequence (no literals, repcode1ToOffBase), as store does
+	MOVQ  seqs+24(FP), R10
+	MOVQ  nSeq+128(FP), R11
+	MOVQ  $1, (R10)(R11*8)  // offBase 1, litLength 0
+	LEAQ  -3(AX), CX        // mlBase = matchLength - MINMATCH
+	MOVW  CX, 6(R10)(R11*8)
+	CMPQ  CX, $0xFFFF
+	JLS   repshort
+	MOVL  $2, llType+152(FP) // lltMatchLength
+	MOVL  R11, llPos+156(FP)
 
-afterrep:
+repshort:
+	INCQ  R11
+	MOVQ  R11, nSeq+128(FP)
 	ADDQ AX, R8
 	MOVQ R8, anchor+120(FP)
 	JMP  reploop
-
-	// store: R9 litLen (literals from anchor), R12 offBase, AX matchLength;
-	// returns to matchstored (RETSEL = 0) or afterrep (RETSEL = 1).
-	// Clobbers R9-R11, R13, BX, CX, X0.
-store:
-	TESTQ R9, R9
-	JEQ   storeseq
-	MOVQ  lits+32(FP), R10
-	ADDQ  nLits+136(FP), R10
-	MOVQ  anchor+120(FP), R11
-	ADDQ  R9, nLits+136(FP)
-	// up to 16 literals: one 16-byte copy (C: ZSTD_storeSeq's ZSTD_copy16).
-	// The literal buffer has 16 bytes of slack (compressBlockDoubleFastNoDict
-	// checks), and the source must hold the 16 bytes (else fastCopyLits).
-	CMPQ  R9, $16
-	JA    litcall
-	LEAQ  16(R11), CX
-	CMPQ  CX, iend+56(FP)
-	JA    litcall
-	MOVOU (SI)(R11*1), X0
-	MOVOU X0, (R10)
-	JMP   storeseq
-
-litcall:
-	ADDQ  SI, R11
-	CALL  ·fastCopyLits(SB)
-
-storeseq:
-	MOVQ seqs+24(FP), R10
-	MOVQ nSeq+128(FP), R11
-	MOVL R12, (R10)(R11*8)     // offBase
-	MOVW R9, 4(R10)(R11*8)     // litLength
-	LEAQ -3(AX), CX            // mlBase = matchLength - MINMATCH
-	MOVW CX, 6(R10)(R11*8)
-	CMPQ R9, $0xFFFF
-	JLS  nolongll
-	MOVL $1, llType+152(FP)    // lltLiteralLength
-	MOVL R11, llPos+156(FP)
-
-nolongll:
-	CMPQ CX, $0xFFFF
-	JLS  nolongml
-	MOVL $2, llType+152(FP)    // lltMatchLength
-	MOVL R11, llPos+156(FP)
-
-nolongml:
-	INCQ R11
-	MOVQ R11, nSeq+128(FP)
-	CMPQ RETSEL, $0
-	JEQ  matchstored
-	JMP  afterrep
 
 cleanup:
 	MOVL R14, rep1Out+144(FP)

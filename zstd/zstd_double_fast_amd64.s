@@ -26,7 +26,6 @@
 #define IDXL1 24(SP)
 #define IP1 32(SP)
 #define STEP 40(SP)
-#define RETSEL 48(SP)
 #define ILIMIT 56(SP)
 #define MLEN 64(SP)
 #define MATCHL1 72(SP)
