@@ -450,6 +450,11 @@ func normalizeM2(norm []int16, tableLog uint, count []uint32, total uint64, maxS
 // or 0 for the RLE special case (one symbol holds every count).
 // C: fse_compress.c:FSE_normalizeCount
 func NormalizeCount(norm []int16, tableLog uint, count []uint32, total int, maxSymbol uint, useLowProbCount bool) (uint, error) {
+	return normalizeCount(norm, tableLog, count, total, maxSymbol, useLowProbCount)
+}
+
+// normalizeCountGeneric is the Go body of NormalizeCount.
+func normalizeCountGeneric(norm []int16, tableLog uint, count []uint32, total int, maxSymbol uint, useLowProbCount bool) (uint, error) {
 	if tableLog == 0 {
 		tableLog = DefaultTableLog
 	}

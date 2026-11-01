@@ -102,3 +102,90 @@ func TestBuildCTableAsmBadNorm(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeCountAsmEquiv compares normalizeCountAsm with the Go body:
+// the result, the error and every norm entry. The histograms cover RLE, the
+// normalizeM2 fallback (many counts just above total>>tableLog), tiny
+// totals, alphabets 2-256 and table logs 0-13.
+func TestNormalizeCountAsmEquiv(t *testing.T) {
+	if !useFSENormAsm {
+		t.Skip("fse-norm assembly is off")
+	}
+	r := rand.New(rand.NewPCG(7, 8))
+	var count [256]uint32
+	var normA, normG [256]int16
+	iters := 300000
+	if testing.Short() {
+		iters = 30000
+	}
+	m2 := 0
+	for i := 0; i < iters; i++ {
+		maxSym := []int{1, 2, 12, 35, 52, 255, 1 + r.IntN(255)}[r.IntN(7)]
+		mode := r.IntN(9)
+		total := 0
+		for s := 0; s <= maxSym; s++ {
+			var c int
+			switch mode {
+			case 0:
+				c = r.IntN(4)
+			case 1:
+				c = r.IntN(1 << uint(1+r.IntN(16)))
+			case 2: // near the low threshold: the normalizeM2 path
+				c = 1 + r.IntN(3)
+			case 3:
+				c = 0
+			case 4:
+				c = []int{0, 1, 2, 1000}[r.IntN(4)]
+			case 5:
+				c = r.IntN(100)
+			case 6: // one large count among ones
+				c = 1
+				if s == 0 {
+					c = 1 << uint(8+r.IntN(12))
+				}
+			case 7: // all equal
+				c = 3
+			case 8: // ones and twos, a few large
+				c = 1 + r.IntN(2)
+				if r.IntN(16) == 0 {
+					c = r.IntN(5000)
+				}
+			}
+			count[s] = uint32(c)
+			total += c
+		}
+		if mode == 3 { // RLE
+			s := r.IntN(maxSym + 1)
+			count[s] = 1 + uint32(r.IntN(1000))
+			total = int(count[s])
+		}
+		if total == 0 {
+			count[maxSym] = 1
+			total = 1
+		}
+		tableLog := uint(r.IntN(14))
+		lowProb := r.IntN(2) == 0
+		for j := range normA {
+			normA[j], normG[j] = int16(r.Uint32()), int16(r.Uint32())
+		}
+		gotG, errG := normalizeCountGeneric(normG[:maxSym+1], tableLog, count[:maxSym+1], total, uint(maxSym), lowProb)
+		gotA, errA := normalizeCount(normA[:maxSym+1], tableLog, count[:maxSym+1], total, uint(maxSym), lowProb)
+		if gotA != gotG || errA != errG {
+			t.Fatalf("case %d (mode %d, maxSym %d, tableLog %d, total %d): asm %d %v, Go %d %v", i, mode, maxSym, tableLog, total, gotA, errA, gotG, errG)
+		}
+		if errG != nil || gotG == 0 {
+			continue
+		}
+		if mode == 2 {
+			m2++
+		}
+		for j := 0; j <= maxSym; j++ {
+			if normA[j] != normG[j] {
+				t.Fatalf("case %d (mode %d, maxSym %d, tableLog %d, total %d): norm[%d] asm %d, Go %d", i, mode, maxSym, tableLog, total, j, normA[j], normG[j])
+			}
+		}
+	}
+	if m2 == 0 {
+		t.Fatal("no near-threshold case ran")
+	}
+}
