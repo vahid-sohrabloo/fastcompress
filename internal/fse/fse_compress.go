@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/bits"
+	"unsafe"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
 	"github.com/vahid-sohrabloo/fastzstd/internal/hist"
@@ -116,11 +117,12 @@ func BuildCTable(ct CTable, norm []int16, maxSymbol, tableLog uint, wksp []byte)
 			}
 			pos += n
 		}
+		// C unrolls by 2 (tableSize is even); so does this loop, by hand.
+		ts := tableSymbol[:tableSize]
 		position := uint32(0)
 		for s := uint32(0); s < tableSize; s += 2 {
-			for u := uint32(0); u < 2; u++ {
-				tableSymbol[(position+u*step)&tableMask] = spread[s+u]
-			}
+			ts[position] = spread[s]
+			ts[(position+step)&tableMask] = spread[s+1]
 			position = (position + 2*step) & tableMask
 		}
 	} else {
@@ -137,16 +139,13 @@ func BuildCTable(ct CTable, norm []int16, maxSymbol, tableLog uint, wksp []byte)
 		}
 	}
 
-	// Build table: u16 sorted by symbol order, gives next state value.
-	// C stores the u16s straight into the table; here they go to a local
-	// array first and are packed two per word after, so there is no
-	// (unpredictable) branch on which half a state lands in.
-	if tableLog <= 9 { // the sequence tables (and HUF weights)
-		var states [1 << 9]uint16
-		buildStates(stateTable, tableSymbol, &cumul, tableSize, states[:])
-	} else {
-		var states [1 << MaxTableLog]uint16
-		buildStates(stateTable, tableSymbol, &cumul, tableSize, states[:])
+	// Build table: u16 sorted by symbol order, gives next state value. As in
+	// C, the u16s go straight into the state table, viewed as u16s (the
+	// even state of a pair is the low half of its word).
+	tableU16 := unsafe.Slice((*uint16)(unsafe.Pointer(&stateTable[0])), 2*len(stateTable))
+	for u, s := range tableSymbol[:tableSize] {
+		tableU16[cumul[s]^stateHalfSwap] = uint16(tableSize + uint32(u))
+		cumul[s]++
 	}
 
 	// Build symbol transformation table. Entry s: [2s]=deltaFindState, [2s+1]=deltaNbBits.
@@ -171,21 +170,14 @@ func BuildCTable(ct CTable, norm []int16, maxSymbol, tableLog uint, wksp []byte)
 	return nil
 }
 
-// buildStates is BuildCTable's state table step: states[cumul[s]++] =
-// tableSize + u for each u, then stateTable holds states two per word (the
-// even one in the low half). len(states) >= tableSize >= 2.
-func buildStates(stateTable []uint32, tableSymbol []byte, cumul *[258]uint16, tableSize uint32, states []uint16) {
-	tableSymbol = tableSymbol[:tableSize]
-	for u, s := range tableSymbol {
-		states[cumul[s]] = uint16(tableSize + uint32(u))
-		cumul[s]++
+// stateHalfSwap is 1 on big-endian machines, where the u16 at an even
+// index of a state-table word holds the odd state (its high half).
+var stateHalfSwap = func() uint16 {
+	if binary.NativeEndian.Uint16([]byte{1, 0}) == 1 {
+		return 0
 	}
-	states = states[:tableSize]
-	stateTable = stateTable[:tableSize/2]
-	for i := range stateTable {
-		stateTable[i] = uint32(states[2*i]) | uint32(states[2*i+1])<<16
-	}
-}
+	return 1
+}()
 
 // NCountWriteBound is the worst-case header size.
 // C: fse_compress.c:FSE_NCountWriteBound
