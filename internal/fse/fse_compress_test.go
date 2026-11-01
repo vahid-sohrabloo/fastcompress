@@ -73,6 +73,22 @@ func TestBuildCTableWorkspaceTooSmall(t *testing.T) {
 	}
 }
 
+// A norm that does not sum to the table size must panic, not write past the
+// state table into symbolTT. With a low-probability symbol 0, symbol 2's
+// spread overwrites symbol 1's slots, so cumul[2] (21) plus its 20 slots
+// runs past tableSize 32.
+func TestBuildCTableInvalidNormPanics(t *testing.T) {
+	norm := []int16{-1, 20, 20}
+	ct := make(CTable, CTableSizeU32(5, 2))
+	wksp := make([]byte, BuildCTableWorkspaceSize(2, 5))
+	defer func() {
+		if recover() == nil {
+			t.Error("BuildCTable with an invalid norm did not panic")
+		}
+	}()
+	_ = BuildCTable(ct, norm, 2, 5, wksp)
+}
+
 func TestCTableLayout(t *testing.T) {
 	norm := make([]int16, 256)
 	norm[0], norm[1], norm[2] = 16, 8, 8
