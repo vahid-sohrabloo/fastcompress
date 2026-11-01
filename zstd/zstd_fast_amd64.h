@@ -108,6 +108,8 @@ nostep:
 	JMP  cleanup
 
 stepinc:
+	PREFETCHT0 64(SI)(R9*1)  // C: PREFETCH_L1(ip1 + 64), PREFETCH_L1(ip1 + 128)
+	PREFETCHT0 128(SI)(R9*1)
 	INCQ 16(SP)
 	ADDQ $128, 24(SP)
 	JMP  nostep
