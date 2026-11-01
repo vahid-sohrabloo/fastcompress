@@ -22,7 +22,6 @@
 // Frame locals (hardware SP).
 #define CURR 0(SP)
 #define HL1 8(SP)
-#define IDXS0 16(SP)
 #define IDXL1 24(SP)
 #define IP1 32(SP)
 #define STEP 40(SP)

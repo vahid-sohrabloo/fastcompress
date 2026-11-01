@@ -79,7 +79,12 @@ inner:
 
 	// repcode at ip+1: C compares first and tests offset1 > 0 only on
 	// equality. The misses fall through: the loop's only taken branch is
-	// then the one back to inner (C's layout).
+	// then the one back to inner (C's layout). While offset1 == 0 (until a
+	// frame's first match), every position takes the two taken branches
+	// through maybeRep. gcc's own layout avoids that. It jumps past the
+	// offset1 test on a miss and falls through it on equality. But it
+	// measured slower (Task 20j: L3 x-ray +2.1%, x-ray -B16K +1.0%, xml
+	// -B16K +0.8%), so the layout stays as is.
 	MOVQ R8, BX
 	SUBQ R14, BX            // ip - offset1
 	MOVL 1(SI)(BX*1), CX
