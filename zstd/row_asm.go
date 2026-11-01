@@ -65,7 +65,8 @@ func rowAsmSetup(ms *matchState, mls, rowLog uint32, iend int) {
 // (tables hold every row, searched positions + 16 within the input),
 // mls and rowLog in 4..6, 0 < ip, ilimit + 16 <= iend, and room in ss for
 // every literal and a sequence per 4 input bytes (every match is >= 4),
-// ms.nextToUpdate <= ip's index (the row update starts there), and the
+// baseIdx <= ms.nextToUpdate <= ip's index (the row update starts there
+// and reads b at nextToUpdate - baseIdx), and the
 // window's lowLimit <= ip's index (so lowLimit <= curr at every searched
 // position, which the assembly's candidate bounds rely on).
 func lazyRowRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLowest int,
@@ -73,7 +74,7 @@ func lazyRowRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLo
 	p := &ms.rowAsm
 	nLits, nSeqs := len(ss.literals), len(ss.sequences)
 	if !p.ok || mls < 4 || mls > 6 || rowLog < 4 || rowLog > 6 || ip <= 0 || anchor > ip || ilimit+16 > iend ||
-		ms.nextToUpdate > uint32(ip)+p.baseIdx || p.lowestValid > uint32(ip)+p.baseIdx ||
+		ms.nextToUpdate > uint32(ip)+p.baseIdx || ms.nextToUpdate < p.baseIdx || p.lowestValid > uint32(ip)+p.baseIdx ||
 		iend > p.bLen || prefixLowest < 0 || depth < 0 || depth > 2 ||
 		cap(ss.literals)-nLits < iend-anchor || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
 		return ip, anchor, offset1, offset2, false

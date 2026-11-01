@@ -222,7 +222,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $15, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -274,7 +274,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $15, AX
 	MOVL  AX, R14
@@ -285,7 +285,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  15(CX), AX
+	LEAL  15(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $15, DX
 	ANDL  $15, AX
 	CMOVLEQ DX, AX
@@ -304,7 +304,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -332,7 +332,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -434,7 +434,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -464,7 +464,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -474,7 +474,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -490,7 +490,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $15, SI
 	IMULQ R12, AX
 	XORQ  AX, DX
@@ -1147,7 +1147,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $31, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -1198,7 +1198,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $31, AX
 	MOVL  AX, R14
@@ -1209,7 +1209,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  31(CX), AX
+	LEAL  31(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $31, DX
 	ANDL  $31, AX
 	CMOVLEQ DX, AX
@@ -1228,7 +1228,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -1256,7 +1256,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -1358,7 +1358,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -1388,7 +1388,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -1398,7 +1398,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -1414,7 +1414,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $31, SI
 	IMULQ R12, AX
 	XORQ  AX, DX
@@ -2086,7 +2086,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $63, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -2137,7 +2137,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $63, AX
 	MOVL  AX, R14
@@ -2148,7 +2148,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  63(CX), AX
+	LEAL  63(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $63, DX
 	ANDL  $63, AX
 	CMOVLEQ DX, AX
@@ -2167,7 +2167,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -2195,7 +2195,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -2297,7 +2297,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -2327,7 +2327,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -2337,7 +2337,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -2353,7 +2353,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $63, SI
 	IMULQ R12, AX
 	XORQ  AX, DX
@@ -3010,7 +3010,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $15, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -3062,7 +3062,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $15, AX
 	MOVL  AX, R14
@@ -3073,7 +3073,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  15(CX), AX
+	LEAL  15(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $15, DX
 	ANDL  $15, AX
 	CMOVLEQ DX, AX
@@ -3092,7 +3092,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -3120,7 +3120,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -3222,7 +3222,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -3252,7 +3252,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -3262,7 +3262,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -3278,7 +3278,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $15, SI
 	IMULQ R12, AX
 	XORQ  AX, DX
@@ -3935,7 +3935,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $31, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -3986,7 +3986,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $31, AX
 	MOVL  AX, R14
@@ -3997,7 +3997,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  31(CX), AX
+	LEAL  31(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $31, DX
 	ANDL  $31, AX
 	CMOVLEQ DX, AX
@@ -4016,7 +4016,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -4044,7 +4044,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -4146,7 +4146,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -4176,7 +4176,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -4186,7 +4186,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -4202,7 +4202,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $31, SI
 	IMULQ R12, AX
 	XORQ  AX, DX
@@ -4874,7 +4874,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $63, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -4925,7 +4925,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $63, AX
 	MOVL  AX, R14
@@ -4936,7 +4936,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  63(CX), AX
+	LEAL  63(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $63, DX
 	ANDL  $63, AX
 	CMOVLEQ DX, AX
@@ -4955,7 +4955,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -4983,7 +4983,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -5085,7 +5085,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -5115,7 +5115,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -5125,7 +5125,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -5141,7 +5141,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $63, SI
 	IMULQ R12, AX
 	XORQ  AX, DX
@@ -5798,7 +5798,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $15, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -5850,7 +5850,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $15, AX
 	MOVL  AX, R14
@@ -5861,7 +5861,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  15(CX), AX
+	LEAL  15(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $15, DX
 	ANDL  $15, AX
 	CMOVLEQ DX, AX
@@ -5880,7 +5880,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -5908,7 +5908,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -6010,7 +6010,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -6040,7 +6040,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -6050,7 +6050,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -6066,7 +6066,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $15, SI
 	IMULQ R12, AX
 	XORQ  AX, DX
@@ -6723,7 +6723,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $31, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -6774,7 +6774,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $31, AX
 	MOVL  AX, R14
@@ -6785,7 +6785,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  31(CX), AX
+	LEAL  31(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $31, DX
 	ANDL  $31, AX
 	CMOVLEQ DX, AX
@@ -6804,7 +6804,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -6832,7 +6832,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -6934,7 +6934,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -6964,7 +6964,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -6974,7 +6974,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -6990,7 +6990,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $31, SI
 	IMULQ R12, AX
 	XORQ  AX, DX
@@ -7662,7 +7662,7 @@ havehash:
 
 gfast:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 here and below: TZCNT runs as BSF without BMI1, same result
 	ADDL  R13, AX
 	ANDL  $63, AX    // matchPos
 	MOVL  (BP)(AX*4), R14   // matchIndex
@@ -7713,7 +7713,7 @@ gskip:
 
 gnext:
 	XORL  AX, AX
-	TZCNTQ DX, AX
+	TZCNTQ DX, AX  // DX != 0 (TZCNT = BSF without BMI1)
 	ADDL  R13, AX
 	ANDL  $63, AX
 	MOVL  AX, R14
@@ -7724,7 +7724,7 @@ gnext:
 
 insert:
 	// insert curr (nextToUpdate) into the row; nextToUpdate++
-	LEAL  63(CX), AX
+	LEAL  63(CX), AX  // (head - 1) & rowMask, CX the raw head byte
 	MOVL  $63, DX
 	ANDL  $63, AX
 	CMOVLEQ DX, AX
@@ -7743,7 +7743,7 @@ insert:
 	MOVL  $3, CX            // ml
 	XORL  DX, DX
 	LEAQ  0x60(SP), BX
-	LEAQ  -7(AX), R12
+	LEAQ  -7(AX), R12  // iLimit - 7, -3, -1: ZSTD_count's 8, 4, 2-byte step limits
 	ADDL  $3, BP
 	LEAQ  -3(AX), R15
 	LEAQ  -1(AX), R14
@@ -7771,7 +7771,7 @@ cmp:
 	JEQ   cnt8
 	XORQ  R11, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 
 counted:
@@ -7873,7 +7873,7 @@ cnt8loop:
 	JEQ   cnt8next
 	XORQ  R13, R9
 	XORL  AX, AX
-	TZCNTQ R9, AX
+	TZCNTQ R9, AX  // R9 != 0 (TZCNT = BSF without BMI1)
 	SHRL  $3, AX
 	ADDQ  R11, AX
 	SUBQ  SI, AX
@@ -7903,7 +7903,7 @@ cnt8next:
 far:
 	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
 	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
-	CMPL  R10, $0xffffff9f
+	CMPL  R10, $0xffffff9f  // idx + kMaxMatchStartPositionsToUpdate (96) would wrap: skip
 	JHI   farfill
 	MOVL  R10, AX
 	MOVQ  R13, 0x38(SP)
@@ -7913,7 +7913,7 @@ far:
 	LEAQ  0x68(R8)(AX*1), R15
 	MOVQ  0x20(SP), AX
 	MOVL  R11, 0x40(SP)
-	SUBL  BX, R10
+	SUBL  BX, R10  // idx - pointer (mod 2^32), kept in R13: idx = R13 + pointer
 	MOVL  DI, 0x48(SP)
 	MOVQ  0x10(SP), R8
 	MOVL  R10, BP
@@ -7929,7 +7929,7 @@ farloop:
 
 farin:
 	MOVQ  (BX), AX
-	LEAL  (R13)(BX*1), R11
+	LEAL  (R13)(BX*1), R11  // idx, rebuilt from the moving pointer
 	MOVL  $63, SI
 	IMULQ R12, AX
 	XORQ  AX, DX

@@ -9,7 +9,9 @@ import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
 var useRowAsm bool
 
 // useRowBMI selects the row finder's faster candidate gather (BLSR,
-// POPCNT), read by the assembly.
+// POPCNT), read by the assembly. The gather needs only BMI1 and POPCNT; it
+// also requires BMI2 so that TestAsmEquiv's bmi2=off pass (cpu.DisableBMI2)
+// runs the C-loop fallback.
 var useRowBMI bool
 
 func init() {
