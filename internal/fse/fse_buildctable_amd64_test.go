@@ -189,3 +189,67 @@ func TestNormalizeCountAsmEquiv(t *testing.T) {
 		t.Fatal("no near-threshold case ran")
 	}
 }
+
+// TestCompressWeightsAsmEquiv compares the assembly encoder with the Go
+// body: size and bytes, for src lengths 1-700 (every length mod 4), table
+// logs 5-12, random symbols up to ct's maxSymbol (also zero-probability
+// ones, which cost tableLog+1 bits), and dst from 1 byte to past
+// FSE_BLOCKBOUND (both flush kinds). Bytes past len(dst) must stay
+// untouched.
+func TestCompressWeightsAsmEquiv(t *testing.T) {
+	if !useFSECompressAsm {
+		t.Skip("fse-compress assembly is off")
+	}
+	r := rand.New(rand.NewPCG(13, 14))
+	var count [256]uint32
+	var norm [256]int16
+	src := make([]byte, 700)
+	var bufA, bufG [1000]byte
+	iters := 200000
+	if testing.Short() {
+		iters = 20000
+	}
+	for i := 0; i < iters; i++ {
+		maxSym := []int{1, 5, 12, 35, 255, 1 + r.IntN(255)}[r.IntN(6)]
+		total := 0
+		for s := 0; s <= maxSym; s++ {
+			c := []int{0, r.IntN(3), r.IntN(100), r.IntN(3000)}[r.IntN(4)]
+			count[s] = uint32(c)
+			total += c
+		}
+		count[maxSym]++
+		total++
+		tl, err := NormalizeCount(norm[:], uint(MinTableLog+r.IntN(MaxTableLog-MinTableLog+1)), count[:maxSym+1], total, uint(maxSym), r.IntN(2) == 0)
+		if err != nil || tl == 0 {
+			continue
+		}
+		ct := make(CTable, CTableSizeU32(tl, uint(maxSym)))
+		wksp := make([]byte, BuildCTableWorkspaceSize(uint(maxSym), tl)+8)
+		if err := BuildCTable(ct, norm[:maxSym+1], uint(maxSym), tl, wksp); err != nil {
+			t.Fatal(err)
+		}
+		n := 1 + r.IntN(len(src))
+		for j := range src[:n] {
+			src[j] = byte(r.IntN(maxSym + 1))
+		}
+		bound := n + n>>7 + 4 + 8
+		d := []int{1, 8, 9, r.IntN(bound + 1), bound - 1, bound, bound + 20}[r.IntN(7)]
+		d = max(d, 1)
+		for j := range bufA {
+			bufA[j], bufG[j] = 0xA5, 0xA5
+		}
+		gotG := compressUsingCTableGeneric(bufG[:d], src[:n], ct, d >= bound && tl <= 7)
+		gotA, _ := CompressWeightsUsingCTable(bufA[:d], src[:n], ct)
+		if gotA != gotG {
+			t.Fatalf("case %d (maxSym %d, tableLog %d, src %d, dst %d): asm %d, Go %d", i, maxSym, tl, n, d, gotA, gotG)
+		}
+		for j := d; j < len(bufA); j++ {
+			if bufA[j] != 0xA5 {
+				t.Fatalf("case %d (src %d, dst %d): asm wrote byte %d", i, n, d, j)
+			}
+		}
+		if string(bufA[:gotA]) != string(bufG[:gotG]) {
+			t.Fatalf("case %d (maxSym %d, tableLog %d, src %d, dst %d): bytes differ", i, maxSym, tl, n, d)
+		}
+	}
+}

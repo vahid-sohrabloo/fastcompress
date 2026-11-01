@@ -151,7 +151,7 @@ func compressWeights(dst []byte, weightTable []byte) (int, error) {
 	if err := fse.BuildCTable(ct, norm[:], uint(maxSymbolValue), tableLog, scratch[:]); err != nil {
 		return 0, err
 	}
-	cSize, err := fse.CompressUsingCTable(dst[op:], weightTable, ct)
+	cSize, err := fse.CompressWeightsUsingCTable(dst[op:], weightTable, ct)
 	if err != nil {
 		return 0, err
 	}

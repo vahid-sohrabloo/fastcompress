@@ -8,13 +8,15 @@ import (
 	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
 )
 
-// useFSEBuildAsm selects the assembly table builder and useFSENormAsm the
-// assembly normalizer (baseline amd64).
-var useFSEBuildAsm, useFSENormAsm bool
+// useFSEBuildAsm selects the assembly table builder, useFSENormAsm the
+// assembly normalizer and useFSECompressAsm the assembly encoder used for
+// huf's weights (baseline amd64).
+var useFSEBuildAsm, useFSENormAsm, useFSECompressAsm bool
 
 func init() {
 	cpu.RegisterAsm("fse-build", &useFSEBuildAsm, func() bool { return true })
 	cpu.RegisterAsm("fse-norm", &useFSENormAsm, func() bool { return true })
+	cpu.RegisterAsm("fse-compress", &useFSECompressAsm, func() bool { return true })
 }
 
 // buildCTableAsm is gcc's FSE_buildCTable_wksp (v1.5.7,
@@ -72,4 +74,34 @@ func normalizeCount(norm []int16, tableLog uint, count []uint32, total int, maxS
 	default:
 		return uint(r), nil
 	}
+}
+
+// compressUsingCTableAsm is gcc's FSE_compress_usingCTable_generic (v1.5.7,
+// ref/zstd/programs/zstd), transliterated. It returns C's result: the
+// stream size, or 0 when it does not fit (or srcSize <= 2, dstSize <= 8).
+// fast 1 skips the end-of-buffer clamp: it needs dstSize >=
+// FSE_BLOCKBOUND(srcSize) and a stream that fits in it. It reads ct's symbol
+// table at every src byte unchecked: each must be at most ct's maxSymbol.
+//
+//go:noescape
+func compressUsingCTableAsm(dst *byte, dstSize uint, src *byte, srcSize uint, ct *uint32, fast uint) uint64
+
+// CompressWeightsUsingCTable is CompressUsingCTable for a src whose bytes
+// are all at most ct's maxSymbol, as huf's weights are (compressWeights
+// builds ct from their count): the assembly encoder relies on it.
+func CompressWeightsUsingCTable(dst, src []byte, ct CTable) (int, error) {
+	tableLog, maxSymbol := uint(ct[0]&0xFFFF), uint(ct[0]>>16)
+	if !useFSECompressAsm || len(dst) == 0 || len(src) == 0 || tableLog-1 > MaxTableLog-1 ||
+		len(ct) < CTableSizeU32(tableLog, maxSymbol) {
+		return CompressUsingCTable(dst, src, ct)
+	}
+	// C's fast flush (no clamp) when dst holds FSE_BLOCKBOUND, as
+	// CompressUsingCTable, but only up to tableLog 7: a symbol then costs at
+	// most 8 bits, so any src fits the bound. (huf's weights use 6.) The
+	// clamped flush writes the same bytes whenever the stream fits.
+	var fast uint
+	if len(dst) >= len(src)+len(src)>>7+4+8 && tableLog <= 7 {
+		fast = 1
+	}
+	return int(compressUsingCTableAsm(&dst[0], uint(len(dst)), &src[0], uint(len(src)), &ct[0], fast)), nil
 }
