@@ -43,23 +43,42 @@ func TestSplitBlockCref(t *testing.T) {
 		}
 	}
 	nonFull := make([]int, 5)
-	// One workspace for every call, levels in decreasing hashLog order: a
-	// call must not depend on what an earlier one left in the workspace.
+	wants := make([][]int, 5)
+	want := func(level, i int) int {
+		if wants[level] == nil {
+			wants[level] = make([]int, len(windows))
+			for j, w := range windows {
+				out := creftest.Run(t, w, "presplit", "-level", strconv.Itoa(level))
+				n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+				if err != nil {
+					t.Fatalf("cref output %q: %v", out, err)
+				}
+				wants[level][j] = n
+				if n != 128<<10 {
+					nonFull[level]++
+				}
+			}
+		}
+		return wants[level][i]
+	}
+	// One workspace for every call: a call must not depend on what an
+	// earlier one left in the workspace. Levels run in decreasing hashLog
+	// order, then increasing, then per window alternating byChunks levels
+	// with level 0 (fromBorders).
 	ws := new(fpStats)
-	for level := 4; level >= 0; level-- {
-		for i, w := range windows {
-			out := creftest.Run(t, w, "presplit", "-level", strconv.Itoa(level))
-			want, err := strconv.Atoi(strings.TrimSpace(string(out)))
-			if err != nil {
-				t.Fatalf("cref output %q: %v", out, err)
-			}
-			got := splitBlock(w, 128<<10, level, ws)
-			if got != want {
-				t.Errorf("level %d %s: splitBlock = %d, C = %d", level, names[i], got, want)
-			}
-			if want != 128<<10 {
-				nonFull[level]++
-			}
+	check := func(level, i int) {
+		if got, w := splitBlock(windows[i], 128<<10, level, ws), want(level, i); got != w {
+			t.Errorf("level %d %s: splitBlock = %d, C = %d", level, names[i], got, w)
+		}
+	}
+	for _, level := range []int{4, 3, 2, 1, 0, 1, 2, 3, 4} {
+		for i := range windows {
+			check(level, i)
+		}
+	}
+	for i := range windows {
+		for _, level := range []int{2, 0, 4, 0, 1, 3} {
+			check(level, i)
 		}
 	}
 	t.Logf("windows=%d, non-full-block splits per level: %v", len(windows), nonFull)
