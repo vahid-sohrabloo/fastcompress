@@ -24,11 +24,22 @@
 #define P_CHAINMASK 120(R15)
 #define P_BT 128(R15)
 
-// Search frame (after the 256-byte candidate buffer).
-#define S_CURR 256(SP)
-#define S_LOWLIM 260(SP)
-#define S_TAG 264(SP)
-#define S_IP 272(SP)
+// The same fields off R9, where the row finder keeps p (C keeps ms there).
+#define Q_HASHTABLE 0(R9)
+#define Q_TAGTABLE 8(R9)
+#define Q_B 16(R9)
+#define Q_CACHE 24(R9)
+#define Q_NEXT 32(R9)
+#define Q_ENTROPY 40(R9)
+#define Q_HSHIFT 48(R9)
+#define Q_SALT 56(R9)
+#define Q_BASEIDX 64(R9)
+#define Q_ATTEMPTS 68(R9)
+#define Q_LOWEST 72(R9)
+#define Q_MAXDIST 76(R9)
+#define Q_ISDICT 80(R9)
+#define Q_ILIMIT 96(R9)
+#define Q_SKIP 104(R9)
 
 // Lazy-parser frame.
 #define L_IP 0(SP)
@@ -39,340 +50,541 @@
 #define L_ML2 40(SP)
 #define L_OFB2 48(SP)
 
-// rowUpd44: rowUpdateCachedGeneric for [R8, R9) (mls 4, rowLog 4), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd44(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0x9e3779b100000000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $4, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $4, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $15, R10
-	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch44: rowFindBestMatch (noDict, mls 4, rowLog 4) at DI = ip, R15 = p.
+// rowSearch44: rowFindBestMatch (noDict, mls 4, rowLog 4) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch44(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch44(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd44(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $4, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd44(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0x9e3779b100000000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $15, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $4, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $4, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $15, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0x9e3779b100000000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $4, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $4, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $15, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $4, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVL      R10, CX
-	RORW      CX, R11
-	MOVWLZX   R11, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVOU (AX), X1
+	MOVBLZX (AX), CX
+	MOVQ  AX, BX
+	PCMPEQB X1, X0
+	MOVL  CX, R13
+	ANDL  $0xf, R13         // headGrouped
+	PMOVMSKB X0, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORW  CX, DX
+	MOVWLZX DX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $15, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $15, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORW  CX, DX
+	MOVWLZX DX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $15, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $15, CX
-	CMOVLEQ rowMask15<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  15(CX), AX
+	MOVL  $15, DX
+	ANDL  $15, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0x9e3779b100000000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0x9e3779b100000000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $15, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	PREFETCHT0 (R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $4, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $15, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0x9e3779b100000000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow44(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -757,347 +969,548 @@ bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
 
-// rowUpd45: rowUpdateCachedGeneric for [R8, R9) (mls 4, rowLog 5), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd45(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0x9e3779b100000000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $5, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 64(AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $5, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $31, R10
-	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch45: rowFindBestMatch (noDict, mls 4, rowLog 5) at DI = ip, R15 = p.
+// rowSearch45: rowFindBestMatch (noDict, mls 4, rowLog 5) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch45(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch45(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd45(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $5, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd45(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0x9e3779b100000000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $31, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $5, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	PREFETCHT0 0x40(BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $5, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $31, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0x9e3779b100000000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $5, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	PREFETCHT0 0x40(BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $5, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $31, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $5, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVOU     16(BX), X2
-	PCMPEQB   X0, X2
-	PMOVMSKB  X2, DX
-	SHLL      $16, DX
-	ORL       DX, R11
-	MOVL      R10, CX
-	RORL      CX, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVQ  AX, BX
+	MOVOU (AX), X1
+	MOVBLZX (AX), CX
+	MOVOU 0x10(BX), X2
+	PCMPEQB X0, X1
+	MOVL  CX, R13
+	PCMPEQB X2, X0
+	ANDL  $0x1f, R13        // headGrouped
+	PMOVMSKB X1, AX
+	PMOVMSKB X0, R10
+	SHLL  $0x10, R10
+	ORL   AX, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORL  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $31, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $31, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORL  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $31, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $31, CX
-	CMOVLEQ rowMask31<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  31(CX), AX
+	MOVL  $31, DX
+	ANDL  $31, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0x9e3779b100000000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0x9e3779b100000000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $31, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	PREFETCHT0 (R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	PREFETCHT0 0x40(R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $5, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $31, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0x9e3779b100000000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	PREFETCHT0 0x40(BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow45(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -1483,360 +1896,562 @@ bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
 
-// rowUpd46: rowUpdateCachedGeneric for [R8, R9) (mls 4, rowLog 6), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd46(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0x9e3779b100000000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $6, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 64(AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	PREFETCHT0 32(BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $6, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $63, R10
-	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch46: rowFindBestMatch (noDict, mls 4, rowLog 6) at DI = ip, R15 = p.
+// rowSearch46: rowFindBestMatch (noDict, mls 4, rowLog 6) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch46(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch46(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd46(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $6, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	PREFETCHT0 32(R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd46(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0x9e3779b100000000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $63, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $6, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	PREFETCHT0 32(R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 0x20(BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	PREFETCHT0 0x40(BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $6, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $63, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0x9e3779b100000000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0x9e3779b100000000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $6, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	PREFETCHT0 0x40(BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	PREFETCHT0 0x20(BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $6, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $63, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $6, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVOU     16(BX), X2
-	PCMPEQB   X0, X2
-	PMOVMSKB  X2, DX
-	SHLL      $16, DX
-	ORL       DX, R11
-	MOVOU     32(BX), X3
-	PCMPEQB   X0, X3
-	PMOVMSKB  X3, DX
-	SHLQ      $32, DX
-	ORQ       DX, R11
-	MOVOU     48(BX), X3
-	PCMPEQB   X0, X3
-	PMOVMSKB  X3, DX
-	SHLQ      $48, DX
-	ORQ       DX, R11
-	MOVL      R10, CX
-	RORQ      CX, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVOU (AX), X2
+	MOVOU 0x10(AX), X1
+	MOVQ  AX, BX
+	MOVOU 0x20(AX), X3
+	MOVOU 0x30(AX), X4
+	PCMPEQB X0, X2
+	PCMPEQB X0, X1
+	MOVBLZX (AX), CX
+	PCMPEQB X0, X3
+	PCMPEQB X4, X0
+	MOVL  CX, R13
+	ANDL  $0x3f, R13        // headGrouped
+	PMOVMSKB X0, R10
+	PMOVMSKB X3, AX
+	SHLQ  $0x20, AX
+	SHLQ  $0x30, R10
+	ORQ   AX, R10
+	PMOVMSKB X2, AX
+	ORQ   AX, R10
+	PMOVMSKB X1, AX
+	SHLQ  $0x10, AX
+	ORQ   AX, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORQ  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $63, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $63, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORQ  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $63, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $63, CX
-	CMOVLEQ rowMask63<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  63(CX), AX
+	MOVL  $63, DX
+	ANDL  $63, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0x9e3779b100000000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0x9e3779b100000000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $63, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	PREFETCHT0 (R10)(AX*1)
+	PREFETCHT0 0x20(R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	PREFETCHT0 0x40(R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $6, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $63, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0x9e3779b100000000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 0x20(BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	PREFETCHT0 0x40(BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow46(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -2223,340 +2838,541 @@ bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
 
-// rowUpd54: rowUpdateCachedGeneric for [R8, R9) (mls 5, rowLog 4), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd54(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0xcf1bbcdcbb000000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $4, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $4, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $15, R10
-	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch54: rowFindBestMatch (noDict, mls 5, rowLog 4) at DI = ip, R15 = p.
+// rowSearch54: rowFindBestMatch (noDict, mls 5, rowLog 4) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch54(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch54(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd54(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $4, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd54(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0xcf1bbcdcbb000000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $15, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $4, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $4, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $15, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbb000000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $4, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $4, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $15, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $4, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVL      R10, CX
-	RORW      CX, R11
-	MOVWLZX   R11, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVOU (AX), X1
+	MOVBLZX (AX), CX
+	MOVQ  AX, BX
+	PCMPEQB X1, X0
+	MOVL  CX, R13
+	ANDL  $0xf, R13         // headGrouped
+	PMOVMSKB X0, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORW  CX, DX
+	MOVWLZX DX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $15, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $15, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORW  CX, DX
+	MOVWLZX DX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $15, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $15, CX
-	CMOVLEQ rowMask15<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  15(CX), AX
+	MOVL  $15, DX
+	ANDL  $15, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0xcf1bbcdcbb000000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbb000000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $15, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	PREFETCHT0 (R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $4, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $15, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0xcf1bbcdcbb000000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow54(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -2941,347 +3757,548 @@ bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
 
-// rowUpd55: rowUpdateCachedGeneric for [R8, R9) (mls 5, rowLog 5), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd55(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0xcf1bbcdcbb000000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $5, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 64(AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $5, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $31, R10
-	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch55: rowFindBestMatch (noDict, mls 5, rowLog 5) at DI = ip, R15 = p.
+// rowSearch55: rowFindBestMatch (noDict, mls 5, rowLog 5) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch55(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch55(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd55(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $5, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd55(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0xcf1bbcdcbb000000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $31, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $5, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	PREFETCHT0 0x40(BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $5, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $31, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbb000000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $5, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	PREFETCHT0 0x40(BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $5, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $31, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $5, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVOU     16(BX), X2
-	PCMPEQB   X0, X2
-	PMOVMSKB  X2, DX
-	SHLL      $16, DX
-	ORL       DX, R11
-	MOVL      R10, CX
-	RORL      CX, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVQ  AX, BX
+	MOVOU (AX), X1
+	MOVBLZX (AX), CX
+	MOVOU 0x10(BX), X2
+	PCMPEQB X0, X1
+	MOVL  CX, R13
+	PCMPEQB X2, X0
+	ANDL  $0x1f, R13        // headGrouped
+	PMOVMSKB X1, AX
+	PMOVMSKB X0, R10
+	SHLL  $0x10, R10
+	ORL   AX, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORL  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $31, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $31, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORL  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $31, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $31, CX
-	CMOVLEQ rowMask31<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  31(CX), AX
+	MOVL  $31, DX
+	ANDL  $31, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0xcf1bbcdcbb000000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbb000000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $31, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	PREFETCHT0 (R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	PREFETCHT0 0x40(R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $5, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $31, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0xcf1bbcdcbb000000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	PREFETCHT0 0x40(BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow55(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -3667,360 +4684,562 @@ bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
 
-// rowUpd56: rowUpdateCachedGeneric for [R8, R9) (mls 5, rowLog 6), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd56(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0xcf1bbcdcbb000000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $6, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 64(AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	PREFETCHT0 32(BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $6, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $63, R10
-	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch56: rowFindBestMatch (noDict, mls 5, rowLog 6) at DI = ip, R15 = p.
+// rowSearch56: rowFindBestMatch (noDict, mls 5, rowLog 6) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch56(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch56(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd56(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $6, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	PREFETCHT0 32(R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd56(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0xcf1bbcdcbb000000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $63, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $6, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	PREFETCHT0 32(R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 0x20(BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	PREFETCHT0 0x40(BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $6, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $63, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0xcf1bbcdcbb000000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbb000000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $6, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	PREFETCHT0 0x40(BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	PREFETCHT0 0x20(BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $6, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $63, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $6, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVOU     16(BX), X2
-	PCMPEQB   X0, X2
-	PMOVMSKB  X2, DX
-	SHLL      $16, DX
-	ORL       DX, R11
-	MOVOU     32(BX), X3
-	PCMPEQB   X0, X3
-	PMOVMSKB  X3, DX
-	SHLQ      $32, DX
-	ORQ       DX, R11
-	MOVOU     48(BX), X3
-	PCMPEQB   X0, X3
-	PMOVMSKB  X3, DX
-	SHLQ      $48, DX
-	ORQ       DX, R11
-	MOVL      R10, CX
-	RORQ      CX, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVOU (AX), X2
+	MOVOU 0x10(AX), X1
+	MOVQ  AX, BX
+	MOVOU 0x20(AX), X3
+	MOVOU 0x30(AX), X4
+	PCMPEQB X0, X2
+	PCMPEQB X0, X1
+	MOVBLZX (AX), CX
+	PCMPEQB X0, X3
+	PCMPEQB X4, X0
+	MOVL  CX, R13
+	ANDL  $0x3f, R13        // headGrouped
+	PMOVMSKB X0, R10
+	PMOVMSKB X3, AX
+	SHLQ  $0x20, AX
+	SHLQ  $0x30, R10
+	ORQ   AX, R10
+	PMOVMSKB X2, AX
+	ORQ   AX, R10
+	PMOVMSKB X1, AX
+	SHLQ  $0x10, AX
+	ORQ   AX, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORQ  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $63, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $63, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORQ  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $63, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $63, CX
-	CMOVLEQ rowMask63<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  63(CX), AX
+	MOVL  $63, DX
+	ANDL  $63, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0xcf1bbcdcbb000000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbb000000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $63, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	PREFETCHT0 (R10)(AX*1)
+	PREFETCHT0 0x20(R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	PREFETCHT0 0x40(R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $6, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $63, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0xcf1bbcdcbb000000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 0x20(BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	PREFETCHT0 0x40(BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow56(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -4407,340 +5626,541 @@ bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
 
-// rowUpd64: rowUpdateCachedGeneric for [R8, R9) (mls 6, rowLog 4), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd64(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0xcf1bbcdcbf9b0000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $4, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $4, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $15, R10
-	CMOVLEQ rowMask15<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch64: rowFindBestMatch (noDict, mls 6, rowLog 4) at DI = ip, R15 = p.
+// rowSearch64: rowFindBestMatch (noDict, mls 6, rowLog 4) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch64(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch64(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd64(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $4, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd64(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0xcf1bbcdcbf9b0000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $15, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $4, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $4, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $15, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbf9b0000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $4, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $4, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $15, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $4, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVL      R10, CX
-	RORW      CX, R11
-	MOVWLZX   R11, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVOU (AX), X1
+	MOVBLZX (AX), CX
+	MOVQ  AX, BX
+	PCMPEQB X1, X0
+	MOVL  CX, R13
+	ANDL  $0xf, R13         // headGrouped
+	PMOVMSKB X0, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORW  CX, DX
+	MOVWLZX DX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $15, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $15, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORW  CX, DX
+	MOVWLZX DX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $15, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $15, CX
-	CMOVLEQ rowMask15<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  15(CX), AX
+	MOVL  $15, DX
+	ANDL  $15, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0xcf1bbcdcbf9b0000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbf9b0000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $15, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	PREFETCHT0 (R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $4, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $15, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0xcf1bbcdcbf9b0000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $4, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow64(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -5125,347 +6545,548 @@ bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
 
-// rowUpd65: rowUpdateCachedGeneric for [R8, R9) (mls 6, rowLog 5), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd65(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0xcf1bbcdcbf9b0000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $5, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 64(AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $5, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $31, R10
-	CMOVLEQ rowMask31<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch65: rowFindBestMatch (noDict, mls 6, rowLog 5) at DI = ip, R15 = p.
+// rowSearch65: rowFindBestMatch (noDict, mls 6, rowLog 5) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch65(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch65(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd65(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $5, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd65(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0xcf1bbcdcbf9b0000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $31, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $5, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	PREFETCHT0 0x40(BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $5, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $31, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbf9b0000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $5, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	PREFETCHT0 0x40(BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $5, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $31, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $5, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVOU     16(BX), X2
-	PCMPEQB   X0, X2
-	PMOVMSKB  X2, DX
-	SHLL      $16, DX
-	ORL       DX, R11
-	MOVL      R10, CX
-	RORL      CX, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVQ  AX, BX
+	MOVOU (AX), X1
+	MOVBLZX (AX), CX
+	MOVOU 0x10(BX), X2
+	PCMPEQB X0, X1
+	MOVL  CX, R13
+	PCMPEQB X2, X0
+	ANDL  $0x1f, R13        // headGrouped
+	PMOVMSKB X1, AX
+	PMOVMSKB X0, R10
+	SHLL  $0x10, R10
+	ORL   AX, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORL  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $31, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $31, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORL  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $31, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $31, CX
-	CMOVLEQ rowMask31<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  31(CX), AX
+	MOVL  $31, DX
+	ANDL  $31, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0xcf1bbcdcbf9b0000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbf9b0000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $31, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	PREFETCHT0 (R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	PREFETCHT0 0x40(R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $5, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $31, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0xcf1bbcdcbf9b0000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $5, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	PREFETCHT0 0x40(BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow65(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -5851,360 +7472,562 @@ bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
 
-// rowUpd66: rowUpdateCachedGeneric for [R8, R9) (mls 6, rowLog 6), prefetching
-// each new hash's row. R15 = p. Clobbers AX, BX, CX, DX, DI, SI, R8, R10-R14.
-TEXT ·rowUpd66(SB), NOSPLIT, $0-0
-	CMPL R8, R9
-	JAE  done
-	MOVQ P_HASHTABLE, AX
-	MOVQ P_TAGTABLE, BX
-	MOVQ P_CACHE, DX
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, R10
-	SUBQ R10, SI
-	MOVQ $0xcf1bbcdcbf9b0000, R11
-	MOVQ P_SALT, R12
-	MOVQ P_HSHIFT, CX
-
-loop:
-	MOVL  R8, R10
-	MOVQ  8(SI)(R10*1), DI
-	IMULQ R11, DI
-	XORQ  R12, DI
-	SHRQ  CX, DI               // newHash
-	MOVL  DI, R13
-	SHRL  $8, R13
-	SHLL  $6, R13
-	PREFETCHT0 (AX)(R13*4)
-	PREFETCHT0 64(AX)(R13*4)
-	PREFETCHT0 (BX)(R13*1)
-	PREFETCHT0 32(BX)(R13*1)
-	ANDL  $7, R10
-	MOVL  (DX)(R10*4), R14     // hash
-	MOVL  DI, (DX)(R10*4)
-	MOVL  R14, R13
-	SHRL  $8, R13
-	SHLL  $6, R13           // relRow
-	MOVBLZX (BX)(R13*1), R10
-	DECL  R10
-	ANDL  $63, R10
-	CMOVLEQ rowMask63<>(SB), R10 // head 0 wraps to rowMask (C: cmove)
-	MOVB  R10, (BX)(R13*1)
-	ADDQ  R10, R13
-	MOVB  R14, (BX)(R13*1)
-	MOVL  R8, (AX)(R13*4)
-	INCL  R8
-	CMPL  R8, R9
-	JB    loop
-
-done:
-	RET
-
-// rowSearch66: rowFindBestMatch (noDict, mls 6, rowLog 6) at DI = ip, R15 = p.
+// rowSearch66: rowFindBestMatch (noDict, mls 6, rowLog 6) at DI = ip, R15 = p,
+// with ZSTD_row_update_internal (useCache = 1) inlined.
 // Returns AX = ml (below 4: none; -1: a table entry at or after ip, impossible),
-// BX = offBase. Clobbers everything but R15.
-TEXT ·rowSearch66(SB), NOSPLIT, $280-0
-	MOVQ DI, S_IP
-	MOVQ P_B, SI
-	MOVL P_BASEIDX, CX
-	ADDL DI, CX
-	MOVL CX, S_CURR
-
-	// lowLimit = isDictionary ? lowestValid : withinMaxDistance
-	MOVL P_LOWEST, DX
-	MOVL CX, BX
-	SUBL DX, BX
-	CMPL BX, P_MAXDIST
-	JLS  lowok
-	MOVL CX, DX
-	SUBL P_MAXDIST, DX
-
-lowok:
-	CMPL P_ISDICT, $0
-	JEQ  lowset
-	MOVL P_LOWEST, DX
-
-lowset:
-	MOVL DX, S_LOWLIM
-	CMPL P_SKIP, $0
+// BX = offBase, SI = b. Clobbers everything but R15.
+// Frame: 0 iLimit pointer, 8 offBase, 16 hashTable, 24 tagTable, 32 salt,
+// 40 curr, 44 hash shift, 48 base, 56-95 spills, 96-351 candidates, 368 p.
+TEXT ·rowSearch66(SB), NOSPLIT, $376-0
+	MOVQ R15, 368(SP)
+	MOVQ R15, R9
+	MOVQ Q_B, SI
+	MOVQ SI, DX
+	ADDQ DI, SI             // ip
+	ADDQ Q_ILIMIT, DX       // iLimit
+	MOVL $999999999, 8(SP)  // offBaseNotFound
+	MOVQ Q_B, R8
+	MOVL Q_BASEIDX, AX
+	SUBQ AX, R8             // base: an index addresses it directly
+	MOVQ SI, R13
+	MOVQ Q_HASHTABLE, BX
+	MOVQ Q_TAGTABLE, BP
+	MOVQ DX, 0(SP)
+	SUBQ R8, R13            // curr
+	MOVL Q_MAXDIST, DX
+	MOVL R13, R10
+	MOVL R13, CX
+	MOVL Q_LOWEST, AX
+	SUBL DX, CX
+	MOVQ BX, 0x10(SP)
+	MOVQ BP, 0x18(SP)
+	SUBL AX, R10
+	MOVQ R8, 0x30(SP)
+	CMPL DX, R10
+	MOVL Q_ISDICT, DX
+	MOVL R13, 0x28(SP)
+	CMOVLCC AX, CX          // withinMaxDistance
+	TESTL DX, DX
+	MOVL CX, R11
+	CMOVLNE AX, R11         // lowLimit = isDictionary ? lowestValid : withinMaxDistance
+	MOVQ Q_SALT, AX
+	MOVQ AX, 0x20(SP)
+	MOVL Q_ATTEMPTS, DI
+	MOVQ Q_HSHIFT, AX
+	MOVL AX, 0x2c(SP)
+	MOVL Q_SKIP, CX
+	TESTL CX, CX
 	JNE  skipping
-
-	// ZSTD_row_update_internal(useCache = 1)
-	MOVQ P_NEXT, AX
-	MOVL (AX), R8
-	MOVL S_CURR, R9
-	MOVL R9, AX
-	SUBL R8, AX
-	CMPL AX, $384
-	JLS  upd
-	MOVL R8, R9
-	ADDL $96, R9
-	CALL ·rowUpd66(SB)
-	// ZSTD_row_fillHashCache from target - 32 (8 entries, all before ip+1)
-	MOVQ P_B, SI
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL $8, BX
-
-fill:
-	MOVL R8, AX
-	SUBL P_BASEIDX, AX
-	MOVQ (SI)(AX*1), R10
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $6, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	PREFETCHT0 32(R11)
-	MOVL R8, AX
-	ANDL $7, AX
-	MOVL R10, (DX)(AX*4)
-	INCL R8
-	DECL BX
-	JNE  fill
-	MOVL S_CURR, R8
-	SUBL $32, R8
-	MOVL S_CURR, R9
+	MOVQ Q_NEXT, AX
+	MOVL (AX), R10          // idx = nextToUpdate
+	MOVL R13, AX
+	MOVQ Q_CACHE, R14
+	SUBL R10, AX
+	CMPL AX, $0x180         // kSkipThreshold
+	JHI  far
 
 upd:
-	CALL ·rowUpd66(SB)
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+	// ZSTD_row_update_internalImpl for [R10, R13)
+	CMPL R10, R13
+	JCC  hash
+	MOVQ 0x30(SP), DX
+	MOVQ R13, 0x38(SP)
+	MOVL 0x2c(SP), CX
+	MOVL R10, AX
+	MOVQ R8, 0x30(SP)
+	MOVQ $0xcf1bbcdcbf9b0000, R15
+	MOVL DI, 0x40(SP)
+	LEAQ 8(DX)(AX*1), R12
+	MOVQ SI, 0x48(SP)
+	MOVL 0x28(SP), SI
+	MOVQ 0x20(SP), R9       // salt (p is reloaded after the loop)
+	MOVL $63, DI
+	PCALIGN $16
 
-	// hash = ZSTD_row_nextCachedHash(curr)
-	MOVQ P_B, SI
-	MOVQ S_IP, DI
-	MOVQ 8(SI)(DI*1), R10
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, R10
-	XORQ P_SALT, R10
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, R10
-	MOVL R10, R11
-	SHRL $8, R11
-	SHLL $6, R11
-	MOVQ P_HASHTABLE, CX
-	PREFETCHT0 (CX)(R11*4)
-	PREFETCHT0 64(CX)(R11*4)
-	ADDQ P_TAGTABLE, R11
-	PREFETCHT0 (R11)
-	PREFETCHT0 32(R11)
-	MOVQ P_CACHE, DX
-	MOVL S_CURR, AX
-	ANDL $7, AX
-	MOVL (DX)(AX*4), BX
-	MOVL R10, (DX)(AX*4)
-	JMP  havehash
+updloop:
+	MOVQ  (R12), DX
+	IMULQ R15, DX
+	XORQ  R9, DX
+	SHRQ  CX, DX            // newHash
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 0x20(BP)(AX*1)
+	PREFETCHT0 (BX)(AX*4)
+	PREFETCHT0 0x40(BX)(AX*4)
+	MOVL  R10, R8
+	ANDL  $7, R8
+	MOVL  (R14)(R8*4), R13  // hash
+	MOVL  DX, (R14)(R8*4)
+	MOVL  R13, DX
+	SHRL  $8, DX
+	SHLL  $6, DX       // relRow
+	MOVBLZX (BP)(DX*1), AX
+	SUBL  $1, AX
+	ANDL  $63, AX
+	CMOVLEQ DI, AX          // head 0 wraps to rowMask
+	MOVB  AX, (BP)(DX*1)
+	ADDQ  AX, DX
+	MOVB  R13, (BP)(DX*1)
+	MOVL  R10, (BX)(DX*4)
+	ADDQ  $1, R12
+	ADDL  $1, R10
+	CMPL  SI, R10
+	JNE   updloop
+	MOVQ  368(SP), R9
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), DI
+	MOVQ  0x48(SP), SI
 
-skipping:
-	MOVQ (SI)(DI*1), BX
-	MOVQ $0xcf1bbcdcbf9b0000, CX
-	IMULQ CX, BX
-	XORQ P_SALT, BX
-	MOVQ P_HSHIFT, CX
-	SHRQ CX, BX
-	MOVQ P_NEXT, AX
-	MOVL S_CURR, CX
-	MOVL CX, (AX)
+hash:
+	// hash = ZSTD_row_nextCachedHash(curr); nextToUpdate = curr
+	MOVL  R13, DX
+	MOVQ  0x20(SP), BX
+	MOVBLZX 0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbf9b0000, AX
+	IMULQ 8(R8)(DX*1), AX
+	MOVQ  Q_NEXT, R12
+	MOVL  R13, (R12)
+	XORQ  BX, AX
+	MOVQ  0x10(SP), BX
+	SHRQ  CX, AX
+	MOVL  AX, DX
+	SHRL  $8, DX
+	SHLL  $6, DX
+	LEAQ  (DX*4), CX
+	PREFETCHT0 (BX)(CX*1)
+	PREFETCHT0 0x40(BX)(CX*1)
+	MOVQ  0x18(SP), BX
+	PREFETCHT0 (BX)(DX*1)
+	PREFETCHT0 0x20(BX)(DX*1)
+	MOVQ  R13, DX
+	ANDL  $7, DX
+	LEAQ  (R14)(DX*4), DX
+	MOVL  (DX), R12
+	MOVL  AX, (DX)
 
 havehash:
-	MOVQ P_ENTROPY, AX
-	ADDL BX, (AX)           // collect salt entropy
-	MOVL BX, DX
-	ANDL $0xFF, DX
-	MOVL DX, S_TAG
-	SHRL $8, BX
-	SHLL $6, BX          // relRow
-	MOVQ P_HASHTABLE, AX
-	LEAQ (AX)(BX*4), AX     // row
-	ADDQ P_TAGTABLE, BX     // tagRow
-	MOVL P_BASEIDX, R9
-	NEGQ R9
-	ADDQ SI, R9             // b - baseIdx: an index addresses b directly
-	MOVL S_CURR, DI         // curr (ip is reloaded after the gather)
-	MOVL P_ATTEMPTS, R14
-	MOVBLZX (BX), R10
-	ANDL $63, R10      // headGrouped
+	MOVL  R12, BX
+	MOVQ  0x10(SP), AX
+	MOVQ  R12, X0
+	MOVQ  Q_ENTROPY, CX
+	ADDL  R12, (CX)         // collect salt entropy
+	SHRL  $8, BX
+	PUNPCKLBW X0, X0
+	SHLL  $6, BX       // relRow
+	PUNPCKLWL X0, X0
+	LEAQ  (AX)(BX*4), BP    // row
+	MOVQ  0x18(SP), AX
+	PSHUFL $0, X0, X0
+	ADDQ  BX, AX            // tagRow
 
 	// matches: tags equal to tag, rotated right by headGrouped (C: ZSTD_row_getSSEMask)
-	MOVQ      DX, X0
-	PUNPCKLBW X0, X0
-	PUNPCKLWL X0, X0
-	PSHUFL    $0, X0, X0
-	MOVOU     (BX), X1
-	PCMPEQB   X0, X1
-	PMOVMSKB  X1, R11
-	MOVOU     16(BX), X2
-	PCMPEQB   X0, X2
-	PMOVMSKB  X2, DX
-	SHLL      $16, DX
-	ORL       DX, R11
-	MOVOU     32(BX), X3
-	PCMPEQB   X0, X3
-	PMOVMSKB  X3, DX
-	SHLQ      $32, DX
-	ORQ       DX, R11
-	MOVOU     48(BX), X3
-	PCMPEQB   X0, X3
-	PMOVMSKB  X3, DX
-	SHLQ      $48, DX
-	ORQ       DX, R11
-	MOVL      R10, CX
-	RORQ      CX, R11
-	MOVL      S_LOWLIM, R12
-	XORL      R13, R13
-	JMP       gnext             // nbAttempts >= 1
+	MOVOU (AX), X2
+	MOVOU 0x10(AX), X1
+	MOVQ  AX, BX
+	MOVOU 0x20(AX), X3
+	MOVOU 0x30(AX), X4
+	PCMPEQB X0, X2
+	PCMPEQB X0, X1
+	MOVBLZX (AX), CX
+	PCMPEQB X0, X3
+	PCMPEQB X4, X0
+	MOVL  CX, R13
+	ANDL  $0x3f, R13        // headGrouped
+	PMOVMSKB X0, R10
+	PMOVMSKB X3, AX
+	SHLQ  $0x20, AX
+	SHLQ  $0x30, R10
+	ORQ   AX, R10
+	PMOVMSKB X2, AX
+	ORQ   AX, R10
+	PMOVMSKB X1, AX
+	SHLQ  $0x10, AX
+	ORQ   AX, R10
+	CMPB  ·useRowBMI(SB), $0
+	JEQ   slow
+	ANDQ  $-2, R10          // the head entry is never a candidate
+	MOVQ  R10, DX
+	RORQ  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+	POPCNTQ DX, AX
+	CMPL  AX, DI
+	JHI   gslow             // more candidates than nbAttempts: C's loop
+	MOVL  0x28(SP), R15     // curr
+	XORL  R10, R10
+	PCALIGN $16
 
-gather:
-	XORL  CX, CX            // BSF keeps its destination on a zero input, so it reads CX: break the chain
-	BSFQ  R11, CX
-	LEAQ  -1(R11), DX
-	ANDQ  DX, R11
-	ADDL  R10, CX
-	ANDL  $63, CX
-	JEQ   gnext             // the head entry is not a candidate
-	MOVL  (AX)(CX*4), DX
-	CMPL  DX, R12
-	JB    insert            // below lowLimit: stop
-	// Bounds: lowLimit <= DX < curr, and lowLimit >= baseIdx (rowAsmSetup
+gfast:
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $63, AX    // matchPos
+	MOVL  (BP)(AX*4), R14   // matchIndex
+	CMPL  R14, R11
+	JCS   insert            // below lowLimit: stop
+	// Bounds: lowLimit <= R14 < curr, and lowLimit >= baseIdx (rowAsmSetup
 	// checks lowestValid >= baseIdx, and lazyRowRun lowestValid <= curr, so
 	// curr - lowestValid does not wrap and curr - maxDistance is used only
-	// when it is above lowestValid). So R9 + DX lies in b[0:ip], and the
-	// compare and count below read only b[DX-baseIdx:] up to the
+	// when it is above lowestValid). So R8 + R14 lies in b[0:ip], and the
+	// compare and count below read only b[R14-baseIdx:] up to the
 	// iLimit - ip bytes that b[ip:] holds. Only buffered candidates are
 	// read, and every one passed this check, so the compare loop needs none.
-	CMPL  DX, DI
-	JAE   bad
-	PREFETCHT0 (R9)(DX*1)
-	MOVL  DX, 0(SP)(R13*4)
-	INCL  R13
-	DECL  R14
+	CMPL  R14, R15
+	JCC   bad
+	PREFETCHT0 (R8)(R14*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+	BLSRQ DX, DX
+	JNE   gfast
+	JMP   insert
+
+slow:
+	MOVQ  R10, DX
+	RORQ  CX, DX
+	TESTQ R10, R10
+	JEQ   insert
+
+gslow:
+	XORL  R10, R10
+	JMP   gnext
+	PCALIGN $16
+
+gtake:
+	CMPL  R14, 0x28(SP)     // idx < curr (see gfast)
+	JCC   bad
+	MOVL  R14, AX
+	SUBL  $1, DI
+	PREFETCHT0 (R8)(AX*1)
+	MOVL  R14, 0x60(SP)(R10*4)
+	ADDQ  $1, R10
+
+gskip:
+	LEAQ  -1(DX), AX
+	ANDQ  AX, DX
+	JEQ   insert
+	TESTL DI, DI
 	JEQ   insert
 
 gnext:
-	TESTQ R11, R11
-	JNE   gather
+	XORL  AX, AX
+	TZCNTQ DX, AX
+	ADDL  R13, AX
+	ANDL  $63, AX
+	MOVL  AX, R14
+	MOVL  (BP)(R14*4), R14
+	JEQ   gskip             // matchPos 0 is the head entry
+	CMPL  R14, R11
+	JCC   gtake
 
 insert:
-	MOVBLZX (BX), CX
-	DECL    CX
-	ANDL    $63, CX
-	CMOVLEQ rowMask63<>(SB), CX
-	MOVB    CX, (BX)
-	MOVL    S_TAG, DX
-	MOVB    DX, (BX)(CX*1)
-	MOVQ    P_NEXT, R12
-	MOVL    (R12), DX
-	MOVL    DX, (AX)(CX*4)
-	INCL    (R12)           // nextToUpdate++
+	// insert curr (nextToUpdate) into the row; nextToUpdate++
+	LEAL  63(CX), AX
+	MOVL  $63, DX
+	ANDL  $63, AX
+	CMOVLEQ DX, AX
+	MOVB  AX, (BX)
+	MOVL  AX, AX
+	MOVB  R12, (BX)(AX*1)
+	MOVQ  Q_NEXT, DI
+	MOVL  (DI), DX
+	LEAL  1(DX), CX
+	MOVL  CX, (DI)
+	MOVL  DX, (BP)(AX*4)
+	TESTQ R10, R10
+	JEQ   none
+	MOVQ  0(SP), AX
+	MOVL  0x28(SP), BP
+	MOVL  $3, CX            // ml
+	XORL  DX, DX
+	LEAQ  0x60(SP), BX
+	LEAQ  -7(AX), R12
+	ADDL  $3, BP
+	LEAQ  -3(AX), R15
+	LEAQ  -1(AX), R14
+	JMP   cmp
+	PCALIGN $16
 
-	MOVL $3, R10
-	XORL R11, R11
-	XORL R12, R12
-	MOVQ S_IP, DI
-	LEAQ (SI)(DI*1), BX
-	MOVQ P_ILIMIT, R8
-	SUBQ DI, R8             // iLimit - ip
+next:
+	ADDQ  $1, DX
+	CMPQ  DX, R10
+	JEQ   done
 
 cmp:
-	CMPQ R12, R13
-	JAE  done
-	MOVL 0(SP)(R12*4), DX
-	INCQ R12
-	LEAQ (R9)(DX*1), AX
-	MOVL -3(AX)(R10*1), R14
-	CMPL R14, -3(BX)(R10*1)
-	JNE  cmp
-	// count (as fastCount): 8 bytes, then 32 per step with AVX2
-	XORL R14, R14
-	CMPQ R8, $8
-	JB   cnttail
-	MOVQ (AX), CX
-	XORQ (BX), CX
-	JNE  cntdiff
-	MOVL $8, R14
-	CMPB ·useAVX2(SB), $0
-	JEQ  cnt8
+	MOVL  (BX)(DX*4), AX
+	MOVL  -3(SI)(CX*1), R11
+	MOVQ  AX, DI
+	ADDQ  R8, AX            // match
+	CMPL  -3(AX)(CX*1), R11
+	JNE   next
+	// ZSTD_count(ip, match, iLimit)
+	CMPQ  SI, R12
+	JCC   cnt4ip
+	MOVQ  (AX), R9
+	MOVQ  (SI), R11
+	CMPQ  R9, R11
+	JEQ   cnt8
+	XORQ  R11, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+
+counted:
+	CMPQ  CX, AX
+	JCC   next
+	MOVL  BP, CX
+	SUBL  DI, CX
+	MOVL  CX, 8(SP)         // offBase = curr - matchIndex + REP_NUM
+	LEAQ  (SI)(AX*1), CX
+	CMPQ  0(SP), CX
+	MOVQ  AX, CX
+	JNE   next              // ip + ml == iLimit: the best possible
+
+done:
+	MOVQ  CX, AX
+	MOVL  8(SP), BX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	RET
+	PCALIGN $16
+
+cnt4ip:
+	MOVQ  SI, R11
+
+cnt4:
+	CMPQ  R11, R15
+	JCC   cnt2
+	MOVL  (R11), R9
+	CMPL  (AX), R9
+	JNE   cnt2
+	ADDQ  $4, R11
+	ADDQ  $4, AX
+	PCALIGN $16
+
+cnt2:
+	CMPQ  R11, R14
+	JCC   cnt1
+	MOVWLZX (R11), R9
+	CMPW  (AX), R9
+	JNE   cnt1
+	ADDQ  $2, R11
+	ADDQ  $2, AX
+	PCALIGN $16
+
+cnt1:
+	MOVQ  0(SP), R9
+	CMPQ  R11, R9
+	JCC   cntend
+	MOVBLZX (R11), R9
+	CMPB  (AX), R9
+	SETEQ AL
+	MOVBLZX AL, AX
+	ADDQ  AX, R11
+
+cntend:
+	MOVQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $8
+
+cnt8:
+	LEAQ  8(SI), R11
+	ADDQ  $8, AX
+	CMPB  ·useAVX2(SB), $0
+	JEQ   cnt8chk
 
 cnt32:
-	LEAQ 32(R14), CX
-	CMPQ CX, R8
-	JA   cnt32end
-	VMOVDQU   (AX)(R14*1), Y0
-	VPCMPEQB  (BX)(R14*1), Y0, Y0
-	VPMOVMSKB Y0, CX
-	INCL      CX
-	JNE       cnt32diff
-	ADDQ      $32, R14
-	JMP       cnt32
+	// 32 bytes per step with AVX2 (as fastCount), while R11 + 32 <= iLimit
+	LEAQ  32(R11), R9
+	CMPQ  R9, 0(SP)
+	JHI   cnt32end
+	VMOVDQU   (R11), Y0
+	VPCMPEQB  (AX), Y0, Y0
+	VPMOVMSKB Y0, R9
+	INCL  R9
+	JNE   cnt32diff
+	ADDQ  $32, R11
+	ADDQ  $32, AX
+	JMP   cnt32
 
 cnt32diff:
 	VZEROUPPER
-	BSFL CX, CX
-	ADDQ CX, R14
-	JMP  cntdone
+	BSFL  R9, R9
+	LEAQ  (R11)(R9*1), AX
+	SUBQ  SI, AX
+	JMP   counted
 
 cnt32end:
 	VZEROUPPER
 
-cnt8:
-	LEAQ 8(R14), CX
-	CMPQ CX, R8
-	JA   cnttail
-	MOVQ (AX)(R14*1), CX
-	XORQ (BX)(R14*1), CX
-	JNE  cntdiff
-	ADDQ $8, R14
-	JMP  cnt8
+cnt8chk:
+	CMPQ  R11, R12
+	JCC   cnt4
 
-cntdiff:
-	BSFQ CX, CX
-	SHRQ $3, CX
-	ADDQ CX, R14
-	JMP  cntdone
+cnt8loop:
+	MOVQ  (AX), R9
+	MOVQ  (R11), R13
+	CMPQ  R9, R13
+	JEQ   cnt8next
+	XORQ  R13, R9
+	XORL  AX, AX
+	TZCNTQ R9, AX
+	SHRL  $3, AX
+	ADDQ  R11, AX
+	SUBQ  SI, AX
+	JMP   counted
+	PCALIGN $16
 
-cnttail:
-	CMPQ    R14, R8
-	JAE     cntdone
-	MOVBLZX (AX)(R14*1), CX
-	MOVBLZX (BX)(R14*1), DI
-	CMPL    CX, DI
-	JNE     cntdone
-	INCQ    R14
-	JMP     cnttail
+skipping:
+	// lazy skipping: hash ip directly, without the cache or the row update
+	MOVQ  $0xcf1bbcdcbf9b0000, R12
+	IMULQ (SI), R12
+	MOVQ  0x20(SP), AX
+	MOVQ  Q_NEXT, CX
+	MOVL  R13, (CX)         // nextToUpdate = curr
+	MOVBLZX 0x2c(SP), CX
+	XORQ  AX, R12
+	SHRQ  CX, R12
+	JMP   havehash
+	PCALIGN $16
 
-cntdone:
-	CMPQ R14, R10
-	JLE  cmp
-	MOVQ R14, R10
-	MOVL DX, R11
-	CMPQ R14, R8
-	JNE  cmp
+cnt8next:
+	ADDQ  $8, R11
+	ADDQ  $8, AX
+	CMPQ  R11, R12
+	JCS   cnt8loop
+	JMP   cnt4
 
-done:
-	MOVQ R10, AX
-	MOVL $999999999, BX     // offBaseNotFound
-	CMPQ R10, $3
-	JLE  ret
-	MOVL S_CURR, BX
-	SUBL R11, BX
-	ADDL $3, BX             // offsetToOffBase(curr - matchIndex)
+far:
+	// target - idx > kSkipThreshold: update [idx, idx + 96), then refill the
+	// cache from target - 32 (C: ZSTD_row_fillHashCache, up to ip + 1)
+	CMPL  R10, $0xffffff9f
+	JHI   farfill
+	MOVL  R10, AX
+	MOVQ  R13, 0x38(SP)
+	MOVL  0x2c(SP), CX
+	MOVQ  $0xcf1bbcdcbf9b0000, R12
+	LEAQ  8(R8)(AX*1), BX
+	LEAQ  0x68(R8)(AX*1), R15
+	MOVQ  0x20(SP), AX
+	MOVL  R11, 0x40(SP)
+	SUBL  BX, R10
+	MOVL  DI, 0x48(SP)
+	MOVQ  0x10(SP), R8
+	MOVL  R10, BP
+	MOVQ  SI, 0x50(SP)
+	MOVQ  0x18(SP), R10
+	MOVQ  AX, DX
+	MOVL  BP, R13
+	JMP   farin
+	PCALIGN $16
 
-ret:
-	RET
+farloop:
+	MOVQ  Q_SALT, DX
+
+farin:
+	MOVQ  (BX), AX
+	LEAL  (R13)(BX*1), R11
+	MOVL  $63, SI
+	IMULQ R12, AX
+	XORQ  AX, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	PREFETCHT0 (R10)(AX*1)
+	PREFETCHT0 0x20(R10)(AX*1)
+	LEAQ  (AX*4), DI
+	MOVL  R11, AX
+	ANDL  $7, AX
+	PREFETCHT0 (R8)(DI*1)
+	PREFETCHT0 0x40(R8)(DI*1)
+	LEAQ  (R14)(AX*4), AX
+	MOVL  (AX), BP
+	MOVL  DX, (AX)
+	MOVL  BP, DX
+	SHRL  $8, DX
+	SHLL  $6, DX
+	LEAQ  (R10)(DX*1), DI
+	MOVBLZX (DI), AX
+	SUBL  $1, AX
+	ANDL  $63, AX
+	CMOVLEQ SI, AX
+	ADDQ  $1, BX
+	MOVB  AX, (DI)
+	MOVL  AX, AX
+	ADDQ  AX, DX
+	MOVB  BP, (DI)(AX*1)
+	MOVL  R11, (R8)(DX*4)
+	CMPQ  BX, R15
+	JNE   farloop
+	MOVQ  0x30(SP), R8
+	MOVQ  0x38(SP), R13
+	MOVL  0x40(SP), R11
+	MOVL  0x48(SP), DI
+	MOVQ  0x50(SP), SI
+	MOVQ  0x10(SP), BX
+	MOVQ  0x18(SP), BP
+
+farfill:
+	LEAL  -0x20(R13), AX
+	LEAQ  1(SI), DX
+	LEAQ  (R8)(AX*1), CX
+	MOVQ  AX, R10           // idx = target - 32
+	CMPQ  DX, CX
+	JCS   upd
+	MOVQ  DX, AX
+	MOVL  $8, DX
+	SUBQ  CX, AX
+	ADDL  $1, AX
+	CMPL  AX, DX
+	CMOVLHI DX, AX
+	LEAL  (AX)(R10*1), DX
+	CMPL  R10, DX
+	JCC   upd
+	MOVQ  R13, 0x58(SP)
+	MOVL  R10, R12
+	MOVQ  0x20(SP), R15
+	MOVL  DX, 0x40(SP)
+	MOVQ  R8, 0x50(SP)
+	MOVQ  CX, R8
+	MOVL  0x2c(SP), CX
+	PCALIGN $16
+
+fill:
+	MOVQ  $0xcf1bbcdcbf9b0000, DX
+	IMULQ (R8), DX
+	ADDQ  $1, R8
+	XORQ  R15, DX
+	SHRQ  CX, DX
+	MOVL  DX, AX
+	SHRL  $8, AX
+	SHLL  $6, AX
+	LEAQ  (AX*4), R13
+	PREFETCHT0 (BP)(AX*1)
+	PREFETCHT0 0x20(BP)(AX*1)
+	MOVL  R12, AX
+	ANDL  $7, AX
+	ADDL  $1, R12
+	PREFETCHT0 (BX)(R13*1)
+	PREFETCHT0 0x40(BX)(R13*1)
+	MOVL  DX, (R14)(AX*4)
+	CMPL  R12, 0x40(SP)
+	JCS   fill
+	MOVQ  0x50(SP), R8
+	MOVQ  0x58(SP), R13
+	JMP   upd
+
+none:
+	MOVL  $3, CX
+	JMP   done
 
 bad:
-	MOVQ $-1, AX
+	MOVQ  368(SP), R15
+	MOVQ  P_B, SI
+	MOVQ  $-1, AX
 	RET
 
 // func lazyRow66(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
@@ -6590,10 +8413,3 @@ finish:
 bad:
 	MOVQ $-1, nSeq+96(FP)
 	RET
-
-DATA rowMask15<>+0(SB)/4, $15
-GLOBL rowMask15<>(SB), RODATA|NOPTR, $4
-DATA rowMask31<>+0(SB)/4, $31
-GLOBL rowMask31<>(SB), RODATA|NOPTR, $4
-DATA rowMask63<>+0(SB)/4, $63
-GLOBL rowMask63<>(SB), RODATA|NOPTR, $4

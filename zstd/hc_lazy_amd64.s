@@ -24,11 +24,22 @@
 #define P_CHAINMASK 120(R15)
 #define P_BT 128(R15)
 
-// Search frame (after the 256-byte candidate buffer).
-#define S_CURR 256(SP)
-#define S_LOWLIM 260(SP)
-#define S_TAG 264(SP)
-#define S_IP 272(SP)
+// The same fields off R9, where the row finder keeps p (C keeps ms there).
+#define Q_HASHTABLE 0(R9)
+#define Q_TAGTABLE 8(R9)
+#define Q_B 16(R9)
+#define Q_CACHE 24(R9)
+#define Q_NEXT 32(R9)
+#define Q_ENTROPY 40(R9)
+#define Q_HSHIFT 48(R9)
+#define Q_SALT 56(R9)
+#define Q_BASEIDX 64(R9)
+#define Q_ATTEMPTS 68(R9)
+#define Q_LOWEST 72(R9)
+#define Q_MAXDIST 76(R9)
+#define Q_ISDICT 80(R9)
+#define Q_ILIMIT 96(R9)
+#define Q_SKIP 104(R9)
 
 // Lazy-parser frame.
 #define L_IP 0(SP)

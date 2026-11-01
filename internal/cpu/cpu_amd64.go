@@ -17,9 +17,11 @@ func init() {
 	}
 	_, _, ecx1, _ := cpuid(1, 0)
 	const (
+		popcnt  = 1 << 23
 		osxsave = 1 << 27
 		avx     = 1 << 28
 	)
+	X86.HasPOPCNT = ecx1&popcnt != 0
 	osYMM := false
 	if ecx1&osxsave != 0 && ecx1&avx != 0 {
 		xcr0, _ := xgetbv()

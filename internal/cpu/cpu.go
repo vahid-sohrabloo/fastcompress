@@ -7,9 +7,10 @@ package cpu
 // X86 holds the features detected at start-up. Tests may clear them (see
 // DisableBMI2 and DisableAVX2) to exercise the baseline paths.
 var X86 struct {
-	HasBMI1 bool // TZCNT, ANDN, ...
-	HasBMI2 bool // SHLX, SHRX, BZHI, ...
-	HasAVX2 bool // 256-bit integer SIMD (OS support for YMM state checked)
+	HasBMI1   bool // TZCNT, ANDN, ...
+	HasBMI2   bool // SHLX, SHRX, BZHI, ...
+	HasAVX2   bool // 256-bit integer SIMD (OS support for YMM state checked)
+	HasPOPCNT bool // POPCNT
 }
 
 // DisableBMI2 clears HasBMI2 and returns a function that restores it.
