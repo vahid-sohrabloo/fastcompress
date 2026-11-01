@@ -34,20 +34,22 @@ type fpStats struct {
 	middleEvents fingerprint
 }
 
-// hash2 hashes 2 bytes. For hashLog > 8; for hashLog == 8 it takes the byte
-// itself. C: zstd_preSplit.c:hash2
-func hash2(p []byte, hashLog uint) uint32 {
-	if hashLog == 8 {
-		return uint32(p[0])
-	}
-	return (uint32(p[0]) | uint32(p[1])<<8) * preSplitKnuth >> (32 - hashLog)
-}
-
-// C: zstd_preSplit.c:addEvents_generic
+// C: zstd_preSplit.c:addEvents_generic with hash2 (hashLog 8: the byte
+// itself; else 2 bytes hashed). C specialises it per hashLog, so hash2's
+// branch folds away; here the two cases are separate loops. The mask
+// leaves the hash (below 1 << hashLog <= the table size) unchanged.
 func addEventsGeneric(fp *fingerprint, src []byte, samplingRate int, hashLog uint) {
 	limit := len(src) - preSplitHashLength + 1
-	for n := 0; n < limit; n += samplingRate {
-		fp.events[hash2(src[n:], hashLog)]++
+	ev := &fp.events
+	if hashLog == 8 {
+		for n := 0; n < limit; n += samplingRate {
+			ev[src[n]]++
+		}
+	} else {
+		shift := 32 - hashLog
+		for n := 0; n < limit; n += samplingRate {
+			ev[(uint32(src[n])|uint32(src[n+1])<<8)*preSplitKnuth>>shift&(preSplitHashTableLen-1)]++
+		}
 	}
 	fp.nbEvents += uint64(limit / samplingRate)
 }
@@ -67,11 +69,16 @@ func abs64(s64 int64) uint64 {
 	return uint64(s64)
 }
 
-// C: zstd_preSplit.c:fpDistance
+// C: zstd_preSplit.c:fpDistance, with abs64 written branch-free.
 func fpDistance(fp1, fp2 *fingerprint, hashLog uint) uint64 {
 	var distance uint64
-	for n := 0; n < 1<<hashLog; n++ {
-		distance += abs64(int64(fp1.events[n])*int64(fp2.nbEvents) - int64(fp2.events[n])*int64(fp1.nbEvents))
+	ev1 := fp1.events[:1<<hashLog]
+	ev2 := fp2.events[:len(ev1)]
+	nb1, nb2 := int64(fp1.nbEvents), int64(fp2.nbEvents)
+	for n, e1 := range ev1 {
+		d := int64(e1)*nb2 - int64(ev2[n])*nb1
+		m := d >> 63
+		distance += uint64((d ^ m) - m)
 	}
 	return distance
 }
@@ -85,10 +92,13 @@ func compareFingerprints(ref, newfp *fingerprint, penalty int, hashLog uint) boo
 	return deviation >= threshold
 }
 
-// C: zstd_preSplit.c:mergeEvents
-func mergeEvents(acc, newfp *fingerprint) {
-	for n := range acc.events {
-		acc.events[n] += newfp.events[n]
+// C: zstd_preSplit.c:mergeEvents. C adds all the table's entries; only the
+// first 1 << hashLog are ever set or read (see splitBlockByChunks).
+func mergeEvents(acc, newfp *fingerprint, hashLog uint) {
+	ev := acc.events[:1<<hashLog]
+	nev := newfp.events[:len(ev)]
+	for n := range ev {
+		ev[n] += nev[n]
 	}
 	acc.nbEvents += newfp.nbEvents
 }
@@ -103,14 +113,16 @@ func splitBlockByChunks(blockStart []byte, blockSize int, level int, fpstats *fp
 	rate, hashLog := samplingRates[level], hashParams[level]
 	penalty := preSplitThresholdPenalty
 
-	*fpstats = fpStats{} // initStats
+	// C's initStats zeroes the whole workspace first. Only entries below
+	// 1 << hashLog are read (fpDistance) or merged, and recordFingerprint
+	// clears those and nbEvents before each fingerprint, so it is skipped.
 	recordFingerprintGeneric(&fpstats.pastEvents, blockStart[:preSplitChunkSize], rate, hashLog)
 	for pos := preSplitChunkSize; pos <= blockSize-preSplitChunkSize; pos += preSplitChunkSize {
 		recordFingerprintGeneric(&fpstats.newEvents, blockStart[pos:pos+preSplitChunkSize], rate, hashLog)
 		if compareFingerprints(&fpstats.pastEvents, &fpstats.newEvents, penalty, hashLog) {
 			return pos
 		}
-		mergeEvents(&fpstats.pastEvents, &fpstats.newEvents)
+		mergeEvents(&fpstats.pastEvents, &fpstats.newEvents, hashLog)
 		if penalty > 0 {
 			penalty--
 		}

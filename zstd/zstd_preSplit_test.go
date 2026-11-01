@@ -43,14 +43,17 @@ func TestSplitBlockCref(t *testing.T) {
 		}
 	}
 	nonFull := make([]int, 5)
-	for level := 0; level <= 4; level++ {
+	// One workspace for every call, levels in decreasing hashLog order: a
+	// call must not depend on what an earlier one left in the workspace.
+	ws := new(fpStats)
+	for level := 4; level >= 0; level-- {
 		for i, w := range windows {
 			out := creftest.Run(t, w, "presplit", "-level", strconv.Itoa(level))
 			want, err := strconv.Atoi(strings.TrimSpace(string(out)))
 			if err != nil {
 				t.Fatalf("cref output %q: %v", out, err)
 			}
-			got := splitBlock(w, 128<<10, level, new(fpStats))
+			got := splitBlock(w, 128<<10, level, ws)
 			if got != want {
 				t.Errorf("level %d %s: splitBlock = %d, C = %d", level, names[i], got, want)
 			}
