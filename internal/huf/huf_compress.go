@@ -127,7 +127,7 @@ func compressWeights(dst []byte, weightTable []byte) (int, error) {
 		return 0, nil // not compressible
 	}
 
-	maxCount := hist.CountSimple(&count, &maxSymbolValue, weightTable) // never fails
+	maxCount := countWeights(&count, &maxSymbolValue, weightTable)
 	if int(maxCount) == wtSize {
 		return 1, nil // only a single symbol in src : rle
 	}
@@ -159,6 +159,36 @@ func compressWeights(dst []byte, weightTable []byte) (int, error) {
 		return 0, nil // not enough space for compressed data
 	}
 	return op + cSize, nil
+}
+
+// countWeights is hist.CountSimple for weights (all <= TableLogMax < 16).
+// The few distinct weights repeat, so four tables cut the chain of
+// increments to the same counter; the result is CountSimple's.
+func countWeights(count *[256]uint32, maxSymbol *uint32, w []byte) uint32 {
+	var c4 [4][16]uint32
+	for len(w) >= 4 {
+		c4[0][w[0]&15]++
+		c4[1][w[1]&15]++
+		c4[2][w[2]&15]++
+		c4[3][w[3]&15]++
+		w = w[4:]
+	}
+	for _, b := range w {
+		c4[0][b&15]++
+	}
+	maxSymbolValue := *maxSymbol
+	for s := range count[:maxSymbolValue+1] {
+		count[s] = c4[0][s&15] + c4[1][s&15] + c4[2][s&15] + c4[3][s&15]
+	}
+	for count[maxSymbolValue] == 0 {
+		maxSymbolValue--
+	}
+	*maxSymbol = maxSymbolValue
+	var largest uint32
+	for _, c := range count[:maxSymbolValue+1] {
+		largest = max(largest, c)
+	}
+	return largest
 }
 
 // WriteCTable writes the table description (header) for ct and returns its
@@ -532,8 +562,22 @@ func buildCTableFromTree(ct CTable, huffNode []nodeElt, nonNullRank int, maxSymb
 	// masks change no index and drop the bounds checks.
 	var nbPerRank, valPerRank [16]uint16
 	alphabetSize := int(maxSymbolValue + 1)
-	for _, e := range huffNode[:nonNullRank+1] {
-		nbPerRank[e.nbBits&15]++
+	// Sorted nodes mostly share nbBits with their neighbours: counting into
+	// four tables cuts the chain of increments to the same counter.
+	var nb4 [4][16]uint16
+	nodes := huffNode[:nonNullRank+1]
+	for len(nodes) >= 4 {
+		nb4[0][nodes[0].nbBits&15]++
+		nb4[1][nodes[1].nbBits&15]++
+		nb4[2][nodes[2].nbBits&15]++
+		nb4[3][nodes[3].nbBits&15]++
+		nodes = nodes[4:]
+	}
+	for _, e := range nodes {
+		nb4[0][e.nbBits&15]++
+	}
+	for n := range nbPerRank {
+		nbPerRank[n] = nb4[0][n] + nb4[1][n] + nb4[2][n] + nb4[3][n]
 	}
 	// determine starting value per rank
 	var min uint16
