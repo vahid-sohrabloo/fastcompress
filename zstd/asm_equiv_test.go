@@ -154,6 +154,46 @@ func TestAsmEquivMatchLengths(t *testing.T) {
 	}
 }
 
+// TestAsmEquivRepLongLength reaches the fast and double-fast loops'
+// repcode-loop store of a match longer than 0xFFFF+MINMATCH, which must
+// set the long-length marker. The input is a 66 KB random block W, 300
+// random bytes, then twice (W[:30], K, W[70:]), with K 40 random bytes seen
+// at the start. That gives a match, a match at another offset, then a ~66 KB
+// continuation at the previous offset (rep2). It runs at levels 1 and 3,
+// with the assembly off and on; the frames must be equal and decode with C.
+func TestAsmEquivRepLongLength(t *testing.T) {
+	for seed := uint64(0); seed < 8; seed++ {
+		r := rand.New(rand.NewPCG(seed, 7))
+		rnd := func(n int) []byte {
+			b := make([]byte, n)
+			for i := range b {
+				b[i] = byte(r.IntN(256))
+			}
+			return b
+		}
+		w := rnd(66 << 10)
+		k := rnd(40)
+		src := append(append(append([]byte{}, k...), w...), rnd(300)...)
+		for range 2 {
+			src = append(src, w[:30]...)
+			src = append(src, k...)
+			src = append(src, w[70:]...)
+		}
+		for _, lv := range encoderLevels[:2] {
+			e := newTestEncoder(t, WithEncoderLevel(lv.l))
+			var off, on []byte
+			withAsm(t, false, func() { off = e.EncodeAll(src, nil) })
+			withAsm(t, true, func() { on = e.EncodeAll(src, nil) })
+			if !bytes.Equal(off, on) {
+				t.Fatalf("seed %d L%d: assembly changes the output (off %d, on %d bytes)", seed, lv.c, len(off), len(on))
+			}
+			if got := creftest.DecodeC(t, on); !bytes.Equal(got, src) {
+				t.Fatalf("seed %d L%d: C decode mismatch", seed, lv.c)
+			}
+		}
+	}
+}
+
 // FuzzEncodeAsmEquiv compresses src with the assembly routines on and off;
 // the frames must be equal and decode with C to src. Every input goes
 // through the four EncoderLevels (EncodeAll), and through a cctx at C level
