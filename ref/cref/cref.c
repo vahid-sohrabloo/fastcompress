@@ -169,7 +169,15 @@
  *   before an error. On error: the ERR line of decompress, exit 1. When the
  *   input ends inside a frame (the last call that consumed input or produced
  *   output returned > 0) stderr gets "INCOMPLETE <that value>\n", exit 1.
+ *   ZSTD_decompressStream not moving input or output while input is left
+ *   is a cref failure ("cref: dstream: ... no progress", exit 1), never a spin.
  *   NOTE: C applies ZSTD_d_windowLogMax only here, never in decompress.
+ *   NOTE (decompress vs dstream on short input):
+ *     empty input:  both succeed with empty output (no frames);
+ *     a truncated frame, down to 1 byte: decompress fails with
+ *     srcSize_wrong ("ERR 72 Src size is incorrect"; a cut in or right before the
+ *     4-byte checksum gives checksum_wrong, 22); dstream writes what it
+ *     decoded and reports INCOMPLETE (C keeps asking for input).
  *
  * fheader              Frame header queries on stdin, as key=value lines:
  *   ZSTD_getFrameHeader_advanced(ZSTD_f_zstd1): "err=<code>" and
@@ -662,7 +670,7 @@ static ZSTD_DCtx* newDCtx(const Opts* o) {
         ZSTD_DDict* dd = ZSTD_createDDict_advanced(db, dn, ZSTD_dlm_byCopy,
                 o->rawDict ? ZSTD_dct_rawContent : ZSTD_dct_auto, ZSTD_defaultCMem);
         if (!dd) die("ZSTD_createDDict_advanced");
-        free(db);
+        free(db); /* dd is never freed: it must outlive the DCtx, and cref exits */
         r = ZSTD_DCtx_refDDict(d, dd);
         if (ZSTD_isError(r)) dieErr(r);
     }
@@ -716,6 +724,7 @@ static int cmdDStream(const Opts* o, const unsigned char* src, size_t n) {
             writeAll(buf, ob.pos);
             if (ZSTD_isError(r)) dieErr(r);
             if (ib.pos != in0 || ob.pos) last = r; /* a call without progress (e.g. after a frame end) says nothing */
+            else if (ib.pos < ib.size) die("dstream: ZSTD_decompressStream made no progress"); /* never spin */
         } while (ib.pos < ib.size || ob.pos == ob.size);
         pos += sz;
     }
@@ -772,6 +781,7 @@ static int cmdFinalizeDict(const Opts* o, const unsigned char* src, size_t n) {
     for (const char* p = o->sizes; *p; p++) nb += *p == ',';
     size_t* sizes = malloc(nb * sizeof(size_t));
     char* ss = strdup(o->sizes);
+    if (!sizes || !ss) die("oom");
     char* save = NULL;
     size_t i = 0, tot = 0;
     for (char* t = strtok_r(ss, ",", &save); t; t = strtok_r(NULL, ",", &save))
@@ -779,7 +789,7 @@ static int cmdFinalizeDict(const Opts* o, const unsigned char* src, size_t n) {
     if (tot != n) die("sizes do not cover input length");
     size_t cap = cn + (64 << 10);
     unsigned char* dst = malloc(cap);
-    if (!sizes || !ss || !dst) die("oom");
+    if (!dst) die("oom");
     ZDICT_params_t p = { o->level, 0, o->dictID };
     size_t r = ZDICT_finalizeDictionary(dst, cap, content, cn, src, sizes, (unsigned)i, p);
     if (ZDICT_isError(r)) dieErr(r);

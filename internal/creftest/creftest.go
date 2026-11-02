@@ -306,7 +306,30 @@ func deBruijn() []byte {
 func Inputs(t testing.TB) map[string][]byte {
 	t.Helper()
 	m := map[string][]byte{}
-	add := func(name string, b []byte) { m[name] = b }
+	srcs, _ := inputSources(t)
+	for name, gen := range srcs {
+		b, err := gen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m[name] = b
+	}
+	return m
+}
+
+// source produces one input on demand.
+type source func() ([]byte, error)
+
+func fixed(b []byte) source { return func() ([]byte, error) { return b, nil } }
+
+// inputSources returns Inputs as generators, so the decode corpus can
+// rebuild one input at a time instead of holding them all, and the names of
+// the inputs over 1 MiB (only without testing.Short()). Only the large
+// inputs are deferred; the small ones are built here.
+func inputSources(t testing.TB) (m map[string]source, large map[string]bool) {
+	t.Helper()
+	m, large = map[string]source{}, map[string]bool{}
+	add := func(name string, b []byte) { m[name] = fixed(b) }
 
 	add("size0", []byte{})
 	add("size1", []byte{'x'})
@@ -358,7 +381,11 @@ func Inputs(t testing.TB) map[string][]byte {
 	}
 
 	if testing.Short() {
-		return m
+		return m, large
+	}
+	small := map[string]bool{}
+	for k := range m {
+		small[k] = true
 	}
 	// Window-size boundary at level 3 (windowLog 21) and other large inputs.
 	for _, d := range []int{-1, 0, 1} {
@@ -369,20 +396,20 @@ func Inputs(t testing.TB) map[string][]byte {
 		} else if d > 0 {
 			name += "+1"
 		}
-		add(name, text(uint64(n)+11, n))
+		m[name] = func() ([]byte, error) { return text(uint64(n)+11, n), nil }
 	}
-	add("text4MiB", text(99, 4*mib))
-	add("random2MiB", random(44, 2*mib))
+	m["text4MiB"] = func() ([]byte, error) { return text(99, 4*mib), nil }
+	m["random2MiB"] = func() ([]byte, error) { return random(44, 2*mib), nil }
 	ents, _ := filepath.Glob(filepath.Join(root(), "bench", "corpus", "silesia", "*"))
-	sort.Strings(ents)
 	for _, p := range ents {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatalf("read %s: %v", p, err)
-		}
-		add("silesia/"+filepath.Base(p), b)
+		m["silesia/"+filepath.Base(p)] = func() ([]byte, error) { return os.ReadFile(p) }
 	}
-	return m
+	for k := range m {
+		if !small[k] {
+			large[k] = true
+		}
+	}
+	return m, large
 }
 
 // CError is a libzstd error reported by a cref decoder mode: its
@@ -430,7 +457,10 @@ func runDec(t testing.TB, mode string, frame []byte, args ...string) ([]byte, *C
 
 // DecodeCRef decompresses frame (any number of frames) with `cref
 // decompress args...` (ZSTD_decompressDCtx). On a libzstd error it returns
-// the error and no output.
+// the error and no output. Empty input succeeds with empty output; a
+// truncated frame (down to 1 byte) fails with srcSize_wrong (72), or
+// checksum_wrong (22) when the cut is in or right before the checksum, where
+// DStreamCRef reports "incomplete" instead.
 func DecodeCRef(t testing.TB, frame []byte, args ...string) ([]byte, *CError) {
 	t.Helper()
 	return runDec(t, "decompress", frame, args...)
@@ -439,7 +469,8 @@ func DecodeCRef(t testing.TB, frame []byte, args ...string) ([]byte, *CError) {
 // DStreamCRef decompresses frame with `cref dstream args...`
 // (ZSTD_decompressStream; args must give -chunks or -chunk-size, and
 // -out-size). It returns every byte produced, including those produced before
-// an error.
+// an error. Empty input succeeds with empty output; input ending inside a
+// frame returns CError{-1, "incomplete"} (DecodeCRef: srcSize_wrong).
 func DStreamCRef(t testing.TB, frame []byte, args ...string) ([]byte, *CError) {
 	t.Helper()
 	return runDec(t, "dstream", frame, args...)
@@ -461,35 +492,111 @@ func FHeaderCRef(t testing.TB, in []byte) map[string]string {
 
 // Frame is one decode corpus entry. Data is the compressed input (one or
 // more frames, possibly with skippable frames), Want what it decodes to.
-// Dict is the dictionary it needs (nil: none), RawDict whether that
-// dictionary is raw content, and Args the extra cref decompress/dstream
-// arguments that load it (-dict FILE [-raw-dict 1]).
+// Dict is the dictionary the decoder is given (nil: none), RawDict whether
+// that dictionary is raw content, and Args the extra cref
+// decompress/dstream arguments that load it (-dict FILE [-raw-dict 1]).
+// CErr, when not empty, is the ZSTD_getErrorName text C fails with (both
+// decompress and dstream); Want is then empty.
 type Frame struct {
 	Data, Want, Dict []byte
 	RawDict          bool
 	Args             []string
+	CErr             string
 }
 
-var frames struct {
+// corpusEntry is a decode corpus entry's index record: where its bytes are,
+// never the bytes themselves (LoadFrame reads them).
+type corpusEntry struct {
+	file    string   // cache file of a generated frame; "" for a concatenation
+	src     source   // the generator's input: Want, unless noWant
+	noWant  bool     // Want is empty (skippable frame, C error)
+	sum     [32]byte // sha256 of Want, checked by LoadFrame
+	parts   []string // a concatenation of these entries
+	hidden  bool     // a part only, not listed by FrameNames
+	dict    []byte
+	rawDict bool
+	args    []string
+	cerr    string
+}
+
+var corpus struct {
 	once sync.Once
-	m    map[string]Frame
+	m    map[string]*corpusEntry
 	ok   bool
 }
 
-// Frames returns the decode corpus (see buildFrames), built once per test
-// binary. Callers must not modify the map or the slices.
-func Frames(t testing.TB) map[string]Frame {
+func corpusIndex(t testing.TB) map[string]*corpusEntry {
 	t.Helper()
 	bin := Bin(t)
 	cli := tool(t, "ref/zstd/programs/zstd", "run ref/fetch.sh")
-	frames.once.Do(func() {
-		frames.m = buildFrames(t, bin, cli)
-		frames.ok = true
+	corpus.once.Do(func() {
+		corpus.m = buildCorpus(t, bin, cli)
+		corpus.ok = true
 	})
-	if !frames.ok {
+	if !corpus.ok {
 		t.Fatal("decode corpus: building it failed in an earlier test")
 	}
-	return frames.m
+	return corpus.m
+}
+
+// FrameNames returns the sorted names of the decode corpus entries (see
+// buildCorpus). The corpus is built (or found in its cache) once per test
+// binary; only its index stays in memory.
+func FrameNames(t testing.TB) []string {
+	t.Helper()
+	var names []string
+	for k, e := range corpusIndex(t) {
+		if !e.hidden {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// LoadFrame reads one decode corpus entry: Data from the cache, Want
+// rebuilt from its source input and checked against the hash recorded when
+// the frame was generated.
+func LoadFrame(t testing.TB, name string) Frame {
+	t.Helper()
+	e, ok := corpusIndex(t)[name]
+	if !ok {
+		t.Fatalf("decode corpus: no entry %s", name)
+	}
+	f := Frame{Dict: e.dict, RawDict: e.rawDict, Args: e.args, CErr: e.cerr}
+	if e.parts != nil {
+		f.Want = []byte{}
+		for _, p := range e.parts {
+			g := LoadFrame(t, p)
+			f.Data = append(f.Data, g.Data...)
+			f.Want = append(f.Want, g.Want...)
+		}
+		return f
+	}
+	f.Data = mustRead(t, e.file)
+	if e.noWant {
+		return f
+	}
+	w, err := e.src()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256.Sum256(w) != e.sum {
+		t.Fatalf("decode corpus %s: rebuilt input differs from the one the frame was made from", name)
+	}
+	f.Want = w
+	return f
+}
+
+// Frames loads the whole decode corpus into memory. That is fine with
+// testing.Short(); otherwise (silesia) prefer FrameNames and LoadFrame.
+func Frames(t testing.TB) map[string]Frame {
+	t.Helper()
+	m := map[string]Frame{}
+	for _, name := range FrameNames(t) {
+		m[name] = LoadFrame(t, name)
+	}
+	return m
 }
 
 // mustRead reads a file, failing the test on error.
@@ -502,17 +609,21 @@ func mustRead(t testing.TB, p string) []byte {
 	return b
 }
 
-// buildFrames builds the decode corpus with cref and the v1.5.7 zstd CLI:
+// buildCorpus builds the decode corpus index with cref and the v1.5.7 zstd
+// CLI:
 //
 //   - compress/<input>/L<l>/c<0|1>/p<0|1>: every Inputs entry at levels
 //     -5, 1, 3, 7, 11, 19, checksum 0/1, pledged size 0/1 (cref compress).
 //     This includes all-zero input (RLE blocks), random input (raw blocks,
-//     raw literals) and litrle (RLE literals).
+//     raw literals) and litrle (RLE literals). Inputs over 1 MiB (only
+//     without testing.Short()) get levels 1, 3, 19 with c0/p1 and c1/p0.
 //   - stream/...: cref stream frames with flush points (short blocks, and
 //     the empty last block after a flush).
 //   - window/<input>/L<l>/W<10|17>: -window-log 10 and 17 frames.
 //   - dict/<dict>/<input>/L<l>/c<0|1>: frames compressed with train.dict,
 //     train-12k.dict and raw-content dickens-32k.raw (zstd/testdata).
+//   - dict-err/...: a train.dict frame decoded without a dictionary, and
+//     with train-12k.dict (dictID mismatch): C fails with dictionary_wrong.
 //   - multi/...: concatenations of frames.
 //   - skippable/...: skippable frames before, between and after frames, and
 //     skippable-only input.
@@ -522,141 +633,179 @@ func mustRead(t testing.TB, p string) []byte {
 //     --long=27 -19` (stdin: the 128 MiB window stays in the header) and
 //     `zstd --rsyncable -T2` frames.
 //
-// Every generated frame is cached under os.TempDir()/fastzstd-frames-<hash
-// of the cref and zstd binaries>, in a file named after the entry and a hash
-// of its tool, arguments and input, so changed inputs regenerate.
-// Inputs over 1 MiB are included only when !testing.Short().
-func buildFrames(t testing.TB, bin, cli string) map[string]Frame {
+// Only compressed frames are cached, under os.TempDir()/fastzstd-frames-<hash
+// of the cref and zstd binaries>, in files named after the entry and a hash
+// of its tool, arguments and input, so changed inputs regenerate. Creating a
+// new hash directory deletes the other fastzstd-frames-* directories. Inputs
+// are generated one job at a time and dropped, so memory stays bounded by
+// the parallel jobs.
+func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
 	t.Helper()
 	h := sha256.New()
 	h.Write(mustRead(t, bin))
 	h.Write(mustRead(t, cli))
-	dir := filepath.Join(os.TempDir(), "fastzstd-frames-"+hex.EncodeToString(h.Sum(nil))[:16])
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	const prefix = "fastzstd-frames-"
+	dir := filepath.Join(os.TempDir(), prefix+hex.EncodeToString(h.Sum(nil))[:16])
+	if err := os.Mkdir(dir, 0o755); err == nil {
+		ents, _ := os.ReadDir(os.TempDir())
+		for _, e := range ents {
+			if p := filepath.Join(os.TempDir(), e.Name()); strings.HasPrefix(e.Name(), prefix) && p != dir {
+				os.RemoveAll(p)
+			}
+		}
+	} else if !os.IsExist(err) {
 		t.Fatal(err)
 	}
 
 	type job struct {
 		name, tool string
-		in         []byte
 		args       []string
-		f          Frame
+		e          *corpusEntry
 	}
+	m := map[string]*corpusEntry{}
 	var jobs []job
-	cref := func(name string, in []byte, f Frame, args ...string) {
-		f.Want = in
-		jobs = append(jobs, job{name, bin, in, args, f})
+	add := func(name, tool string, src source, e corpusEntry, args ...string) {
+		e.src = src
+		m[name] = &e
+		jobs = append(jobs, job{name, tool, args, &e})
 	}
-	zcli := func(name string, in []byte, args ...string) {
-		jobs = append(jobs, job{name, cli, in, append(args, "-q", "-c"), Frame{Want: in}})
+	cref := func(name string, src source, e corpusEntry, args ...string) { add(name, bin, src, e, args...) }
+	zcli := func(name string, src source, args ...string) {
+		add(name, cli, src, corpusEntry{}, append(args, "-q", "-c")...)
 	}
 
-	inputs := Inputs(t)
-	names := make([]string, 0, len(inputs))
-	for k := range inputs {
-		names = append(names, k)
+	inputs, large := inputSources(t)
+	in := func(name string) source {
+		s, ok := inputs[name]
+		if !ok {
+			t.Fatalf("decode corpus: no input %s", name)
+		}
+		return s
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		for _, l := range []string{"-5", "1", "3", "7", "11", "19"} {
-			for _, c := range []string{"0", "1"} {
-				for _, p := range []string{"0", "1"} {
-					cref("compress/"+name+"/L"+l+"/c"+c+"/p"+p, inputs[name], Frame{},
-						"compress", "-level", l, "-checksum", c, "-pledged", p)
+	for name, s := range inputs {
+		type set struct{ l, c, p string }
+		var sets []set
+		if large[name] {
+			for _, l := range []string{"1", "3", "19"} {
+				sets = append(sets, set{l, "0", "1"}, set{l, "1", "0"})
+			}
+		} else {
+			for _, l := range []string{"-5", "1", "3", "7", "11", "19"} {
+				for _, c := range []string{"0", "1"} {
+					for _, p := range []string{"0", "1"} {
+						sets = append(sets, set{l, c, p})
+					}
 				}
 			}
+		}
+		for _, v := range sets {
+			cref("compress/"+name+"/L"+v.l+"/c"+v.c+"/p"+v.p, s, corpusEntry{},
+				"compress", "-level", v.l, "-checksum", v.c, "-pledged", v.p)
 		}
 	}
 
 	for _, name := range []string{"size0", "text128KiB+1", "zstd-format.md", "litrle"} {
-		in := inputs[name]
+		b, err := in(name)()
+		if err != nil {
+			t.Fatal(err)
+		}
 		// Odd cut points with a flush after each of the first four chunks
 		// (two of them back to back, the second flushing nothing).
 		var cs []string
 		pos := 0
 		for _, sz := range []int{1000, 0, 1, 5000, 30000} {
-			sz = min(sz, len(in)-pos)
+			sz = min(sz, len(b)-pos)
 			cs = append(cs, itoa(sz))
 			pos += sz
 		}
-		cs = append(cs, itoa(len(in)-pos))
-		cref("stream/"+name+"/cuts", in, Frame{}, "stream", "-level", "3", "-checksum", "1",
+		cs = append(cs, itoa(len(b)-pos))
+		cref("stream/"+name+"/cuts", fixed(b), corpusEntry{}, "stream", "-level", "3", "-checksum", "1",
 			"-chunks", strings.Join(cs, ","), "-flush-after", "0,1,2,3")
 		// 4 KiB chunks, each flushed: short blocks; then an empty last block.
 		cs, fl := nil, []string{}
-		for i := 0; i*4096 < len(in); i++ {
-			cs = append(cs, itoa(min(4096, len(in)-i*4096)))
+		for i := 0; i*4096 < len(b); i++ {
+			cs = append(cs, itoa(min(4096, len(b)-i*4096)))
 			fl = append(fl, itoa(i))
 		}
 		if len(cs) == 0 {
 			cs, fl = []string{"0"}, []string{"0"}
 		}
-		cref("stream/"+name+"/flush4k", in, Frame{}, "stream", "-level", "1",
+		cref("stream/"+name+"/flush4k", fixed(b), corpusEntry{}, "stream", "-level", "1",
 			"-chunks", strings.Join(cs, ","), "-flush-after", strings.Join(fl, ","))
 	}
 
 	for _, name := range []string{"text256KiB", "zstd-format.md", "litrle"} {
 		for _, l := range []string{"3", "19"} {
 			for _, w := range []string{"10", "17"} {
-				cref("window/"+name+"/L"+l+"/W"+w, inputs[name], Frame{},
+				cref("window/"+name+"/L"+l+"/W"+w, in(name), corpusEntry{},
 					"compress", "-level", l, "-window-log", w)
 			}
 		}
 	}
 
+	dictEntry := func(file string, raw bool) corpusEntry {
+		p := filepath.Join(root(), "zstd", "testdata", file)
+		e := corpusEntry{dict: mustRead(t, p), rawDict: raw, args: []string{"-dict", p}}
+		if raw {
+			e.args = append(e.args, "-raw-dict", "1")
+		}
+		return e
+	}
 	for _, d := range []struct {
 		file string
 		raw  bool
 	}{{"train.dict", false}, {"train-12k.dict", false}, {"dickens-32k.raw", true}} {
-		p := filepath.Join(root(), "zstd", "testdata", d.file)
-		f := Frame{Dict: mustRead(t, p), RawDict: d.raw, Args: []string{"-dict", p}}
-		if d.raw {
-			f.Args = append(f.Args, "-raw-dict", "1")
-		}
+		e := dictEntry(d.file, d.raw)
 		for _, name := range []string{"size0", "size1", "random-small", "text16KiB", "zstd-README.md"} {
 			for _, l := range []string{"1", "3", "19"} {
 				for _, c := range []string{"0", "1"} {
-					cref("dict/"+d.file+"/"+name+"/L"+l+"/c"+c, inputs[name], f,
-						append([]string{"compress", "-level", l, "-checksum", c}, f.Args...)...)
+					cref("dict/"+d.file+"/"+name+"/L"+l+"/c"+c, in(name), e,
+						append([]string{"compress", "-level", l, "-checksum", c}, e.args...)...)
 				}
 			}
 		}
 	}
+	train, train12k := dictEntry("train.dict", false), dictEntry("train-12k.dict", false)
+	trainArgs := append([]string{"compress", "-level", "3"}, train.args...)
+	cref("dict-err/missing/train.dict/zstd-README.md", in("zstd-README.md"),
+		corpusEntry{noWant: true, cerr: "Dictionary mismatch"}, trainArgs...)
+	train12k.noWant, train12k.cerr = true, "Dictionary mismatch"
+	cref("dict-err/mismatch/train.dict-vs-train-12k.dict/zstd-README.md", in("zstd-README.md"), train12k, trainArgs...)
 
-	skip := map[string][]byte{
-		"s0":     []byte("a skippable frame payload"),
-		"s7":     {},
-		"s15":    random(46, 1000),
-		"s15big": random(47, 70000),
-	}
-	for _, k := range []string{"s0", "s7", "s15", "s15big"} {
-		v := strings.TrimSuffix(strings.TrimPrefix(k, "s"), "big")
-		jobs = append(jobs, job{"skippable-frame/" + k, bin, skip[k], []string{"skippable", "-variant", v}, Frame{}})
+	for k, v := range map[string]struct {
+		variant string
+		payload []byte
+	}{
+		"s0":     {"0", []byte("a skippable frame payload")},
+		"s7":     {"7", []byte{}},
+		"s15":    {"15", random(46, 1000)},
+		"s15big": {"15", random(47, 70000)},
+	} {
+		cref("skippable-frame/"+k, fixed(v.payload), corpusEntry{noWant: true, hidden: true}, "skippable", "-variant", v.variant)
 	}
 
 	// Small frames for the decoder seeds' coverage: RLE literals and RLE
 	// sequence table modes, and a compressed block with no sequences.
 	rs := rleSeqs()
 	for _, l := range []string{"1", "3", "19"} {
-		cref("seed/rle-seqs/L"+l, rs, Frame{}, "stream", "-level", l, "-checksum", "1",
+		cref("seed/rle-seqs/L"+l, fixed(rs), corpusEntry{}, "stream", "-level", l, "-checksum", "1",
 			"-chunks", "8209,"+itoa(len(rs)-8209), "-flush-after", "0")
-		cref("seed/no-seqs/L"+l, deBruijn(), Frame{}, "compress", "-level", l)
+		cref("seed/no-seqs/L"+l, fixed(deBruijn()), corpusEntry{}, "compress", "-level", l)
 	}
 
-	mt := text(1234, mib)
+	mt := source(func() ([]byte, error) { return text(1234, mib), nil })
 	zcli("cli/T4-19-B512KiB/text1MiB", mt, "-T4", "-19", "-B512KiB")
 	zcli("cli/rsyncable/text1MiB", mt, "--rsyncable", "-T2", "-3")
 	for _, name := range []string{"text256KiB", "zstd-format.md"} {
-		zcli("cli/long27-19/"+name, inputs[name], "--long=27", "-19")
+		zcli("cli/long27-19/"+name, in(name), "--long=27", "-19")
 	}
 	if !testing.Short() {
-		zcli("cli/T4-19/text4MiB", inputs["text4MiB"], "-T4", "-19")
-		zcli("cli/rsyncable/text4MiB", inputs["text4MiB"], "--rsyncable", "-T2", "-3")
-		zcli("cli/long27-19/text4MiB", inputs["text4MiB"], "--long=27", "-19")
+		zcli("cli/T4-19/text4MiB", in("text4MiB"), "-T4", "-19")
+		zcli("cli/rsyncable/text4MiB", in("text4MiB"), "--rsyncable", "-T2", "-3")
+		zcli("cli/long27-19/text4MiB", in("text4MiB"), "--long=27", "-19")
 	}
 
-	// Run the jobs in parallel, through the cache.
-	out := make([][]byte, len(jobs))
+	// Run the jobs in parallel, through the cache, keeping no bytes.
 	errs := make([]error, len(jobs))
 	sem := make(chan struct{}, max(1, runtime.GOMAXPROCS(0)/2))
 	var wg sync.WaitGroup
@@ -666,43 +815,42 @@ func buildFrames(t testing.TB, bin, cli string) map[string]Frame {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			k := sha256.New()
-			k.Write([]byte(filepath.Base(j.tool) + "\x00" + strings.Join(j.args, "\x00") + "\x00"))
-			k.Write(j.in)
-			p := filepath.Join(dir, strings.ReplaceAll(j.name, "/", "__")+"-"+hex.EncodeToString(k.Sum(nil))[:12])
-			if b, err := os.ReadFile(p); err == nil {
-				out[i] = b
+			b, err := j.e.src()
+			if err != nil {
+				errs[i] = err
 				return
 			}
-			b, err := runCmd(j.tool, j.in, j.args...)
-			if err == nil {
-				err = writeAtomic(dir, p, b)
+			if !j.e.noWant {
+				j.e.sum = sha256.Sum256(b)
 			}
-			out[i], errs[i] = b, err
+			k := sha256.New()
+			k.Write([]byte(filepath.Base(j.tool) + "\x00" + strings.Join(j.args, "\x00") + "\x00"))
+			k.Write(b)
+			j.e.file = filepath.Join(dir, strings.ReplaceAll(j.name, "/", "__")+"-"+hex.EncodeToString(k.Sum(nil))[:12])
+			if _, err := os.Stat(j.e.file); err == nil {
+				return
+			}
+			out, err := runCmd(j.tool, b, j.args...)
+			if err == nil {
+				err = writeAtomic(dir, j.e.file, out)
+			}
+			errs[i] = err
 		}()
 	}
 	wg.Wait()
-	m := map[string]Frame{}
 	for i, j := range jobs {
 		if errs[i] != nil {
 			t.Fatalf("decode corpus %s: %v", j.name, errs[i])
 		}
-		j.f.Data = out[i]
-		m[j.name] = j.f
 	}
 
 	cat := func(name string, parts ...string) {
-		var f Frame
 		for _, p := range parts {
-			g, ok := m[p]
-			if !ok {
+			if m[p] == nil {
 				t.Fatalf("decode corpus %s: no part %s", name, p)
 			}
-			f.Data = append(f.Data, g.Data...)
-			f.Want = append(f.Want, g.Want...)
 		}
-		f.Want = append([]byte{}, f.Want...) // non-nil
-		m[name] = f
+		m[name] = &corpusEntry{parts: parts}
 	}
 	a := "compress/text16KiB/L3/c1/p1"
 	b := "compress/zstd-README.md/L1/c0/p0"
@@ -715,9 +863,6 @@ func buildFrames(t testing.TB, bin, cli string) map[string]Frame {
 	cat("skippable/between", a, "skippable-frame/s0", b)
 	cat("skippable/after", a, "skippable-frame/s7")
 	cat("skippable/all", "skippable-frame/s15", a, "skippable-frame/s7", b, "skippable-frame/s15big")
-	for k := range skip {
-		delete(m, "skippable-frame/"+k)
-	}
 	return m
 }
 

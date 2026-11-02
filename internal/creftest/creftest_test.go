@@ -167,17 +167,17 @@ func TestCrefUnpledgedMatchesSingleChunkStream(t *testing.T) {
 }
 
 func TestCrefDecodeModes(t *testing.T) {
-	fs := Frames(t)
-	names := make([]string, 0, len(fs))
-	for k := range fs {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		f := fs[name]
+	for _, name := range FrameNames(t) {
 		t.Run(name, func(t *testing.T) {
+			f := LoadFrame(t, name)
 			check := func(mode string, got []byte, e *CError) {
 				t.Helper()
+				if f.CErr != "" {
+					if e == nil || e.Name != f.CErr {
+						t.Fatalf("%s: error %v, want %q", mode, e, f.CErr)
+					}
+					return
+				}
 				if e != nil {
 					t.Fatalf("%s: %v", mode, e)
 				}
@@ -195,6 +195,43 @@ func TestCrefDecodeModes(t *testing.T) {
 				check("dstream 1/1", got, e)
 			}
 		})
+	}
+}
+
+// TestCrefDecodeShortInput pins how decompress and dstream differ on empty
+// and truncated input (documented in cref.c and on DecodeCRef/DStreamCRef).
+func TestCrefDecodeShortInput(t *testing.T) {
+	in := text(12, 20000)
+	frame := Run(t, in, "compress", "-level", "3", "-checksum", "1")
+	ds := func(b []byte) ([]byte, *CError) { return DStreamCRef(t, b, "-chunk-size", "4096", "-out-size", "4096") }
+	for _, c := range []struct {
+		name string
+		in   []byte
+	}{{"empty", []byte{}}, {"nil", nil}} {
+		if got, e := DecodeCRef(t, c.in); e != nil || len(got) != 0 {
+			t.Errorf("%s: decompress %v, %d bytes", c.name, e, len(got))
+		}
+		if got, e := ds(c.in); e != nil || len(got) != 0 {
+			t.Errorf("%s: dstream %v, %d bytes", c.name, e, len(got))
+		}
+	}
+	for _, n := range []int{1, 3, 4, 100, len(frame) - 4, len(frame) - 1} {
+		cut := frame[:n]
+		// C reports a frame missing all or part of its checksum as checksum_wrong.
+		want := &CError{72, "Src size is incorrect"}
+		if n >= len(frame)-4 {
+			want = &CError{22, "Restored data doesn't match checksum"}
+		}
+		if _, e := DecodeCRef(t, cut); e == nil || *e != *want {
+			t.Errorf("%d bytes: decompress %v, want %v", n, e, want)
+		}
+		got, e := ds(cut)
+		if e == nil || e.Code != -1 || e.Name != "incomplete" {
+			t.Errorf("%d bytes: dstream %v, want incomplete", n, e)
+		}
+		if !bytes.HasPrefix(in, got) {
+			t.Errorf("%d bytes: dstream output is not a prefix of the content", n)
+		}
 	}
 }
 
