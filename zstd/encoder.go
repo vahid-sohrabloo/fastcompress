@@ -27,10 +27,14 @@ import (
 // set. An Encoder must not be used for streaming from several goroutines
 // at once, and ResetWithOptions must not run while EncodeAll calls are
 // running.
+//
+// The zero value is not usable: EncodeAll panics and the streaming methods
+// return an error.
 type Encoder struct {
 	o     encoderOptions
-	cd    *cdict    // the dictionary of o, digested; shared by all contexts
-	cctxs sync.Pool // *cctx configured from o; one per concurrent EncodeAll
+	cd    *cdict        // the dictionary of o, digested; shared by all contexts
+	cctxs sync.Pool     // *cctx configured from o; one per concurrent EncodeAll
+	sem   chan struct{} // WithEncoderConcurrency: one slot per context EncodeAll holds; nil until NewWriter
 	s     encStream
 }
 
@@ -51,6 +55,10 @@ type encStream struct {
 // written but the Encoder has no io.Writer (NewWriter(nil) without Reset).
 var errNilWriter = errors.New("zstd: Encoder has no io.Writer (use Reset to set one)")
 
+// errEncoderZero is returned (or, by EncodeAll, panicked with) when an
+// Encoder was not created by NewWriter.
+var errEncoderZero = errors.New("zstd: Encoder not initialized (use NewWriter to create one)")
+
 // NewWriter will create a new Zstandard encoder.
 // If the encoder will be used for encoding blocks a nil writer can be used.
 func NewWriter(w io.Writer, opts ...EOption) (*Encoder, error) {
@@ -62,6 +70,7 @@ func NewWriter(w io.Writer, opts ...EOption) (*Encoder, error) {
 		}
 	}
 	e.cctxs.New = func() any { return e.newCCtx() }
+	e.sem = make(chan struct{}, e.o.concurrent)
 	e.s.w = w
 	e.s.pledged = -1
 	cd, err := makeCDict(&e.o)
@@ -142,23 +151,37 @@ func configureParams(c *cctx, o *encoderOptions) {
 // context does not change the output (at SpeedBetterCompression and
 // SpeedBestCompression C's row match finder re-salts its hash on every
 // reset, which this port mirrors, but the salt only relabels hash rows), so
-// the frame does not depend on which pooled context serves the call.
+// the frame does not depend on which pooled context serves the call. At
+// most WithEncoderConcurrency calls hold a context at once; further calls
+// wait for one to finish.
 func (e *Encoder) EncodeAll(src, dst []byte) []byte {
+	if e.sem == nil {
+		panic(errEncoderZero)
+	}
 	if len(src) == 0 && !e.o.zeroFrames {
 		return dst
 	}
+	e.sem <- struct{}{}
 	c := e.cctxs.Get().(*cctx)
+	if cctxHeldHook != nil {
+		cctxHeldHook()
+	}
 	e.configure(c) // ResetWithOptions may have changed the options since c was pooled
 	dst, err := c.compress2(dst, src)
 	if err != nil {
 		panic(err) // unreachable with validated options
 	}
 	e.cctxs.Put(c)
+	<-e.sem
 	if e.o.pad > 1 {
 		dst = addPadding(dst, e.o.pad)
 	}
 	return dst
 }
+
+// cctxHeldHook, when set (by tests), is called by EncodeAll while it holds
+// a context. C has no equivalent.
+var cctxHeldHook func()
 
 // MaxEncodedSize returns the expected maximum size of an encoded block or stream.
 func (e *Encoder) MaxEncodedSize(size int) int {
@@ -212,6 +235,9 @@ func appendPadding(b []byte, total int64, n int) []byte {
 // C: ZSTD_compressStream2(ZSTD_e_continue), repeated until p is consumed.
 // Errors, including those of the io.Writer, are sticky until Reset.
 func (e *Encoder) Write(p []byte) (n int, err error) {
+	if e.sem == nil {
+		return 0, errEncoderZero
+	}
 	s := &e.s
 	if err := s.check(); err != nil {
 		return 0, err
@@ -248,6 +274,9 @@ func (e *Encoder) Write(p []byte) (n int, err error) {
 // Every chunk read is passed to Write; how the input is split does not
 // change the output.
 func (e *Encoder) ReadFrom(r io.Reader) (n int64, err error) {
+	if e.sem == nil {
+		return 0, errEncoderZero
+	}
 	s := &e.s
 	if err := s.check(); err != nil {
 		return 0, err
@@ -279,6 +308,9 @@ func (e *Encoder) ReadFrom(r io.Reader) (n int64, err error) {
 // C: ZSTD_compressStream2(ZSTD_e_flush), repeated until it returns 0. With
 // nothing written since Reset (no frame started) it does nothing.
 func (e *Encoder) Flush() error {
+	if e.sem == nil {
+		return errEncoderZero
+	}
 	s := &e.s
 	if err := s.check(); err != nil {
 		return err
@@ -301,6 +333,9 @@ func (e *Encoder) Flush() error {
 // the pledged one; Close returns that error too when nothing was written
 // (where C would pledge 0 instead). Closing a closed Encoder returns nil.
 func (e *Encoder) Close() error {
+	if e.sem == nil {
+		return errEncoderZero
+	}
 	s := &e.s
 	if s.err != nil {
 		return s.err
@@ -373,6 +408,9 @@ func (e *Encoder) ResetContentSize(w io.Writer, size int64) {
 // allowed); on error nothing is reset. The new options apply to the next
 // stream and to EncodeAll. A new dictionary is digested here.
 func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
+	if e.sem == nil {
+		return errEncoderZero
+	}
 	o := e.o
 	for _, opt := range opts {
 		if err := opt(&o); err != nil {

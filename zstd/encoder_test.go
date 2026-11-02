@@ -3,10 +3,13 @@ package zstd
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
 )
@@ -161,6 +164,72 @@ func TestEncodeAllConcurrent(t *testing.T) {
 		}
 		wg.Wait()
 	}
+}
+
+// TestEncodeAllConcurrencyLimit: with WithEncoderConcurrency(2), 50
+// goroutines calling EncodeAll never hold more than 2 contexts at once, and
+// the output is unchanged. cctxHeldHook counts the holders and sleeps so
+// that the waiting calls pile up behind the limit.
+func TestEncodeAllConcurrencyLimit(t *testing.T) {
+	in := creftest.Inputs(t)["text16KiB"]
+	want := crefLevel1(t, in)
+	var live, peak atomic.Int32
+	cctxHeldHook = func() {
+		n := live.Add(1)
+		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+		}
+		time.Sleep(time.Millisecond)
+		live.Add(-1)
+	}
+	defer func() { cctxHeldHook = nil }()
+	e := newTestEncoder(t, WithEncoderLevel(SpeedFastest), WithEncoderConcurrency(2))
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 4 {
+				if got := e.EncodeAll(in, nil); !bytes.Equal(got, want) {
+					t.Error("output differs from cref")
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if p := peak.Load(); p != 2 {
+		t.Fatalf("peak contexts held at once = %d, want 2", p)
+	}
+}
+
+// TestEncoderZeroValue: a zero Encoder (not from NewWriter) fails clearly.
+func TestEncoderZeroValue(t *testing.T) {
+	var e Encoder
+	if _, err := e.Write([]byte("x")); err != errEncoderZero {
+		t.Errorf("Write: %v", err)
+	}
+	if _, err := e.ReadFrom(strings.NewReader("x")); err != errEncoderZero {
+		t.Errorf("ReadFrom: %v", err)
+	}
+	if err := e.Flush(); err != errEncoderZero {
+		t.Errorf("Flush: %v", err)
+	}
+	if err := e.Close(); err != errEncoderZero {
+		t.Errorf("Close: %v", err)
+	}
+	if err := e.ResetWithOptions(nil); err != errEncoderZero {
+		t.Errorf("ResetWithOptions: %v", err)
+	}
+	e.Reset(io.Discard)
+	if _, err := e.Write([]byte("x")); err != errEncoderZero {
+		t.Errorf("Write after Reset: %v", err)
+	}
+	defer func() {
+		if r := recover(); r != errEncoderZero {
+			t.Errorf("EncodeAll panicked with %v, want errEncoderZero", r)
+		}
+	}()
+	e.EncodeAll([]byte("x"), nil)
+	t.Error("EncodeAll did not panic")
 }
 
 // TestEncodeAllPadding: the output is C's frame followed by one skippable
