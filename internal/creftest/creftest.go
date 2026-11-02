@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -887,7 +888,7 @@ func CachedCLI(t testing.TB, name string, in []byte, args ...string) []byte {
 	bin := Bin(t)
 	cli := tool(t, "ref/zstd/programs/zstd", "run ref/fetch.sh")
 	dir := frameCacheDir(t, bin, cli)
-	args = append(args, "-q", "-c")
+	args = slices.Concat(args, []string{"-q", "-c"})
 	key, err := cacheKey(cli, args, in)
 	if err != nil {
 		t.Fatal(err)

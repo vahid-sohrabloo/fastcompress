@@ -1709,6 +1709,11 @@ func (d *dctx) checkContinuity(dst []byte, dstSize int) {
 		d.virtualStart = len(dst) - len(d.extDict)
 		d.prefixStart = len(dst)
 		d.previousDstEnd = len(dst)
+	}
+	if dstSize > 0 {
+		// Also when contiguous: the same array, but this slice's capacity,
+		// which the output up to len(dst)+dstSize (the next previousDstEnd)
+		// needs. C has no counterpart (a pointer has no capacity).
 		d.prevDst = dst[:cap(dst)]
 	}
 }

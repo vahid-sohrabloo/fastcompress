@@ -14,6 +14,7 @@ import (
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
 	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
 )
 
@@ -1180,6 +1181,8 @@ func TestExecSequenceBoundaries(t *testing.T) {
 		{"overlap 3, slow", 0, 20, 4, seq{4, 30, 3}, 0},
 		{"literals at op", 0, 0, 10, seq{10, 5, 30}, 0},
 		{"output catches up", 0, -5, 10, seq{10, 5, 30}, dErrBlockDstSizeTooSmall},
+		{"literals end at op", 0, -10, 10, seq{10, 5, 30}, 0},
+		{"literals past limit", 0, 200, 10, seq{11, 20, 30}, dErrCorruptionDetected},
 		{"offset beyond", 0, 200, 10, seq{10, 20, 1000}, dErrOffsetBeyondHistory},
 		{"size_t offset", 0, 200, 10, seq{10, 20, -3}, dErrOffsetBeyondHistory},
 		{"in extDict", 50, 200, 10, seq{10, 20, 140}, 0},
@@ -1484,5 +1487,236 @@ func TestDecompressBlockContinuity(t *testing.T) {
 	if string(d.extDict) != "0123456789" || d.prefixStart != 2 || d.virtualStart != -8 || d.previousDstEnd != 2 {
 		t.Fatalf("new buffer: extDict %q prefixStart %d virtualStart %d previousDstEnd %d",
 			d.extDict, d.prefixStart, d.virtualStart, d.previousDstEnd)
+	}
+
+	// Each half of C's dst == previousDstEnd alone: the same buffer at
+	// another position (a rewind), and another buffer at the same position.
+	b = append(b, "abcdef"...)
+	d.previousDstEnd = len(b)
+	d.checkContinuity(b[:5], 40) // same buffer, len 5 != previousDstEnd 8
+	if string(d.extDict) != "abcdef" || d.prefixStart != 5 || d.virtualStart != -1 {
+		t.Fatalf("rewind: extDict %q prefixStart %d virtualStart %d", d.extDict, d.prefixStart, d.virtualStart)
+	}
+	b = append(b[:5], "XYZ"...)
+	d.previousDstEnd = len(b)
+	c := make([]byte, len(b), 50) // another buffer, len == previousDstEnd
+	d.checkContinuity(c, 40)
+	if string(d.extDict) != "XYZ" || d.prefixStart != 8 || d.virtualStart != 5 {
+		t.Fatalf("other buffer: extDict %q prefixStart %d virtualStart %d", d.extDict, d.prefixStart, d.virtualStart)
+	}
+}
+
+// TestDecompressBlockContinuityGrowingCap: contiguous calls whose slices of
+// one array have a growing capacity, then another buffer. The extDict is
+// the earlier output, beyond the first slice's capacity (review I1: a stale
+// prevDst made this panic).
+func TestDecompressBlockContinuityGrowingCap(t *testing.T) {
+	d := new(dctx)
+	d.decompressBegin()
+	arr := make([]byte, 100)
+	block := []byte{0x20, 'a', 'b', 'c', 'd', 0x00} // 4 raw literals, no sequences
+	for i, dst := range [][]byte{arr[0:0:10], arr[0:4:100], arr[0:8:100]} {
+		n, e := d.decompressBlock(dst, block)
+		if e != 0 || n != 4 {
+			t.Fatalf("block %d: n %d err %d", i, n, e)
+		}
+	}
+	other := make([]byte, 0, 50)
+	if n, e := d.decompressBlock(other, block); e != 0 || n != 4 {
+		t.Fatalf("other buffer: n %d err %d", n, e)
+	}
+	if string(d.extDict) != "abcdabcdabcd" {
+		t.Fatalf("extDict %q", d.extDict)
+	}
+}
+
+// rleSeqsBlock returns a compressed block: raw literals lits, then the
+// sequences, all from RLE tables with LL, OF and ML codes llc, ofc (> 1,
+// so no repeat offsets) and mlc; each sequence gives its {ll, offset, ml}
+// values, which must be in the codes' ranges.
+func rleSeqsBlock(t *testing.T, lits []byte, llc, ofc, mlc byte, seqs []seq) []byte {
+	t.Helper()
+	b := make([]byte, len(lits)+16)
+	n, err := noCompressLiterals(b, lits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seqs) > 127 {
+		t.Fatal("too many sequences")
+	}
+	b = append(b[:n], byte(len(seqs)), 0x54, llc, ofc, mlc)
+	var bits [][2]uint64 // in the decoder's read order
+	for _, sq := range seqs {
+		of, ml, ll := uint64(sq.offset)-uint64(ofBase[ofc]), uint64(sq.matchLength)-uint64(mlBase[mlc]), uint64(sq.litLength)-uint64(llBase[llc])
+		if of >= 1<<ofBits[ofc] || ml >= 1<<mlBits[mlc] || ll >= 1<<llBits[llc] {
+			t.Fatalf("sequence %+v out of the codes' ranges", sq)
+		}
+		bits = append(bits, [2]uint64{of, uint64(ofBits[ofc])}, [2]uint64{ml, uint64(mlBits[mlc])}, [2]uint64{ll, uint64(llBits[llc])})
+	}
+	var c bitstream.CStream
+	buf := make([]byte, 16*len(seqs)+16)
+	if err := c.Init(buf); err != nil {
+		t.Fatal(err)
+	}
+	for i := len(bits) - 1; i >= 0; i-- {
+		c.AddBits(bits[i][0], uint(bits[i][1]))
+		c.FlushBits()
+	}
+	return append(b, buf[:c.Close()]...)
+}
+
+// refExecSeqs is the output of seqs over lits, byte by byte.
+func refExecSeqs(lits []byte, seqs []seq) []byte {
+	var out []byte
+	for _, sq := range seqs {
+		out = append(out, lits[:sq.litLength]...)
+		lits = lits[sq.litLength:]
+		for range sq.matchLength {
+			out = append(out, out[len(out)-sq.offset])
+		}
+	}
+	return append(out, lits...)
+}
+
+// TestDecompressBlockSplitLiterals drives the split-literal loops (raw
+// literals over 64 KiB, streaming, so ZSTD_split with an immediate split)
+// through their loop-level checks, with both the split body and the
+// prefetch decoder. The literals in dst are the first P of them and end at
+// min(dstCap, blockSizeMax) - 32; the other 64 KiB are in litExtraBuffer.
+func TestDecompressBlockSplitLiterals(t *testing.T) {
+	// P: the match wildcopy of the first case writes 16 + 32k bytes from
+	// op 64, so its last chunk ends 16 bytes past the literals' end (it
+	// would overwrite the next literals) only when that end is not itself a
+	// chunk boundary, as with P = 2016.
+	const P = 2016
+	rng := rand.New(rand.NewPCG(10, 10))
+	lits := make([]byte, litBufferExtraSize+P)
+	for i := range lits {
+		lits[i] = byte(rng.Uint32())
+	}
+	const llc29, llc25, ofc2, ofc5, mlc52 = 29, 25, 2, 5, 52 // LL [1024,2047], [64,127]; OF [1,4], [29,60]; ML [65539,131074]
+	litStart := blockSizeMax - wildcopyOverlength - P        // with dstCap >= blockSizeMax
+	for _, c := range []struct {
+		name          string
+		dstCap        int
+		llc, ofc, mlc byte
+		seqs          []seq
+		want          dErr
+	}{
+		// The match ends 10 bytes before the sequence's literals end: within
+		// WILDCOPY_OVERLENGTH, so the slow path, else the wildcopy would
+		// overwrite the next literals in dst.
+		{"match ends near its literals", litBufferExtraSize + P + litStart - 10, llc25, ofc5, mlc52,
+			[]seq{{64, litStart - 10, 40}}, 0},
+		// A sequence past oend while the literals are still in dst.
+		{"sequence past oend", 70000, llc25, ofc2, mlc52, []seq{{64, 70000 - 63, 1}}, dErrBlockDstSizeTooSmall},
+		// The second sequence's literals cross the split point; what is
+		// left of the literals in dst does not fit the output space.
+		{"leftover past oend", 70000, llc29, ofc2, mlc52, []seq{{1024, 68500, 1}, {2047, 65539, 1}}, dErrBlockDstSizeTooSmall},
+		// No sequence crosses the split point; the rest of the literals in
+		// dst does not fit the output space.
+		{"last segment past oend", 70000, llc29, ofc2, mlc52, []seq{{1024, 68500, 1}}, dErrBlockDstSizeTooSmall},
+		// Literals ending exactly at the split point, and one past it.
+		{"literals end at split point", litBufferExtraSize + P + 65539, llc29, ofc2, mlc52, []seq{{P, 65539, 1}}, 0},
+		{"literals cross split point by 1", litBufferExtraSize + P + 65539, llc29, ofc2, mlc52, []seq{{P + 1, 65539, 1}}, 0},
+		{"two sequences, second crosses", litBufferExtraSize + P + 2*65539, llc29, ofc2, mlc52,
+			[]seq{{1024, 65539, 3}, {1500, 65539, 2}}, 0},
+	} {
+		block := rleSeqsBlock(t, lits, c.llc, c.ofc, c.mlc, c.seqs)
+		want := refExecSeqs(lits, c.seqs)
+		for _, cold := range []bool{false, true} {
+			d := new(dctx)
+			d.decompressBegin()
+			d.isFrameDecompression = false
+			buf := make([]byte, 0, c.dstCap)
+			d.checkContinuity(buf, c.dstCap)
+			d.ddictIsCold = cold
+			long0 := seqLongBodyBlocks.Load()
+			n, e := d.decompressBlockInternal(buf, c.dstCap, block, isStreaming)
+			if took := seqLongBodyBlocks.Load() != long0; took != cold {
+				t.Errorf("%s (cold %v): prefetch decoder %v", c.name, cold, took)
+			}
+			if e != c.want {
+				t.Errorf("%s (cold %v): error %d, want %d", c.name, cold, e, c.want)
+				continue
+			}
+			if e == 0 && !bytes.Equal(buf[:n], want) {
+				t.Errorf("%s (cold %v): output differs (%d bytes, want %d)", c.name, cold, n, len(want))
+			}
+		}
+	}
+}
+
+// TestDecompressBlockOffsetInfo pins getOffsetInfo: the share of cells
+// with more than 22 offset bits, scaled to OffFSELog, and the most bits.
+func TestDecompressBlockOffsetInfo(t *testing.T) {
+	for _, c := range []struct {
+		tableLog    uint32
+		bits        []uint8 // the cells' nbAdditionalBits, the rest 0
+		share, maxB uint32
+	}{
+		{8, []uint8{23, 23, 23, 23, 23, 23, 23, 22}, 7, 23},
+		{8, []uint8{22, 22, 5}, 0, 22},
+		{5, []uint8{23, 24}, 16, 24},
+		{0, []uint8{30}, 256, 30},
+	} {
+		dt := make([]seqSymbol, 1+1<<c.tableLog)
+		dt[0].baseValue = c.tableLog
+		for i, b := range c.bits {
+			dt[1+i].nbAdditionalBits = b
+		}
+		if got := getOffsetInfo(dt, 1); got != (offsetInfo{c.share, c.maxB}) {
+			t.Errorf("tableLog %d bits %v: %+v, want share %d max %d", c.tableLog, c.bits, got, c.share, c.maxB)
+		}
+		if got := getOffsetInfo(dt, 0); got != (offsetInfo{}) {
+			t.Errorf("nbSeq 0: %+v", got)
+		}
+	}
+}
+
+// TestDecompressBlockPrefetchChoice pins when decompressBlockInternal
+// picks the prefetch decoder: history over 16 MiB, more than 8 sequences,
+// and at least 7 of 256 offset cells with more than 22 bits. The OF table
+// is an FSE table (tableLog 8) whose code-23 symbol has share cells.
+func TestDecompressBlockPrefetchChoice(t *testing.T) {
+	block := func(nbSeq int, share int16) []byte {
+		norm := make([]int16, 24)
+		norm[2], norm[23] = 256-share, share
+		nc := make([]byte, 64)
+		n, err := fse.WriteNCount(nc, norm, 23, 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// no literals; nbSeq; LL RLE, OF FSE, ML RLE; a bitstream (never
+		// read correctly: only the decoder choice matters).
+		b := append([]byte{0x00, byte(nbSeq), 0x64, 0}, nc[:n]...)
+		return append(b, 0, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x81)
+	}
+	for _, c := range []struct {
+		hist, nbSeq int
+		share       int16
+		want        bool
+	}{
+		{1<<24 + 1, 9, 7, true},
+		{1 << 24, 9, 7, false},
+		{1<<24 + 1, 8, 7, false},
+		{1<<24 + 1, 9, 6, false},
+		{1<<24 + 1, 9, 255, true},
+	} {
+		d := new(dctx)
+		d.decompressBegin()
+		d.isFrameDecompression = false
+		const dstCap = 1000
+		buf := make([]byte, 0, dstCap)
+		d.checkContinuity(buf, dstCap)
+		d.virtualStart = dstCap - c.hist // totalHistorySize = 0 + min(dstCap, bsMax) - virtualStart
+		long0 := seqLongBodyBlocks.Load()
+		_, e := d.decompressBlockInternal(buf, dstCap, block(c.nbSeq, c.share), notStreaming)
+		if e == dErrCorruptionDetected && d.ofTptr[0].baseValue != 8 {
+			t.Fatalf("%+v: OF table not built", c)
+		}
+		if took := seqLongBodyBlocks.Load() != long0; took != c.want {
+			t.Errorf("%+v: prefetch decoder %v, want %v (err %d)", c, took, c.want, e)
+		}
 	}
 }
