@@ -34,9 +34,14 @@ jobs:
       - name: Build cref
         run: make -C ref/cref
       - name: Test
-        run: go test ./...
+        run: go test -timeout 60m ./...
       - name: Test (noasm)
-        run: go test -tags noasm ./...
+        run: go test -timeout 60m -tags noasm ./...
+      - name: Test (386, short)
+        if: runner.arch == 'X64'
+        env:
+          GOARCH: "386"
+        run: go test -timeout 60m -short ./...
       - name: Test (race)
         if: runner.arch == 'X64'
         # The race runtime needs cgo on linux/amd64. The library itself has no
@@ -46,6 +51,30 @@ jobs:
         run: go test -race -short ./...
       - name: API check
         run: scripts/apicheck.sh --subset
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: go vet (noasm)
+        run: go vet -tags noasm ./...
+      - name: go vet (386)
+        env:
+          GOARCH: "386"
+        run: go vet ./...
+      - name: go vet (arm64)
+        env:
+          GOARCH: arm64
+        run: go vet ./...
 
   cross-build:
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
