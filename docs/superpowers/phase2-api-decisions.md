@@ -127,3 +127,9 @@ C's decoder is single-threaded. The design adds threads only at points C's own s
 - **`InspectDictionary`:** returns an error on raw content that is not in zstd dictionary format (the doc is silent; `WithDecoderDicts` requires that format, doc:214-215).
 - **`WithDecoderMaxWindow`:** the doc default of 512 MB equals `1<<29`; no conflict.
 - **Error-mapping table:** sentinel messages are in `api/klauspost-zstd.txt`. The doc has no per-error comments, so the table is a designer call that cannot be checked against doc text.
+
+---
+
+## Phase 1 API notes
+
+- **`EncoderLevel.String()` names (user ruling, 2026-11-02).** `SpeedFastest`, `SpeedDefault`, `SpeedBetterCompression` and `SpeedBestCompression` print as "fastest", "default", "better" and "best"; any other value prints "invalid". `EncoderLevelFromString` accepts these names, case-insensitively. The names are not in the API snapshot or the doc text: they are klauspost/compress's observable behaviour, kept so that code that stores or parses level names keeps working. The user ruled them part of the drop-in API. The numeric values of the level constants (1 to 4, with 0 unset) follow from `go doc` listing `SpeedFastest EncoderLevel` first in an iota block. Purely internal identifiers (`levelUnset`, `encoderOptions.defaults` and the option fields) use our own or C-derived names.

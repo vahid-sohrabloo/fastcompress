@@ -63,14 +63,14 @@ var errEncoderZero = errors.New("zstd: Encoder not initialized (use NewWriter to
 // If the encoder will be used for encoding blocks a nil writer can be used.
 func NewWriter(w io.Writer, opts ...EOption) (*Encoder, error) {
 	e := &Encoder{}
-	e.o.setDefault()
+	e.o.defaults()
 	for _, o := range opts {
 		if err := o(&e.o); err != nil {
 			return nil, err
 		}
 	}
 	e.cctxs.New = func() any { return e.newCCtx() }
-	e.sem = make(chan struct{}, e.o.concurrent)
+	e.sem = make(chan struct{}, e.o.maxEncodeAll)
 	e.s.w = w
 	e.s.pledged = -1
 	cd, err := makeCDict(&e.o)
@@ -133,7 +133,7 @@ func (e *Encoder) configure(c *cctx) {
 // configureParams sets c's C parameters (not the dictionary) from o.
 func configureParams(c *cctx, o *encoderOptions) {
 	c.setLevel(zstdLevels[o.level])
-	c.setChecksum(o.crc)
+	c.setChecksum(o.checksum)
 	_ = c.setWindowLog(o.windowLog) // in range: validated by WithWindowSize
 	c.requestedParams.literalCompressionMode = o.literalCompressionMode()
 	c.hugePages = o.hugePages
@@ -173,8 +173,8 @@ func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 	}
 	e.cctxs.Put(c)
 	<-e.sem
-	if e.o.pad > 1 {
-		dst = addPadding(dst, e.o.pad)
+	if e.o.padMultiple > 1 {
+		dst = addPadding(dst, e.o.padMultiple)
 	}
 	return dst
 }
@@ -186,8 +186,8 @@ var cctxHeldHook func()
 // MaxEncodedSize returns the expected maximum size of an encoded block or stream.
 func (e *Encoder) MaxEncodedSize(size int) int {
 	n := compressBound(size)
-	if e.o.pad > 1 {
-		n += e.o.pad + skippableHeaderSize
+	if e.o.padMultiple > 1 {
+		n += e.o.padMultiple + skippableHeaderSize
 	}
 	return n
 }
@@ -360,8 +360,8 @@ func (e *Encoder) Close() error {
 	if err := e.drain(eEnd); err != nil {
 		return err
 	}
-	if e.o.pad > 1 {
-		if err := s.write(appendPadding(nil, s.nWritten, e.o.pad)); err != nil {
+	if e.o.padMultiple > 1 {
+		if err := s.write(appendPadding(nil, s.nWritten, e.o.padMultiple)); err != nil {
 			s.err = err
 			return err
 		}
@@ -417,7 +417,7 @@ func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
 			return err
 		}
 	}
-	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.concurrent != e.o.concurrent || o.concBlocks != e.o.concBlocks || o.lowerMem != e.o.lowerMem || o.hugePages != e.o.hugePages {
+	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.maxEncodeAll != e.o.maxEncodeAll || o.concBlocks != e.o.concBlocks || o.lowerMem != e.o.lowerMem || o.hugePages != e.o.hugePages {
 		return errors.New("zstd: WithEncoderLevel, WithWindowSize, WithEncoderConcurrency, WithConcurrentBlocks, WithLowerEncoderMem and WithHugePages cannot be changed with ResetWithOptions")
 	}
 	newDict := len(o.dict) != len(e.o.dict) || len(o.dict) > 0 && &o.dict[0] != &e.o.dict[0] ||

@@ -53,27 +53,27 @@ type EOption func(*encoderOptions) error
 
 // encoderOptions holds the options an Encoder was created with.
 type encoderOptions struct {
-	level         EncoderLevel
-	crc           bool
-	windowLog     uint32 // 0 = level default
-	concurrent    int    // max concurrent EncodeAll calls (contexts held at once)
-	concBlocks    bool   // stored only (WithConcurrentBlocks), to reject a change in ResetWithOptions
-	zeroFrames    bool
-	pad           int // 0 or 1 = no padding
-	noEntropy     bool
-	allLitEntropy bool
-	lowerMem      bool   // stored only, to reject a change in ResetWithOptions
-	hugePages     bool   // WithHugePages
-	dict          []byte // dictionary (private copy); nil = none
-	dictRaw       bool   // dict is raw content (WithEncoderDictRaw)
-	dictID        uint32 // WithEncoderDictRaw: the ID written into frame headers
+	level        EncoderLevel
+	checksum     bool
+	windowLog    uint32 // 0 = level default
+	maxEncodeAll int    // max concurrent EncodeAll calls (contexts held at once)
+	concBlocks   bool   // stored only (WithConcurrentBlocks), to reject a change in ResetWithOptions
+	zeroFrames   bool
+	padMultiple  int    // 0 or 1 = no padding
+	litDisable   bool   // WithNoEntropyCompression: C's ZSTD_ps_disable
+	litEnable    bool   // WithAllLitEntropyCompression: C's ZSTD_ps_enable
+	lowerMem     bool   // stored only, to reject a change in ResetWithOptions
+	hugePages    bool   // WithHugePages
+	dict         []byte // dictionary (private copy); nil = none
+	dictRaw      bool   // dict is raw content (WithEncoderDictRaw)
+	dictID       uint32 // WithEncoderDictRaw: the ID written into frame headers
 }
 
-func (o *encoderOptions) setDefault() {
+func (o *encoderOptions) defaults() {
 	*o = encoderOptions{
-		level:      SpeedDefault,
-		crc:        true,
-		concurrent: runtime.GOMAXPROCS(0),
+		level:        SpeedDefault,
+		checksum:     true,
+		maxEncodeAll: runtime.GOMAXPROCS(0),
 	}
 }
 
@@ -81,9 +81,9 @@ func (o *encoderOptions) setDefault() {
 // WithAllLitEntropyCompression to C's ZSTD_c_literalCompressionMode.
 func (o *encoderOptions) literalCompressionMode() paramSwitch {
 	switch {
-	case o.noEntropy:
+	case o.litDisable:
 		return psDisable
-	case o.allLitEntropy:
+	case o.litEnable:
 		return psEnable
 	}
 	return psAuto
@@ -95,7 +95,7 @@ func (o *encoderOptions) literalCompressionMode() paramSwitch {
 //
 // C: ZSTD_c_checksumFlag. The default is on.
 func WithEncoderCRC(b bool) EOption {
-	return func(o *encoderOptions) error { o.crc = b; return nil }
+	return func(o *encoderOptions) error { o.checksum = b; return nil }
 }
 
 // WithEncoderConcurrency will set the concurrency,
@@ -119,7 +119,7 @@ func WithEncoderConcurrency(n int) EOption {
 		if n == 0 {
 			n = runtime.GOMAXPROCS(0)
 		}
-		o.concurrent = n
+		o.maxEncodeAll = n
 		return nil
 	}
 }
@@ -177,7 +177,7 @@ func WithEncoderPadding(n int) EOption {
 		if n > 1<<30 {
 			return fmt.Errorf("zstd: padding must be at most 1GB (1<<30 bytes), got %d", n)
 		}
-		o.pad = n
+		o.padMultiple = n
 		return nil
 	}
 }
@@ -189,7 +189,7 @@ func WithEncoderPadding(n int) EOption {
 type EncoderLevel int
 
 const (
-	speedNotSet EncoderLevel = iota
+	levelUnset EncoderLevel = iota
 
 	// SpeedFastest will choose the fastest reasonable compression.
 	// This is roughly equivalent to the fastest Zstandard mode.
@@ -245,6 +245,12 @@ func EncoderLevelFromZstd(level int) EncoderLevel {
 }
 
 // String provides a string representation of the compression level.
+//
+// The names "fastest", "default", "better" and "best" (and "invalid" for
+// other values) are klauspost/compress's observable behaviour, which
+// EncoderLevelFromString must accept for drop-in compatibility; the user
+// ruled them part of the API (see docs/superpowers/phase2-api-decisions.md,
+// "Phase 1 API notes"). C has no level names.
 func (e EncoderLevel) String() string {
 	switch e {
 	case SpeedFastest:
@@ -294,7 +300,7 @@ func WithZeroFrames(b bool) EOption {
 // C: true is ZSTD_c_literalCompressionMode = ZSTD_ps_enable; false restores
 // ZSTD_ps_auto (the level's default). WithNoEntropyCompression(true) wins.
 func WithAllLitEntropyCompression(b bool) EOption {
-	return func(o *encoderOptions) error { o.allLitEntropy = b; return nil }
+	return func(o *encoderOptions) error { o.litEnable = b; return nil }
 }
 
 // WithNoEntropyCompression will always skip entropy compression of literals.
@@ -305,7 +311,7 @@ func WithAllLitEntropyCompression(b bool) EOption {
 // C: ZSTD_c_literalCompressionMode = ZSTD_ps_disable (sequences are still
 // entropy coded, as in C).
 func WithNoEntropyCompression(b bool) EOption {
-	return func(o *encoderOptions) error { o.noEntropy = b; return nil }
+	return func(o *encoderOptions) error { o.litDisable = b; return nil }
 }
 
 // WithSingleSegment will set the "single segment" flag when EncodeAll is used.
