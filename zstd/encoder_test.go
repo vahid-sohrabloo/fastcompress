@@ -201,6 +201,35 @@ func TestEncodeAllConcurrencyLimit(t *testing.T) {
 	}
 }
 
+// TestEncodeAllPanicReleasesSlot: a panic inside EncodeAll (here from
+// cctxHeldHook) frees its WithEncoderConcurrency slot, so with n=1 a later
+// call still runs and matches C.
+func TestEncodeAllPanicReleasesSlot(t *testing.T) {
+	in := creftest.Inputs(t)["text16KiB"]
+	want := crefLevel1(t, in)
+	e := newTestEncoder(t, WithEncoderLevel(SpeedFastest), WithEncoderConcurrency(1))
+	cctxHeldHook = func() { panic("test panic") }
+	func() {
+		defer func() {
+			if r := recover(); r != "test panic" {
+				t.Fatalf("recovered %v", r)
+			}
+		}()
+		e.EncodeAll(in, nil)
+	}()
+	cctxHeldHook = nil
+	done := make(chan []byte)
+	go func() { done <- e.EncodeAll(in, nil) }()
+	select {
+	case got := <-done:
+		if !bytes.Equal(got, want) {
+			t.Fatal("output after the panic differs from cref")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("EncodeAll blocked: the panicking call kept its slot")
+	}
+}
+
 // TestEncoderZeroValue: a zero Encoder (not from NewWriter) fails clearly.
 func TestEncoderZeroValue(t *testing.T) {
 	var e Encoder

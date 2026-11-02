@@ -162,6 +162,9 @@ func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 		return dst
 	}
 	e.sem <- struct{}{}
+	// A panic releases the slot but drops the context: its state may be
+	// half-updated, so it does not go back to the pool.
+	defer func() { <-e.sem }()
 	c := e.cctxs.Get().(*cctx)
 	if cctxHeldHook != nil {
 		cctxHeldHook()
@@ -172,7 +175,6 @@ func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 		panic(err) // unreachable with validated options
 	}
 	e.cctxs.Put(c)
-	<-e.sem
 	if e.o.padMultiple > 1 {
 		dst = addPadding(dst, e.o.padMultiple)
 	}
