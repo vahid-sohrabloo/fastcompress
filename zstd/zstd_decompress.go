@@ -320,3 +320,22 @@ func getcBlockSize(src []byte) (cSize int, bp blockProperties, err dErr) {
 	}
 	return cSize, bp, 0
 }
+
+// decompressBegin resets d for a new frame. Only the fields dctx has so
+// far are ported; the frame stage fields come with the frame decoder.
+// C: zstd_decompress.c:ZSTD_decompressBegin
+func (d *dctx) decompressBegin() {
+	d.previousDstEnd = 0
+	d.prefixStart = 0
+	d.virtualStart = 0
+	d.dictEnd = 0
+	d.extDict = nil
+	d.entropy.hufTable.Init(hufDTableCapacityLog) // C: hufTable[0] = ZSTD_HUFFDTABLE_CAPACITY_LOG * 0x1000001
+	d.litEntropy, d.fseEntropy = false, false
+	d.isFrameDecompression = true
+	d.entropy.rep = repStartValue // initial repcodes
+	d.llTptr = d.entropy.llTable[:]
+	d.mlTptr = d.entropy.mlTable[:]
+	d.ofTptr = d.entropy.ofTable[:]
+	d.hufPtr = &d.entropy.hufTable
+}

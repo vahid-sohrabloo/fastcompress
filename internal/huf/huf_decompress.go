@@ -608,9 +608,10 @@ func Decompress4X1UsingDTable(dst, src []byte, dt *DTable, flags int) error {
 	return decompress4X1Body(dst, src, dt)
 }
 
-// decompress1X1DCtxWksp reads an X1 table from src and decodes the single
-// stream that follows it. C: huf_decompress.c:HUF_decompress1X1_DCtx_wksp
-func decompress1X1DCtxWksp(dt *DTable, dst, src []byte, flags int) error {
+// Decompress1X1DCtxWksp reads an X1 table from src and decodes the single
+// stream that follows it (ZSTD_decodeLiteralsBlock uses it for a
+// single-stream literals section). C: huf_decompress.c:HUF_decompress1X1_DCtx_wksp
+func Decompress1X1DCtxWksp(dt *DTable, dst, src []byte, flags int) error {
 	hSize, err := ReadDTableX1(dt, src, flags)
 	if err != nil {
 		return err
@@ -1314,7 +1315,7 @@ func Decompress1XDCtxWksp(dt *DTable, dst, src []byte, flags int) error {
 	if SelectDecoder(dstSize, cSrcSize) != 0 {
 		return decompress1X2DCtxWksp(dt, dst, src, flags)
 	}
-	return decompress1X1DCtxWksp(dt, dst, src, flags)
+	return Decompress1X1DCtxWksp(dt, dst, src, flags)
 }
 
 // Decompress1XUsingDTable decodes a single stream with the table in dt,

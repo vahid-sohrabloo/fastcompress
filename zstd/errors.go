@@ -87,6 +87,8 @@ const (
 	dErrFrameParameterWindowTooLarge dErr = 16 // C: ZSTD_error_frameParameter_windowTooLarge
 	dErrCorruptionDetected           dErr = 20 // C: ZSTD_error_corruption_detected
 	dErrChecksumWrong                dErr = 22 // C: ZSTD_error_checksum_wrong
+	dErrLiteralsHeaderWrong          dErr = 24 // C: ZSTD_error_literals_headerWrong
+	dErrDictionaryCorrupted          dErr = 30 // C: ZSTD_error_dictionary_corrupted
 	dErrDictionaryWrong              dErr = 32 // C: ZSTD_error_dictionary_wrong
 	dErrDstSizeTooSmall              dErr = 70 // C: ZSTD_error_dstSize_tooSmall
 	dErrSrcSizeWrong                 dErr = 72 // C: ZSTD_error_srcSize_wrong
@@ -94,13 +96,33 @@ const (
 	// dErrReservedBlockType is corruption_detected from ZSTD_getcBlockSize
 	// (block type 3).
 	dErrReservedBlockType dErr = 128
+	// dErrBlockTooSmall is corruption_detected from a literals or
+	// sequences header that runs past the end of its block
+	// (ZSTD_decodeLiteralsBlock's srcSize checks, ZSTD_buildSeqTable's RLE
+	// byte).
+	dErrBlockTooSmall dErr = 129
+	// dErrSeqHeaderTooSmall is srcSize_wrong from ZSTD_decodeSeqHeaders: the
+	// sequences header runs past the end of its block. Not truncated
+	// input, so not io.ErrUnexpectedEOF.
+	dErrSeqHeaderTooSmall dErr = 130
+	// dErrLitSizeTooLarge is corruption_detected from
+	// ZSTD_decodeLiteralsBlock: litSize > ZSTD_blockSizeMax(dctx).
+	dErrLitSizeTooLarge dErr = 131
+	// dErrLitDstSizeTooSmall is dstSize_tooSmall from
+	// ZSTD_decodeLiteralsBlock: the literals do not fit
+	// MIN(blockSizeMax, dstCapacity) (or dst is NULL).
+	dErrLitDstSizeTooSmall dErr = 132
 )
 
 // cCode returns the C ZSTD_ErrorCode e stands for.
 func (e dErr) cCode() int {
 	switch e {
-	case dErrReservedBlockType:
+	case dErrReservedBlockType, dErrBlockTooSmall, dErrLitSizeTooLarge:
 		return int(dErrCorruptionDetected)
+	case dErrSeqHeaderTooSmall:
+		return int(dErrSrcSizeWrong)
+	case dErrLitDstSizeTooSmall:
+		return int(dErrDstSizeTooSmall)
 	}
 	return int(e)
 }
@@ -113,6 +135,8 @@ var cErrorNames = map[int]string{
 	16: "Frame requires too much memory for decoding",
 	20: "Data corruption detected",
 	22: "Restored data doesn't match checksum",
+	24: "Header of Literals' block doesn't respect format specification",
+	30: "Dictionary is corrupted",
 	32: "Dictionary mismatch",
 	70: "Destination buffer is too small",
 	72: "Src size is incorrect",
@@ -143,6 +167,10 @@ func (e dErr) toError(where string) error {
 		return ErrWindowSizeExceeded
 	case dErrReservedBlockType:
 		return ErrReservedBlockType
+	case dErrBlockTooSmall, dErrSeqHeaderTooSmall:
+		return ErrBlockTooSmall
+	case dErrLitSizeTooLarge, dErrLitDstSizeTooSmall:
+		return ErrUnexpectedBlockSize
 	case dErrChecksumWrong:
 		return ErrCRCMismatch
 	case dErrDictionaryWrong:

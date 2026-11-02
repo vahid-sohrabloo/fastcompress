@@ -231,6 +231,13 @@ func (d *DStream) LookBitsFast(nbBits uint32) uint64 {
 	return (d.bitContainer << (d.bitsConsumed & regMask)) >> ((regMask + 1 - nbBits) & regMask)
 }
 
+// ReadBitsFast is ReadBits for nbBits >= 1. C: bitstream.h:BIT_readBitsFast
+func (d *DStream) ReadBitsFast(nbBits uint32) uint64 {
+	v := d.LookBitsFast(nbBits)
+	d.SkipBits(nbBits)
+	return v
+}
+
 // SkipBits consumes nbBits bits. C: bitstream.h:BIT_skipBits
 func (d *DStream) SkipBits(nbBits uint32) { d.bitsConsumed += nbBits }
 
