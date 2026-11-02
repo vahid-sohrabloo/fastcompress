@@ -1,9 +1,149 @@
 package zstd
 
-import "errors"
+import (
+	"errors"
+	"io"
+)
 
 var (
+	// ErrSnappyCorrupt reports that the input is invalid.
+	ErrSnappyCorrupt = errors.New("snappy: corrupt input")
+	// ErrSnappyTooLarge reports that the uncompressed length is too large.
+	ErrSnappyTooLarge = errors.New("snappy: decoded block is too large")
+	// ErrSnappyUnsupported reports that the input isn't supported.
+	ErrSnappyUnsupported = errors.New("snappy: unsupported input")
+)
+
+var (
+	// ErrReservedBlockType is returned when a reserved block type is found.
+	// Typically this indicates wrong or corrupted input.
+	ErrReservedBlockType = errors.New("invalid input: reserved block type encountered")
+
+	// ErrCompressedSizeTooBig is returned when a block is bigger than allowed.
+	// Typically this indicates wrong or corrupted input.
+	ErrCompressedSizeTooBig = errors.New("invalid input: compressed size too big")
+
+	// ErrBlockTooSmall is returned when a block is too small to be decoded.
+	// Typically returned on invalid input.
+	ErrBlockTooSmall = errors.New("block too small")
+
+	// ErrUnexpectedBlockSize is returned when a block has unexpected size.
+	// Typically returned on invalid input.
+	ErrUnexpectedBlockSize = errors.New("unexpected block size")
+
+	// ErrMagicMismatch is returned when a "magic" number isn't what is expected.
+	// Typically this indicates wrong or corrupted input.
+	ErrMagicMismatch = errors.New("invalid input: magic number mismatch")
+
+	// ErrWindowSizeExceeded is returned when a reference exceeds the valid window size.
+	// Typically this indicates wrong or corrupted input.
+	ErrWindowSizeExceeded = errors.New("window size exceeded")
+
+	// ErrWindowSizeTooSmall is returned when no window size is specified.
+	// Typically this indicates wrong or corrupted input.
+	ErrWindowSizeTooSmall = errors.New("invalid input: window size was too small")
+
+	// ErrDecoderSizeExceeded is returned if decompressed size exceeds the configured limit.
+	ErrDecoderSizeExceeded = errors.New("decompressed size exceeds configured limit")
+
+	// ErrUnknownDictionary is returned if the dictionary ID is unknown.
+	ErrUnknownDictionary = errors.New("unknown dictionary")
+
+	// ErrFrameSizeExceeded is returned if the stated frame size is exceeded.
+	// This is only returned if SingleSegment is specified on the frame.
+	ErrFrameSizeExceeded = errors.New("frame size exceeded")
+
+	// ErrFrameSizeMismatch is returned if the stated frame size does not match the expected size.
+	// This is only returned if SingleSegment is specified on the frame.
+	ErrFrameSizeMismatch = errors.New("frame size does not match size on stream")
+
+	// ErrCRCMismatch is returned if CRC mismatches.
+	ErrCRCMismatch = errors.New("CRC check failed")
+
+	// ErrDecoderClosed will be returned if the Decoder was used after
+	// Close has been called.
+	ErrDecoderClosed = errors.New("decoder used after Close")
+
 	// ErrEncoderClosed will be returned if the Encoder was used after
 	// Close has been called.
 	ErrEncoderClosed = errors.New("encoder used after Close")
+
+	// ErrDecoderNilInput is returned when a nil Reader was provided
+	// and an operation other than Reset/DecodeAll/Close was attempted.
+	ErrDecoderNilInput = errors.New("nil input provided as reader")
 )
+
+// dErr is a decoder error: a C ZSTD_ErrorCode (the same value), or a
+// refinement of one (values from 128) where the error-mapping table
+// (docs/superpowers/phase2-api-decisions.md) gives one C code different
+// sentinels depending on where C raises it. 0 is no error.
+type dErr uint8
+
+const (
+	dErrGeneric                      dErr = 1  // C: ZSTD_error_GENERIC
+	dErrPrefixUnknown                dErr = 10 // C: ZSTD_error_prefix_unknown
+	dErrFrameParameterUnsupported    dErr = 14 // C: ZSTD_error_frameParameter_unsupported
+	dErrFrameParameterWindowTooLarge dErr = 16 // C: ZSTD_error_frameParameter_windowTooLarge
+	dErrCorruptionDetected           dErr = 20 // C: ZSTD_error_corruption_detected
+	dErrChecksumWrong                dErr = 22 // C: ZSTD_error_checksum_wrong
+	dErrDictionaryWrong              dErr = 32 // C: ZSTD_error_dictionary_wrong
+	dErrDstSizeTooSmall              dErr = 70 // C: ZSTD_error_dstSize_tooSmall
+	dErrSrcSizeWrong                 dErr = 72 // C: ZSTD_error_srcSize_wrong
+
+	// dErrReservedBlockType is corruption_detected from ZSTD_getcBlockSize
+	// (block type 3).
+	dErrReservedBlockType dErr = 128
+)
+
+// cCode returns the C ZSTD_ErrorCode e stands for.
+func (e dErr) cCode() int {
+	switch e {
+	case dErrReservedBlockType:
+		return int(dErrCorruptionDetected)
+	}
+	return int(e)
+}
+
+// cErrorNames are C's ZSTD_getErrorName texts. C: common/error_private.c
+var cErrorNames = map[int]string{
+	1:  "Error (generic)",
+	10: "Unknown frame descriptor",
+	14: "Unsupported frame parameter",
+	16: "Frame requires too much memory for decoding",
+	20: "Data corruption detected",
+	22: "Restored data doesn't match checksum",
+	32: "Dictionary mismatch",
+	70: "Destination buffer is too small",
+	72: "Src size is incorrect",
+}
+
+// corruptError is a decoder error that matches no sentinel.
+type corruptError struct {
+	code  dErr
+	where string
+}
+
+func (e *corruptError) Error() string {
+	return "zstd: " + e.where + ": " + cErrorNames[e.code.cCode()]
+}
+
+// toError returns the error the mapping table gives e: an exported
+// sentinel, io.ErrUnexpectedEOF, or a *corruptError naming where (the
+// operation that failed). e must not be 0.
+func (e dErr) toError(where string) error {
+	switch e {
+	case dErrPrefixUnknown:
+		return ErrMagicMismatch
+	case dErrFrameParameterWindowTooLarge:
+		return ErrWindowSizeExceeded
+	case dErrReservedBlockType:
+		return ErrReservedBlockType
+	case dErrChecksumWrong:
+		return ErrCRCMismatch
+	case dErrDictionaryWrong:
+		return ErrUnknownDictionary
+	case dErrSrcSizeWrong:
+		return io.ErrUnexpectedEOF
+	}
+	return &corruptError{code: e, where: where}
+}

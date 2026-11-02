@@ -201,7 +201,7 @@ func blockFeatures(c []byte, fs map[string]bool) bool {
 
 // TestGenDecodeSeeds checks that the committed decoder seed frames in
 // testdata/decode/seeds cover every seedFeatures entry. With -update it
-// first regenerates them from the cref decode corpus (creftest.Frames):
+// first regenerates them from the cref decode corpus (creftest.FrameNames):
 // nSeeds frames of at most 64 KiB that need no dictionary, chosen greedily
 // for the most new features (block types, literal types and size formats,
 // sequence header sizes and table modes, frame flags), then filled up with
@@ -250,8 +250,11 @@ func genDecodeSeeds(t *testing.T) {
 		fs   map[string]bool
 	}
 	var cands []cand
-	for name, f := range creftest.Frames(t) {
-		if f.Dict != nil || len(f.Data) > maxSeedLen {
+	for _, name := range creftest.FrameNames(t) {
+		f := creftest.LoadFrame(t, name)
+		// A frame that needs a dictionary is no seed, even one in the corpus
+		// without it (dict-err/missing: C fails with dictionary_wrong).
+		if f.Dict != nil || f.CErr != "" || len(f.Data) > maxSeedLen {
 			continue
 		}
 		fs, ok := frameFeatures(f.Data)

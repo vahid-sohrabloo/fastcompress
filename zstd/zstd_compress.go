@@ -7,6 +7,7 @@ package zstd
 import (
 	"encoding/binary"
 	"errors"
+	"math/bits"
 	"slices"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
@@ -1378,76 +1379,108 @@ func (c *cctx) compressFrameChunk(dst, src []byte, lastFrameChunk bool) (int, er
 // writeFrameHeader. C: zstd_compress.c:ZSTD_writeFrameHeader (format
 // ZSTD_f_zstd1)
 func writeFrameHeader(dst []byte, params *cctxParams, pledgedSrcSize uint64, dictID uint32) (int, error) {
-	var dictIDSizeCodeLength uint32
-	for _, lim := range []uint32{0, 255, 65535} {
-		if dictID > lim {
-			dictIDSizeCodeLength++
-		}
-	}
-	dictIDSizeCode := dictIDSizeCodeLength
 	if params.fParams.noDictIDFlag {
-		dictIDSizeCode = 0
-	}
-	var checksumFlag uint32
-	if params.fParams.checksumFlag {
-		checksumFlag = 1
+		dictID = 0
 	}
 	windowSize := uint64(1) << params.cParams.windowLog
-	singleSegment := params.fParams.contentSizeFlag && windowSize >= pledgedSrcSize
-	windowLogByte := byte((params.cParams.windowLog - windowLogAbsoluteMin) << 3)
-	var fcsCode uint32
+	fh := frameHeader{
+		frameContentSize: contentSizeUnknown,
+		windowSize:       windowSize,
+		dictID:           dictID,
+		checksumFlag:     params.fParams.checksumFlag,
+		singleSegment:    params.fParams.contentSizeFlag && windowSize >= pledgedSrcSize,
+	}
 	if params.fParams.contentSizeFlag {
-		for _, lim := range []uint64{256, 65536 + 256, 0xFFFFFFFF} {
-			if pledgedSrcSize >= lim {
-				fcsCode++
-			}
-		}
+		fh.frameContentSize = pledgedSrcSize
 	}
-	var ss uint32
-	if singleSegment {
-		ss = 1
-	}
-	fhd := byte(dictIDSizeCode + checksumFlag<<2 + ss<<5 + fcsCode<<6)
-
 	if len(dst) < frameHeaderSizeMax {
 		return 0, errDstSizeTooSmall // dst buf is too small to fit worst-case frame header size.
 	}
-	binary.LittleEndian.PutUint32(dst, magicNumber)
-	pos := 4
-	dst[pos] = fhd
-	pos++
-	if !singleSegment {
-		dst[pos] = windowLogByte
-		pos++
+	return len(writeFrameHeaderFields(dst[:0], fh)), nil
+}
+
+// writeFrameHeaderFields appends the header of a frame described by fh
+// (zstd or skippable) to dst. The encoder's choices are C's: the shortest
+// Dictionary_ID field, no window descriptor in single-segment mode, and the
+// Frame_Content_Size field size C picks for the value.
+// C: zstd_compress.c:ZSTD_writeFrameHeader, ZSTD_writeSkippableFrame —
+// C writes from compression parameters, this from header fields, so that
+// Header.AppendTo can share it. Two cases C's encoder never produces are
+// written so that they decode back to fh: a known FCS below 256 without
+// single-segment mode uses the 4-byte field (C's 0 code would mean
+// absent), and single-segment mode without an FCS writes the 8-byte
+// all-ones value C reads as unknown. The window descriptor encodes any
+// windowSize a header can hold (exponent and mantissa).
+func writeFrameHeaderFields(dst []byte, fh frameHeader) []byte {
+	if fh.frameType == zstdSkippableFrame {
+		dst = binary.LittleEndian.AppendUint32(dst, magicSkippableStart+fh.dictID)
+		return binary.LittleEndian.AppendUint32(dst, uint32(fh.frameContentSize))
+	}
+	var dictIDSizeCode byte
+	for _, lim := range []uint32{0, 255, 65535} {
+		if fh.dictID > lim {
+			dictIDSizeCode++
+		}
+	}
+	hasFCS := fh.frameContentSize != contentSizeUnknown || fh.singleSegment
+	var fcsCode byte
+	if hasFCS {
+		for _, lim := range []uint64{256, 65536 + 256, 0xFFFFFFFF} {
+			if fh.frameContentSize >= lim {
+				fcsCode++
+			}
+		}
+		if fcsCode == 0 && !fh.singleSegment {
+			fcsCode = 2
+		}
+	}
+	fhd := dictIDSizeCode | fcsCode<<6
+	if fh.checksumFlag {
+		fhd |= 1 << 2
+	}
+	if fh.singleSegment {
+		fhd |= 1 << 5
+	}
+
+	dst = binary.LittleEndian.AppendUint32(dst, magicNumber)
+	dst = append(dst, fhd)
+	if !fh.singleSegment {
+		dst = append(dst, windowDescriptor(fh.windowSize))
 	}
 	switch dictIDSizeCode {
 	case 1:
-		dst[pos] = byte(dictID)
-		pos++
+		dst = append(dst, byte(fh.dictID))
 	case 2:
-		binary.LittleEndian.PutUint16(dst[pos:], uint16(dictID))
-		pos += 2
+		dst = binary.LittleEndian.AppendUint16(dst, uint16(fh.dictID))
 	case 3:
-		binary.LittleEndian.PutUint32(dst[pos:], dictID)
-		pos += 4
+		dst = binary.LittleEndian.AppendUint32(dst, fh.dictID)
 	}
 	switch fcsCode {
 	case 0:
-		if singleSegment {
-			dst[pos] = byte(pledgedSrcSize)
-			pos++
+		if fh.singleSegment {
+			dst = append(dst, byte(fh.frameContentSize))
 		}
 	case 1:
-		binary.LittleEndian.PutUint16(dst[pos:], uint16(pledgedSrcSize-256))
-		pos += 2
+		dst = binary.LittleEndian.AppendUint16(dst, uint16(fh.frameContentSize-256))
 	case 2:
-		binary.LittleEndian.PutUint32(dst[pos:], uint32(pledgedSrcSize))
-		pos += 4
+		dst = binary.LittleEndian.AppendUint32(dst, uint32(fh.frameContentSize))
 	case 3:
-		binary.LittleEndian.PutUint64(dst[pos:], pledgedSrcSize)
-		pos += 8
+		dst = binary.LittleEndian.AppendUint64(dst, fh.frameContentSize)
 	}
-	return pos, nil
+	return dst
+}
+
+// windowDescriptor returns the Window_Descriptor byte (exponent and
+// mantissa) of windowSize, rounded down to a representable size; sizes
+// below the 1 KiB minimum give 0. For 1<<windowLog it is C's
+// (windowLog - ZSTD_WINDOWLOG_ABSOLUTEMIN) << 3.
+func windowDescriptor(windowSize uint64) byte {
+	if windowSize < 1<<windowLogAbsoluteMin {
+		return 0
+	}
+	exp := bits.Len64(windowSize) - 1
+	mantissa := (windowSize - 1<<exp) >> (exp - 3)
+	return byte((exp-windowLogAbsoluteMin)<<3) | byte(mantissa)
 }
 
 // compressContinueInternal. C: zstd_compress.c:ZSTD_compressContinue_internal
