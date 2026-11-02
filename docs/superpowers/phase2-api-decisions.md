@@ -83,12 +83,12 @@ C's decoder is single-threaded. The design adds threads only at points C's own s
 - **Dictionary selection** (C `ZSTD_d_refMultipleDDicts` plus `ZSTD_DDictHashSet`):
   - A frame with dictID ≠ 0 uses the registered dictionary with that ID, or fails with `ErrUnknownDictionary`.
   - A frame with dictID 0 uses the dictionary registered with ID 0 (only `WithDecoderDictRaw(0, …)` can do that), or no dictionary.
-- **Defaults** come from the doc text: max window = `MaxWindowSize` (1<<29), not C's windowLogMax 27, and max memory 64 GiB. Differential tests run cref with `-max-window-log 29`.
+- **Defaults** come from the doc text: max window = `MaxWindowSize` (1<<29), not C's windowLogMax 27, and max memory 64 GiB. Differential tests run cref with `-max-window-log 29`. Exception (controller ruling): `ZipDecompressor` defaults to a 128 MB max window (doc:138-140), overridable by options.
 - **`BuildDict`:**
   - ID 0 → C's XXH64-derived compliant ID.
   - Zero `Offsets` → C's `repStartValue` {1,4,8}, giving byte-identical output.
   - Non-zero `Offsets` → written instead. A commented deviation; `minContentSize` is the maximum of the offsets.
-  - `Level` maps through Phase 1's table (`EncoderLevel` 0 → C level 3).
+  - `Level`: unset (zero value) means `SpeedBestCompression` (doc:165, controller ruling); otherwise it maps through Phase 1's table.
   - `CompatV155`: C's `ZDICT_finalizeDictionary` output already loads in zstd ≤ v1.5.5, so both values produce C's bytes. Task 16 verifies this against `/usr/bin/zstd` (v1.5.5).
   - `DebugOut` receives C's `DISPLAYLEVEL` messages at notification level 4.
 - **Snappy:** each snappy chunk is decoded into a 64 KiB scratch buffer, which is needed to validate offsets and to turn copies shorter than 3 bytes into literals. Its *parse* (literal and copy elements) becomes the zstd sequences directly: `offBase = offset + 3`, no repcodes, and no match search. Those sequences are encoded with Phase 1's `entropyCompressSeqStore` as one zstd block per chunk, inside one frame (FCS unknown, window 64 KiB, no checksum). CRC-32C is checked on every chunk, since the data is decoded anyway. That is stricter than "not all CRC values are checked", but still conforming.
@@ -119,10 +119,11 @@ C's decoder is single-threaded. The design adds threads only at points C's own s
 | `SnappyConverter` | The converter can be reused to avoid allocations, even after errors. Deprecated in the doc. Converts directly without full decoding; no CRC is generated and not all input CRCs are checked (this port is stricter, see Snappy decision above). `Convert(in, w) (int64, error)`. | doc:604-621 |
 | `BuildDictOptions` | `ID` dictionary ID; `Contents [][]byte` content for the tables; `History []byte` history for all blocks; `Offsets [3]int` offsets to use; `CompatV155` compatible with v1.5.5 and earlier (facebook/zstd#3724); `Level EncoderLevel` builds for that level, **"If not set SpeedBestCompression will be used"**; `DebugOut io.Writer` stats and details. | doc:145-170 |
 
-### Points where the doc and the plan's Decisions differ (for the reviewer)
+### Resolved rulings (controller): the doc text wins where it pins behaviour
 
-- **`BuildDictOptions.Level`:** the doc says an unset Level means `SpeedBestCompression`. The Decisions section says `EncoderLevel` 0 maps to C level 3. Task 16 must pick one and record it. The plan's choice (level 3) is a deviation from the doc.
-- **`DecodeTo`:** the doc limit (1 GiB output) is not in the Decisions section. Task for `DecodeTo` must enforce it with `ErrDecoderSizeExceeded`.
-- **`ZipDecompressor`:** the 128 MB default window is not in the Decisions section's Defaults; it overrides the 512 MB default for this entry point only.
-- **`WithDecoderMaxWindow`:** the doc maximum is ~3.75 TB; the Decisions section's default of `1<<29` matches the doc default of 512 MB.
-- **Error-mapping table:** sentinel messages are in `api/klauspost-zstd.txt` (the `Err*` lines in `apicheck.sh --missing`). The doc text has no per-error comments, so the table is a designer call not verifiable against doc text.
+- **`BuildDictOptions.Level`:** unset means `SpeedBestCompression` (doc:165). This supersedes the earlier "`EncoderLevel` 0 → C level 3" call.
+- **`DecodeTo`:** limited to 1 GiB of output, not counting what is already in `dst` (doc:110-111). Exceeding it returns `ErrDecoderSizeExceeded`.
+- **`ZipDecompressor`:** default max window is 128 MB (doc:138-140); `WithDecoderConcurrency(1)` is forced.
+- **`InspectDictionary`:** returns an error on raw content that is not in zstd dictionary format (the doc is silent; `WithDecoderDicts` requires that format, doc:214-215).
+- **`WithDecoderMaxWindow`:** the doc default of 512 MB equals `1<<29`; no conflict.
+- **Error-mapping table:** sentinel messages are in `api/klauspost-zstd.txt`. The doc has no per-error comments, so the table is a designer call that cannot be checked against doc text.
