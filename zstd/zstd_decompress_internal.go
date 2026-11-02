@@ -107,8 +107,10 @@ const (
 // dctx is the decompression context. C: zstd_decompress_internal.h:ZSTD_DCtx_s
 //
 // C's pointers into the output become int offsets into the current output
-// buffer (prefixStart, virtualStart, dictEnd, previousDstEnd), with the
-// previous segment in extDict, as Phase 1 does with its window. The table
+// buffer prevDst (prefixStart, virtualStart, previousDstEnd), with the
+// previous segment in extDict, as Phase 1 does with its window: C's dictEnd
+// is the end of extDict, and virtualStart is prefixStart - len(extDict)
+// (negative when extDict is longer than the prefix before it). The table
 // pointers become slices of the table they point into (entry 0 is the
 // header). The literal pointers litBuffer, litBufferEnd and litPtr are
 // offsets into litBuf, the array C's pointers point into: the dst given to
@@ -125,13 +127,17 @@ type dctx struct {
 	previousDstEnd int    // detect continuity
 	prefixStart    int    // start of current segment
 	virtualStart   int    // virtual start of previous segment if it was just before current one
-	dictEnd        int    // end of previous segment
 	extDict        []byte // the previous segment (C: virtualStart..dictEnd)
+	// prevDst is the buffer previousDstEnd and prefixStart index, up to its
+	// capacity; nil before the first output. C compares pointers to detect
+	// continuity; Go compares the buffer's start and the offset.
+	prevDst []byte
 
 	fParams              frameHeader
 	litEntropy           bool // C: U32 litEntropy
 	fseEntropy           bool // C: U32 fseEntropy
 	isFrameDecompression bool
+	ddictIsCold          bool // C: int ddictIsCold; the dictionary task sets it
 
 	litBuf            []byte
 	litPtr            int

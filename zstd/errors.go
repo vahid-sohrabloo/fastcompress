@@ -112,16 +112,28 @@ const (
 	// ZSTD_decodeLiteralsBlock: the literals do not fit
 	// MIN(blockSizeMax, dstCapacity) (or dst is NULL).
 	dErrLitDstSizeTooSmall dErr = 132
+	// dErrBlockDstSizeTooSmall is dstSize_tooSmall from sequence execution
+	// (ZSTD_execSequence*, the ZSTD_decompressSequences* last literals and
+	// split-buffer checks) and ZSTD_decompressBlock_internal (sequences with
+	// no output space): the block regenerates more than its output space.
+	dErrBlockDstSizeTooSmall dErr = 133
+	// dErrOffsetBeyondHistory is corruption_detected from ZSTD_execSequence*:
+	// a match offset beyond the prefix and the extDict (dictionary).
+	dErrOffsetBeyondHistory dErr = 134
+	// dErrCompressedSizeTooBig is srcSize_wrong from
+	// ZSTD_decompressBlock_internal: compressed block size >
+	// ZSTD_blockSizeMax(dctx).
+	dErrCompressedSizeTooBig dErr = 135
 )
 
 // cCode returns the C ZSTD_ErrorCode e stands for.
 func (e dErr) cCode() int {
 	switch e {
-	case dErrReservedBlockType, dErrBlockTooSmall, dErrLitSizeTooLarge:
+	case dErrReservedBlockType, dErrBlockTooSmall, dErrLitSizeTooLarge, dErrOffsetBeyondHistory:
 		return int(dErrCorruptionDetected)
-	case dErrSeqHeaderTooSmall:
+	case dErrSeqHeaderTooSmall, dErrCompressedSizeTooBig:
 		return int(dErrSrcSizeWrong)
-	case dErrLitDstSizeTooSmall:
+	case dErrLitDstSizeTooSmall, dErrBlockDstSizeTooSmall:
 		return int(dErrDstSizeTooSmall)
 	}
 	return int(e)
@@ -169,8 +181,12 @@ func (e dErr) toError(where string) error {
 		return ErrReservedBlockType
 	case dErrBlockTooSmall, dErrSeqHeaderTooSmall:
 		return ErrBlockTooSmall
-	case dErrLitSizeTooLarge, dErrLitDstSizeTooSmall:
+	case dErrLitSizeTooLarge, dErrLitDstSizeTooSmall, dErrBlockDstSizeTooSmall:
 		return ErrUnexpectedBlockSize
+	case dErrOffsetBeyondHistory:
+		return ErrWindowSizeTooSmall
+	case dErrCompressedSizeTooBig:
+		return ErrCompressedSizeTooBig
 	case dErrChecksumWrong:
 		return ErrCRCMismatch
 	case dErrDictionaryWrong:

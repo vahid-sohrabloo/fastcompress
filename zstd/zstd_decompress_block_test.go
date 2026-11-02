@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
@@ -632,6 +633,7 @@ func TestDecodeSeqsHeaderErrorsCref(t *testing.T) {
 	add(dErrBlockTooSmall, 100, 0x0c, 0x00)                                          // raw, lhlCode 3, srcSize < 3
 	add(dErrBlockTooSmall, 100, 0x04, 0x05)                                          // raw lhlCode 1, litSize 80 past src
 	add(dErrLitSizeTooLarge, 40, 0x04, 0x05, 0x00)                                   // raw litSize 80 > blockSizeMax 40
+	add(dErrLitSizeTooLarge, 100, 0x54, 0x06, 0x00)                                  // raw litSize 101 > blockSizeMax 100
 	add(dErrBlockTooSmall, 100, 0x05, 0x00)                                          // RLE lhlCode 1, srcSize < 3
 	add(dErrBlockTooSmall, 100, 0x0d, 0x00, 0x00)                                    // RLE lhlCode 3, srcSize < 4
 	add(dErrLitSizeTooLarge, 10, 0xf9, 'a', 0x00)                                    // RLE litSize 31 > blockSizeMax 10
@@ -813,8 +815,9 @@ func FuzzDecodeSeqHeaders(f *testing.F) {
 }
 
 // TestDecodeSeqsErrorMapping pins the sentinels and C codes of the error
-// codes the literals and sequences headers add (the mapping table rows
-// ErrBlockTooSmall and ErrUnexpectedBlockSize).
+// codes the block decoder adds (the mapping table rows ErrBlockTooSmall,
+// ErrUnexpectedBlockSize, ErrWindowSizeTooSmall and
+// ErrCompressedSizeTooBig).
 func TestDecodeSeqsErrorMapping(t *testing.T) {
 	for _, tc := range []struct {
 		e     dErr
@@ -825,6 +828,9 @@ func TestDecodeSeqsErrorMapping(t *testing.T) {
 		{dErrSeqHeaderTooSmall, 72, ErrBlockTooSmall},
 		{dErrLitSizeTooLarge, 20, ErrUnexpectedBlockSize},
 		{dErrLitDstSizeTooSmall, 70, ErrUnexpectedBlockSize},
+		{dErrBlockDstSizeTooSmall, 70, ErrUnexpectedBlockSize},
+		{dErrOffsetBeyondHistory, 20, ErrWindowSizeTooSmall},
+		{dErrCompressedSizeTooBig, 72, ErrCompressedSizeTooBig},
 	} {
 		if got := tc.e.cCode(); got != tc.cCode {
 			t.Errorf("dErr %d: C code %d, want %d", tc.e, got, tc.cCode)
@@ -837,5 +843,646 @@ func TestDecodeSeqsErrorMapping(t *testing.T) {
 		if _, ok := e.toError("literals").(*corruptError); !ok {
 			t.Errorf("dErr %d is not a corruptError", e)
 		}
+	}
+}
+
+// blockMode is how decodeFrameByBlocks calls the block decoder.
+type blockMode int
+
+const (
+	// bmBlock: decompressBlock (outside a frame, blockSizeMax 128 KiB), the
+	// output space the rest of the content; history checked per block.
+	bmBlock blockMode = iota
+	// bmFrame: C's ZSTD_decompressFrame: the frame's blockSizeMax, not
+	// streaming, the output space the rest of the content, checkContinuity
+	// once.
+	bmFrame
+	// bmStream: the frame's blockSizeMax, streaming, the output space
+	// min(rest, blockSizeMax), checkContinuity per block (as
+	// ZSTD_decompressContinue does).
+	bmStream
+)
+
+// decodeFrameByBlocks decodes the single frame in frame block by block,
+// test-locally, with no checksum check. The output is total bytes (C's
+// dstCapacity), written after pad bytes of garbage. From block index
+// segAt on (if >= 0), the output goes to a second buffer, so that the first
+// one becomes the extDict. Raw and RLE blocks are copied here, as C's
+// ZSTD_copyRawBlock and ZSTD_setRleBlock do; in bmFrame mode the output
+// must equal the frame content size, as ZSTD_decompressFrame checks. cold
+// sets ddictIsCold before every compressed block, which forces the
+// prefetch decoder.
+func decodeFrameByBlocks(d *dctx, frame []byte, total, pad, segAt int, mode blockMode, cold bool) ([]byte, dErr) {
+	var zfh frameHeader
+	if need, e := getFrameHeaderAdvanced(&zfh, frame); e != 0 || need != 0 {
+		return nil, dErrSrcSizeWrong
+	}
+	d.decompressBegin()
+	d.fParams = zfh
+	d.isFrameDecompression = mode != bmBlock
+	newBuf := func(rest int) []byte {
+		b := make([]byte, pad, pad+rest)
+		for i := range b {
+			b[i] = byte(0xA5 ^ i)
+		}
+		return b
+	}
+	buf := newBuf(total)
+	var done []byte // output of the first segment
+	if mode == bmFrame {
+		d.checkContinuity(buf, total)
+	}
+	insert := func(n int) { // C: ZSTD_insertBlock
+		d.checkContinuity(buf, n)
+		if n > 0 {
+			d.previousDstEnd = len(buf) + n
+		}
+	}
+	ip := int(zfh.headerSize)
+	for blk := 0; ; blk++ {
+		if blk == segAt {
+			done = append(done, buf[pad:]...)
+			buf = newBuf(total - len(done))
+		}
+		cSize, bp, e := getcBlockSize(frame[ip:])
+		if e != 0 {
+			return nil, e
+		}
+		ip += blockHeaderSize
+		if cSize > len(frame)-ip {
+			return nil, dErrSrcSizeWrong
+		}
+		block := frame[ip : ip+cSize]
+		rest := cap(buf) - len(buf)
+		var n int
+		switch bp.blockType {
+		case btRaw:
+			if cSize > rest {
+				return nil, dErrDstSizeTooSmall
+			}
+			n = cSize
+			copy(buf[len(buf):len(buf)+n], block)
+			if mode != bmFrame {
+				insert(n)
+			}
+		case btRLE:
+			n = int(bp.origSize)
+			if n > rest {
+				return nil, dErrDstSizeTooSmall
+			}
+			memset(buf[len(buf):len(buf)+n], block[0])
+			if mode != bmFrame {
+				insert(n)
+			}
+		default:
+			d.ddictIsCold = cold
+			switch mode {
+			case bmBlock:
+				n, e = d.decompressBlock(buf[:len(buf):cap(buf)], block)
+			case bmFrame:
+				n, e = d.decompressBlockInternal(buf, rest, block, notStreaming)
+			case bmStream:
+				dstCap := min(rest, d.blockSizeMax())
+				d.checkContinuity(buf, dstCap)
+				n, e = d.decompressBlockInternal(buf, dstCap, block, isStreaming)
+				if e == 0 && n > 0 {
+					d.previousDstEnd = len(buf) + n
+				}
+			}
+			if e != 0 {
+				return nil, e
+			}
+		}
+		buf = buf[:len(buf)+n]
+		ip += cSize
+		if bp.lastBlock {
+			break
+		}
+	}
+	out := append(done, buf[pad:]...)
+	if mode == bmFrame && zfh.frameContentSize != contentSizeUnknown && uint64(len(out)) != zfh.frameContentSize {
+		return out, dErrCorruptionDetected
+	}
+	return out, 0
+}
+
+// TestDecompressBlockCref decodes every single-frame corpus entry without
+// a dictionary block by block and compares the output with Want, in four
+// ways: decompressBlock with the rest of the content as output space
+// (mostly in_dst literals), the frame decoder's calls (frame
+// blockSizeMax), streaming calls with at most blockSizeMax of output space
+// (not_in_dst and split literals), and decompressBlock with the second
+// half of the blocks in another buffer (matches into the extDict and
+// spanning it); and three of them again with the prefetch decoder forced.
+func TestDecompressBlockCref(t *testing.T) {
+	long0 := seqLongBodyBlocks.Load()
+	nFrames := 0
+	for _, name := range creftest.FrameNames(t) {
+		if strings.HasPrefix(name, "dict") || strings.HasPrefix(name, "multi/") || strings.HasPrefix(name, "skippable") {
+			continue
+		}
+		f := creftest.LoadFrame(t, name)
+		if f.CErr != "" || f.Dict != nil {
+			continue
+		}
+		fsi := findFrameSizeInfo(f.Data)
+		if fsi.err != 0 || fsi.compressedSize != len(f.Data) || isSkippableFrame(f.Data) {
+			continue // not a single zstd frame
+		}
+		nFrames++
+		nBlocks := fsi.nbBlocks
+		for _, m := range []struct {
+			name  string
+			mode  blockMode
+			pad   int
+			segAt int
+			cold  bool
+		}{
+			{"block", bmBlock, 0, -1, false},
+			{"frame", bmFrame, 3, -1, false},
+			{"stream", bmStream, 7, -1, false},
+			{"extdict", bmBlock, 5, max(1, nBlocks/2), false},
+			{"frame-prefetch", bmFrame, 0, -1, true},
+			{"stream-prefetch", bmStream, 1, -1, true},
+			{"extdict-prefetch", bmBlock, 2, max(1, nBlocks/2), true},
+		} {
+			d := new(dctx)
+			got, e := decodeFrameByBlocks(d, f.Data, len(f.Want), m.pad, m.segAt, m.mode, m.cold)
+			if e != 0 {
+				t.Errorf("%s (%s): error %d", name, m.name, e)
+				continue
+			}
+			if !bytes.Equal(got, f.Want) {
+				t.Errorf("%s (%s): output differs (got %d, want %d bytes)", name, m.name, len(got), len(f.Want))
+			}
+		}
+	}
+	if nFrames < 100 {
+		t.Fatalf("only %d frames", nFrames)
+	}
+	t.Logf("%d frames, %d blocks took the prefetch decoder", nFrames, seqLongBodyBlocks.Load()-long0)
+}
+
+// execFixture is the state around one sequence: history (an extDict and a
+// prefix that starts at base in out), output space dstSpace from op, and
+// litAvail literals from litPtr 0 (with WILDCOPY_OVERLENGTH bytes after,
+// as every placement leaves).
+type execFixture struct {
+	extDict     []byte
+	out         []byte
+	prefixStart int
+	op, oend    int
+	lits        []byte
+	litLimit    int
+	history     []byte // extDict followed by the prefix
+	before      []byte // out before op
+}
+
+func newExecFixture(rng *rand.Rand, ext, prefix, dstSpace, litAvail int) *execFixture {
+	const base = 3
+	f := &execFixture{prefixStart: base, op: base + prefix, oend: base + prefix + dstSpace, litLimit: litAvail}
+	if ext > 0 {
+		f.extDict = make([]byte, ext)
+		for i := range f.extDict {
+			f.extDict[i] = byte(rng.Uint32())
+		}
+	}
+	f.out = make([]byte, f.oend)
+	for i := range f.out[:f.op] {
+		f.out[i] = byte(rng.Uint32())
+	}
+	f.lits = make([]byte, litAvail+wildcopyOverlength)
+	for i := range f.lits {
+		f.lits[i] = byte(rng.Uint32())
+	}
+	f.history = append(append([]byte(nil), f.extDict...), f.out[base:f.op]...)
+	f.before = append([]byte(nil), f.out[:f.op]...)
+	return f
+}
+
+// want returns the bytes the sequence should produce: its literals, then
+// its match copied byte by byte from the history.
+func (f *execFixture) want(sq seq) []byte {
+	h := append(append([]byte(nil), f.history...), f.lits[:sq.litLength]...)
+	for i := 0; i < sq.matchLength; i++ {
+		h = append(h, h[len(h)-sq.offset])
+	}
+	return h[len(f.history):]
+}
+
+// TestExecSequenceBoundaries runs hand-built sequences through
+// execSequence (fast path and execSequenceEnd), execSequenceEnd directly,
+// and execSequenceSplitLitBuffer: offsets at the history size and one
+// beyond, into and across the extDict, every overlap distance 1..16, a
+// match ending at oend, oend-1 and oend+1 and at the fast path's limit,
+// literals ending at the literal limit and one past it, and offsets that
+// hold C's huge size_t bits (negative ints; on 386 every offset >= 2^31).
+func TestExecSequenceBoundaries(t *testing.T) {
+	rng := rand.New(rand.NewPCG(8, 8))
+	type tc struct {
+		name                         string
+		ext, prefix, dstSpace, avail int
+		sq                           seq
+		want                         dErr
+	}
+	var cases []tc
+	add := func(c tc) { cases = append(cases, c) }
+	const roomy = 1000
+	for _, ext := range []int{0, 50} {
+		for _, ll := range []int{0, 5, 20} {
+			h := ext + 100
+			add(tc{"offset=history", ext, 100, roomy, ll, seq{ll, 20, h + ll}, 0})
+			add(tc{"offset=history+1", ext, 100, roomy, ll, seq{ll, 20, h + ll + 1}, dErrOffsetBeyondHistory})
+			add(tc{"offset=prefix", ext, 100, roomy, ll, seq{ll, 30, 100 + ll}, 0})
+			add(tc{"offset=prefix+1", ext, 100, roomy, ll, seq{ll, 30, 101 + ll}, b2e(ext == 0, dErrOffsetBeyondHistory)})
+			// tight: the same through execSequenceEnd
+			add(tc{"tight offset=history", ext, 100, ll + 20, ll, seq{ll, 20, h + ll}, 0})
+			add(tc{"tight offset=history+1", ext, 100, ll + 20, ll, seq{ll, 20, h + ll + 1}, dErrOffsetBeyondHistory})
+		}
+		if ext > 0 {
+			add(tc{"in extDict", ext, 100, roomy, 3, seq{3, 10, 140}, 0})
+			add(tc{"ends at extDict end", ext, 100, roomy, 3, seq{3, 47, 150}, 0})
+			add(tc{"spans extDict", ext, 100, roomy, 3, seq{3, 60, 150}, 0})
+			add(tc{"spans extDict, overlapping", ext, 4, roomy, 0, seq{0, 70, 10}, 0})
+			add(tc{"tight spans extDict", ext, 100, 63, 3, seq{3, 60, 150}, 0})
+		}
+	}
+	for off := 1; off <= 16; off++ {
+		for _, ml := range []int{3, 7, 8, 9, 15, 16, 17, 40, 100} {
+			add(tc{fmt.Sprintf("overlap %d ml %d", off, ml), 0, 20, roomy, 2, seq{2, ml, off}, 0})
+			add(tc{fmt.Sprintf("tight overlap %d ml %d", off, ml), 0, 20, 2 + ml, 2, seq{2, ml, off}, 0})
+		}
+	}
+	for _, ll := range []int{0, 1, 16, 17, 40} {
+		add(tc{"match ends at oend", 0, 64, ll + 30, ll, seq{ll, 30, 40}, 0})
+		add(tc{"match ends at oend-1", 0, 64, ll + 31, ll, seq{ll, 30, 40}, 0})
+		add(tc{"match ends at oend+1", 0, 64, ll + 29, ll, seq{ll, 30, 40}, dErrBlockDstSizeTooSmall})
+		add(tc{"fast path limit", 0, 64, ll + 30 + wildcopyOverlength, ll, seq{ll, 30, 40}, 0})
+		add(tc{"slow path limit", 0, 64, ll + 30 + wildcopyOverlength - 1, ll, seq{ll, 30, 40}, 0})
+		add(tc{"literals end at limit", 0, 64, roomy, ll, seq{ll, 30, 40}, 0})
+		if ll > 0 {
+			add(tc{"literals one past limit", 0, 64, roomy, ll - 1, seq{ll, 30, 40}, dErrCorruptionDetected})
+		}
+	}
+	for _, off := range []int{-1, -2, -4, int(int32(-1 << 31)), int(int32(-1<<31)) + 1} {
+		add(tc{fmt.Sprintf("size_t offset %d", off), 50, 100, roomy, 5, seq{5, 20, off}, dErrOffsetBeyondHistory})
+		add(tc{fmt.Sprintf("tight size_t offset %d", off), 50, 100, 25, 5, seq{5, 20, off}, dErrOffsetBeyondHistory})
+	}
+
+	type execFn func(f *execFixture, sq seq, litPtr *int) (int, dErr)
+	fns := []struct {
+		name string
+		fn   execFn
+	}{
+		{"execSequence", func(f *execFixture, sq seq, litPtr *int) (int, dErr) {
+			return execSequence(f.out, f.op, f.oend, sq, f.lits, litPtr, f.litLimit, f.prefixStart, f.extDict)
+		}},
+		{"execSequenceEnd", func(f *execFixture, sq seq, litPtr *int) (int, dErr) {
+			return execSequenceEnd(f.out, f.op, f.oend, sq, f.lits, litPtr, f.litLimit, f.prefixStart, f.extDict)
+		}},
+	}
+	for _, c := range cases {
+		for _, fn := range fns {
+			f := newExecFixture(rng, c.ext, c.prefix, c.dstSpace, c.avail)
+			litPtr := 0
+			n, e := fn.fn(f, c.sq, &litPtr)
+			if e != c.want {
+				t.Errorf("%s %s %+v: error %d, want %d", fn.name, c.name, c.sq, e, c.want)
+				continue
+			}
+			if !bytes.Equal(f.out[:f.op], f.before) {
+				t.Errorf("%s %s: history changed", fn.name, c.name)
+			}
+			if e != 0 {
+				continue
+			}
+			if n != c.sq.litLength+c.sq.matchLength || litPtr != c.sq.litLength {
+				t.Errorf("%s %s: n %d litPtr %d", fn.name, c.name, n, litPtr)
+			}
+			if w := f.want(c.sq); !bytes.Equal(f.out[f.op:f.op+n], w) {
+				t.Errorf("%s %s %+v: output\n%x\nwant\n%x", fn.name, c.name, c.sq, f.out[f.op:f.op+n], w)
+			}
+		}
+	}
+
+	// execSequenceSplitLitBuffer: the literals sit in out at litAt (ahead
+	// of op), as in the split phase; oendW is the callers'
+	// litPtr + litLength - WILDCOPY_OVERLENGTH.
+	for _, c := range []struct {
+		name         string
+		ext, gap, ll int // literals start gap bytes after op
+		sq           seq
+		want         dErr
+	}{
+		{"far", 0, 200, 10, seq{10, 20, 30}, 0},
+		{"ll 40", 0, 200, 40, seq{40, 100, 17}, 0},
+		{"near: slow path", 0, 30, 10, seq{10, 20, 30}, 0},
+		{"overlap 3, slow", 0, 20, 4, seq{4, 30, 3}, 0},
+		{"literals at op", 0, 0, 10, seq{10, 5, 30}, 0},
+		{"output catches up", 0, -5, 10, seq{10, 5, 30}, dErrBlockDstSizeTooSmall},
+		{"offset beyond", 0, 200, 10, seq{10, 20, 1000}, dErrOffsetBeyondHistory},
+		{"size_t offset", 0, 200, 10, seq{10, 20, -3}, dErrOffsetBeyondHistory},
+		{"in extDict", 50, 200, 10, seq{10, 20, 140}, 0},
+		{"spans extDict", 50, 200, 10, seq{10, 60, 150}, 0},
+		{"offset=history", 50, 200, 10, seq{10, 60, 160}, 0},
+		{"offset=history+1", 50, 200, 10, seq{10, 60, 161}, dErrOffsetBeyondHistory},
+		{"slow in extDict", 50, 30, 10, seq{10, 20, 140}, 0},
+		{"slow spans extDict", 50, 30, 10, seq{10, 60, 150}, 0},
+		{"slow offset=history+1", 50, 30, 10, seq{10, 60, 161}, dErrOffsetBeyondHistory},
+	} {
+		const prefix = 100
+		f := newExecFixture(rng, c.ext, prefix, 500, 0)
+		litAt := f.op + c.gap
+		if c.gap >= 0 {
+			for i := range c.ll {
+				f.out[litAt+i] = byte(rng.Uint32())
+			}
+		}
+		lits := append([]byte(nil), f.out[litAt:litAt+c.ll]...)
+		f.before = append([]byte(nil), f.out[:f.op]...)
+		litPtr := litAt
+		n, e := execSequenceSplitLitBuffer(f.out, f.op, f.oend, litAt+c.sq.litLength-wildcopyOverlength, c.sq,
+			&litPtr, litAt+c.ll, f.prefixStart, f.extDict)
+		if e != c.want {
+			t.Errorf("split %s: error %d, want %d", c.name, e, c.want)
+			continue
+		}
+		if e != 0 {
+			continue
+		}
+		if !bytes.Equal(f.out[:f.op], f.before) || n != c.sq.litLength+c.sq.matchLength || litPtr != litAt+c.ll {
+			t.Errorf("split %s: n %d litPtr %d", c.name, n, litPtr)
+		}
+		f.lits = lits
+		if w := f.want(c.sq); !bytes.Equal(f.out[f.op:f.op+n], w) {
+			t.Errorf("split %s: output\n%x\nwant\n%x", c.name, f.out[f.op:f.op+n], w)
+		}
+	}
+}
+
+// b2e returns e when b, else 0.
+func b2e(b bool, e dErr) dErr {
+	if b {
+		return e
+	}
+	return 0
+}
+
+// oneSeqBlock returns a compressed block with raw literals lits and one
+// sequence, from RLE tables with LL, OF and ML codes llc, ofc and mlc;
+// bits are the sequence's extra bits as the decoder reads them (offset,
+// match length, literal length: the encoder writes them in reverse), each
+// {value, nbBits}. trailing adds bytes after the bitstream's end mark.
+func oneSeqBlock(t *testing.T, lits []byte, llc, ofc, mlc byte, bits [][2]uint64, trailing int) []byte {
+	t.Helper()
+	b := make([]byte, 1024)
+	n, err := noCompressLiterals(b, lits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = append(b[:n], 1, 0x54, llc, ofc, mlc)
+	var c bitstream.CStream
+	buf := make([]byte, 64)
+	if err := c.Init(buf); err != nil {
+		t.Fatal(err)
+	}
+	for i := len(bits) - 1; i >= 0; i-- {
+		c.AddBits(bits[i][0], uint(bits[i][1]))
+		c.FlushBits()
+	}
+	m := c.Close()
+	if trailing > 0 { // more bytes before the end mark's byte: never consumed
+		b = append(b, make([]byte, trailing)...)
+	}
+	return append(b, buf[:m]...)
+}
+
+// TestDecompressBlockErrorsCref decodes hostile blocks as C's one-shot
+// frame decoder does (frame blockSizeMax, output space the frame content
+// size, which the output must equal) and compares with `cref decompress`
+// on the same frame: the same C error code, or both succeed with the same
+// output. Hand-made cases have an exact expected Go error; they include
+// offsets of 2^31 and more, which on 386 are negative ints and must be
+// rejected as C's size_t comparison does. The rest mutate the compressed
+// blocks of real frames (content only, so the frame structure holds).
+func TestDecompressBlockErrorsCref(t *testing.T) {
+	type tc struct {
+		name  string
+		frame []byte
+		hand  bool
+		want  dErr
+	}
+	var cases []tc
+	// A frame with a 1 KiB window (blockSizeMax 1024), content size fcs and
+	// one compressed block.
+	add := func(name string, want dErr, fcs uint32, block []byte) {
+		f := binary.LittleEndian.AppendUint32(nil, magicNumber)
+		f = append(f, 0x80, 0x00) // FCS field 4 bytes; window log 10
+		f = binary.LittleEndian.AppendUint32(f, fcs)
+		bh := uint32(len(block))<<3 | btCompressed<<1 | 1
+		f = append(f, byte(bh), byte(bh>>8), byte(bh>>16))
+		cases = append(cases, tc{name, append(f, block...), true, want})
+	}
+	addSingle := func(name string, want dErr, fcs uint32, block []byte) { // blockSizeMax fcs
+		cases = append(cases, tc{name, crefOneBlockFrame(block, fcs), true, want})
+	}
+	of31 := func(v uint64) []byte { return oneSeqBlock(t, nil, 0, 31, 0, [][2]uint64{{v, 31}}, 0) }
+	add("offset 2^31-3", dErrOffsetBeyondHistory, 3, of31(0))
+	add("offset 2^31", dErrOffsetBeyondHistory, 3, of31(3))
+	add("offset 2^31+1", dErrOffsetBeyondHistory, 3, of31(4))
+	add("offset 2^32-4", dErrOffsetBeyondHistory, 3, of31(0x7FFFFFFF))
+	add("offset 2^32-4 after literals", dErrOffsetBeyondHistory, 103,
+		oneSeqBlock(t, bytes.Repeat([]byte{'z'}, 100), 0, 31, 0, [][2]uint64{{0x7FFFFFFF, 31}}, 0))
+	add("zero repeat offset", dErrOffsetBeyondHistory, 3, oneSeqBlock(t, nil, 0, 1, 0, [][2]uint64{{1, 1}}, 0))
+	add("offset = history", 0, 7, oneSeqBlock(t, []byte("abcd"), 4, 2, 0, [][2]uint64{{3, 2}}, 0))
+	add("offset = history+1", dErrOffsetBeyondHistory, 7, oneSeqBlock(t, []byte("abcd"), 4, 3, 0, [][2]uint64{{0, 3}}, 0))
+	add("sequence past dst", dErrBlockDstSizeTooSmall, 6, oneSeqBlock(t, []byte("abcd"), 4, 2, 0, [][2]uint64{{3, 2}}, 0))
+	add("literals past buffer", dErrCorruptionDetected, 100, oneSeqBlock(t, []byte("abcd"), 5, 2, 0, [][2]uint64{{3, 2}}, 0))
+	add("bitstream not consumed", dErrCorruptionDetected, 7, oneSeqBlock(t, []byte("abcd"), 4, 2, 0, [][2]uint64{{3, 2}}, 1))
+	add("last literals fit", 0, 7, oneSeqBlock(t, []byte("abcd"), 1, 2, 0, [][2]uint64{{0, 2}}, 0))
+	add("last literals past dst", dErrBlockDstSizeTooSmall, 6, oneSeqBlock(t, []byte("abcd"), 1, 2, 0, [][2]uint64{{0, 2}}, 0))
+	// in_dst literals (output space 3000 > blockSizeMax+64+4): the block's
+	// output must stop where they start, at blockSizeMax+32.
+	add("output reaches in_dst literals", dErrBlockDstSizeTooSmall, 3000,
+		oneSeqBlock(t, []byte("abcd"), 4, 2, 47, [][2]uint64{{3, 2}, {945, uint64(mlBits[47])}}, 0))
+	add("no output space", dErrBlockDstSizeTooSmall, 0, oneSeqBlock(t, nil, 0, 1, 0, [][2]uint64{{0, 1}}, 0))
+	addSingle("fcs 0", dErrCompressedSizeTooBig, 0, oneSeqBlock(t, nil, 0, 1, 0, [][2]uint64{{0, 1}}, 0))
+	big := append([]byte{0x54, 0x06}, bytes.Repeat([]byte{'q'}, 101)...) // raw litSize 101, no sequences section
+	addSingle("block > blockSizeMax", dErrCompressedSizeTooBig, 100, big)
+	addSingle("block = blockSizeMax", dErrSeqHeaderTooSmall, 98, append([]byte{0x04, 0x06}, bytes.Repeat([]byte{'q'}, 96)...))
+
+	rng := rand.New(rand.NewPCG(9, 9))
+	inputs := creftest.Inputs(t)
+	for _, name := range []string{"zstd-format.md", "text16KiB", "text256KiB+1", "period5", "litrle", "nbseqlong", "random-small", "step4-100-302"} {
+		for _, level := range []string{"1", "19"} {
+			frame := creftest.Run(t, inputs[name], "compress", "-level", level, "-pledged", "1", "-checksum", "0")
+			var zfh frameHeader
+			getFrameHeaderAdvanced(&zfh, frame)
+			var blocks [][2]int // compressed block contents
+			for ip := int(zfh.headerSize); ; {
+				cSize, bp, _ := getcBlockSize(frame[ip:])
+				if bp.blockType == btCompressed {
+					blocks = append(blocks, [2]int{ip + blockHeaderSize, cSize})
+				}
+				ip += blockHeaderSize + cSize
+				if bp.lastBlock {
+					break
+				}
+			}
+			cases = append(cases, tc{name: name + "/L" + level, frame: frame})
+			if len(blocks) == 0 {
+				continue
+			}
+			for k := 0; k < 30; k++ {
+				m := append([]byte(nil), frame...)
+				blk := blocks[rng.IntN(len(blocks))]
+				switch k % 3 {
+				case 0: // flip a byte in the block's last 16 bytes (sequence bitstream, read backwards)
+					m[blk[0]+blk[1]-1-rng.IntN(min(16, blk[1]))] ^= byte(1 + rng.IntN(255))
+				case 1: // flip a byte anywhere in the block
+					m[blk[0]+rng.IntN(blk[1])] ^= byte(1 + rng.IntN(255))
+				case 2: // flip a bit in the block's first 32 bytes
+					i := blk[0] + rng.IntN(min(32, blk[1]))
+					m[i] ^= 1 << rng.IntN(8)
+				}
+				cases = append(cases, tc{name: fmt.Sprintf("%s/L%s/mut%d", name, level, k), frame: m})
+			}
+		}
+	}
+
+	failed, both := 0, 0
+	for _, c := range cases {
+		var zfh frameHeader
+		getFrameHeaderAdvanced(&zfh, c.frame)
+		d := new(dctx)
+		got, e := decodeFrameByBlocks(d, c.frame, int(zfh.frameContentSize), 0, -1, bmFrame, false)
+		cout, cerr := creftest.DecodeCRef(t, c.frame)
+		if c.hand && e != c.want {
+			t.Errorf("%s: Go error %d, want %d", c.name, e, c.want)
+		}
+		if c.hand { // the prefetch decoder gives the same (one sequence: same order of checks)
+			if _, e := decodeFrameByBlocks(new(dctx), c.frame, int(zfh.frameContentSize), 0, -1, bmFrame, true); e != c.want {
+				t.Errorf("%s: prefetch decoder: Go error %d, want %d", c.name, e, c.want)
+			}
+		}
+		switch {
+		case e != 0 && cerr == nil:
+			t.Errorf("%s: Go error %d (C code %d), C succeeds", c.name, e, e.cCode())
+		case e != 0:
+			failed++
+			if cerr.Code != e.cCode() {
+				t.Errorf("%s: Go error %d (C code %d), C %v", c.name, e, e.cCode(), cerr)
+			}
+		case cerr != nil:
+			t.Errorf("%s: Go succeeds, C %v", c.name, cerr)
+		default:
+			both++
+			if !bytes.Equal(got, cout) {
+				t.Errorf("%s: output differs from C", c.name)
+			}
+		}
+	}
+	t.Logf("%d cases: %d fail in both with the same code, %d succeed in both", len(cases), failed, both)
+}
+
+// FuzzDecompressBlock decodes hostile blocks with history (an extDict of
+// ext bytes and a prefix of hist bytes) and an output space of dstCap
+// bytes; flags pick streaming (1), frame mode with a smaller blockSizeMax
+// (2, size from flags>>4), the prefetch decoder (4) and decoding the block
+// a second time after the first (8, for repeat tables and offsets). It
+// checks there is no panic, the size is within the output space, and the
+// history is not written.
+func FuzzDecompressBlock(f *testing.F) {
+	ents, _ := os.ReadDir(seedsDir)
+	for i, e := range ents {
+		frame, err := os.ReadFile(filepath.Join(seedsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var zfh frameHeader
+		if need, de := getFrameHeaderAdvanced(&zfh, frame); need != 0 || de != 0 || zfh.frameType != zstdFrame {
+			continue
+		}
+		for ip := int(zfh.headerSize); ip < len(frame); {
+			cSize, bp, de := getcBlockSize(frame[ip:])
+			if de != 0 || ip+blockHeaderSize+cSize > len(frame) {
+				break
+			}
+			if bp.blockType == btCompressed {
+				f.Add(frame[ip+blockHeaderSize:ip+blockHeaderSize+cSize], uint16(i*97), uint16(i*13), uint32(blockSizeMax), byte(i))
+			}
+			ip += blockHeaderSize + cSize
+			if bp.lastBlock {
+				break
+			}
+		}
+	}
+	f.Add([]byte{0x00, 0x01, 0x54, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x00, 0xc0}, uint16(10), uint16(0), uint32(100), byte(0))
+	f.Fuzz(func(t *testing.T, block []byte, hist, ext uint16, dstCap uint32, flags byte) {
+		d := new(dctx)
+		d.decompressBegin()
+		d.isFrameDecompression = flags&2 != 0
+		d.fParams.blockSizeMax = uint32(min(blockSizeMax, 1<<(10+flags>>4%8)))
+		capMax := 2*d.blockSizeMax() + 2*litBufferExtraSize
+		dc := int(dstCap) % (capMax + 1)
+		streaming := streamingOperation(flags & 1)
+		prev := make([]byte, ext)
+		for i := range prev {
+			prev[i] = byte(i * 7)
+		}
+		d.prevDst, d.previousDstEnd = prev, len(prev)
+		buf := make([]byte, int(hist), int(hist)+2*dc)
+		for i := range buf {
+			buf[i] = byte(i * 5)
+		}
+		d.checkContinuity(buf[:0], len(buf)+dc)
+		d.previousDstEnd = len(buf)
+		histCopy := append([]byte(nil), buf...)
+		for round := 0; round < 1+int(flags>>3&1); round++ {
+			d.ddictIsCold = flags&4 != 0
+			d.checkContinuity(buf, dc)
+			n, e := d.decompressBlockInternal(buf, dc, block, streaming)
+			if e != 0 {
+				return
+			}
+			if n < 0 || n > dc {
+				t.Fatalf("size %d, output space %d", n, dc)
+			}
+			if !bytes.Equal(buf[:len(histCopy)], histCopy) || !bytes.Equal(d.extDict, prev) {
+				t.Fatal("history written")
+			}
+			buf = buf[:len(buf)+n]
+			d.previousDstEnd = len(buf)
+			histCopy = append(histCopy[:0], buf...)
+		}
+	})
+}
+
+// TestDecompressBlockContinuity: output into a new buffer makes the previous segment
+// (from prefixStart, not the buffer's start) the extDict; output that
+// continues where the previous one ended keeps everything.
+func TestDecompressBlockContinuity(t *testing.T) {
+	d := new(dctx)
+	d.decompressBegin()
+	a := make([]byte, 5, 100)
+	d.checkContinuity(a, 95)
+	if d.prefixStart != 5 || d.virtualStart != 5 || len(d.extDict) != 0 {
+		t.Fatalf("first: prefixStart %d virtualStart %d extDict %d", d.prefixStart, d.virtualStart, len(d.extDict))
+	}
+	a = append(a, "0123456789"...)
+	d.previousDstEnd = len(a)
+	d.checkContinuity(a, 85) // contiguous
+	if d.prefixStart != 5 || len(d.extDict) != 0 {
+		t.Fatalf("contiguous: prefixStart %d extDict %d", d.prefixStart, len(d.extDict))
+	}
+	d.checkContinuity(a[:3], 0) // not contiguous, but no output space
+	if d.prefixStart != 5 || d.previousDstEnd != 15 {
+		t.Fatalf("dstSize 0: prefixStart %d previousDstEnd %d", d.prefixStart, d.previousDstEnd)
+	}
+	b := make([]byte, 2, 50)
+	d.checkContinuity(b, 48)
+	if string(d.extDict) != "0123456789" || d.prefixStart != 2 || d.virtualStart != -8 || d.previousDstEnd != 2 {
+		t.Fatalf("new buffer: extDict %q prefixStart %d virtualStart %d previousDstEnd %d",
+			d.extDict, d.prefixStart, d.virtualStart, d.previousDstEnd)
 	}
 }

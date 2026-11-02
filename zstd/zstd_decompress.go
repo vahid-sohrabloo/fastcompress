@@ -328,8 +328,8 @@ func (d *dctx) decompressBegin() {
 	d.previousDstEnd = 0
 	d.prefixStart = 0
 	d.virtualStart = 0
-	d.dictEnd = 0
 	d.extDict = nil
+	d.prevDst = nil
 	d.entropy.hufTable.Init(hufDTableCapacityLog) // C: hufTable[0] = ZSTD_HUFFDTABLE_CAPACITY_LOG * 0x1000001
 	d.litEntropy, d.fseEntropy = false, false
 	d.isFrameDecompression = true

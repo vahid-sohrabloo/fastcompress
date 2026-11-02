@@ -642,21 +642,7 @@ func mustRead(t testing.TB, p string) []byte {
 // the parallel jobs.
 func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
 	t.Helper()
-	h := sha256.New()
-	h.Write(mustRead(t, bin))
-	h.Write(mustRead(t, cli))
-	const prefix = "fastzstd-frames-"
-	dir := filepath.Join(os.TempDir(), prefix+hex.EncodeToString(h.Sum(nil))[:16])
-	if err := os.Mkdir(dir, 0o755); err == nil {
-		ents, _ := os.ReadDir(os.TempDir())
-		for _, e := range ents {
-			if p := filepath.Join(os.TempDir(), e.Name()); strings.HasPrefix(e.Name(), prefix) && p != dir {
-				os.RemoveAll(p)
-			}
-		}
-	} else if !os.IsExist(err) {
-		t.Fatal(err)
-	}
+	dir := frameCacheDir(t, bin, cli)
 
 	type job struct {
 		name, tool string
@@ -867,6 +853,57 @@ func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
 	cat("skippable/after", a, "skippable-frame/s7")
 	cat("skippable/all", "skippable-frame/s15", a, "skippable-frame/s7", b, "skippable-frame/s15big")
 	return m
+}
+
+// frameCacheDir returns the frame cache directory for the cref and zstd
+// binaries bin and cli, os.TempDir()/fastzstd-frames-<hash of both>,
+// creating it (and then deleting the other fastzstd-frames-* directories)
+// when it does not exist.
+func frameCacheDir(t testing.TB, bin, cli string) string {
+	t.Helper()
+	h := sha256.New()
+	h.Write(mustRead(t, bin))
+	h.Write(mustRead(t, cli))
+	const prefix = "fastzstd-frames-"
+	dir := filepath.Join(os.TempDir(), prefix+hex.EncodeToString(h.Sum(nil))[:16])
+	if err := os.Mkdir(dir, 0o755); err == nil {
+		ents, _ := os.ReadDir(os.TempDir())
+		for _, e := range ents {
+			if p := filepath.Join(os.TempDir(), e.Name()); strings.HasPrefix(e.Name(), prefix) && p != dir {
+				os.RemoveAll(p)
+			}
+		}
+	} else if !os.IsExist(err) {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// CachedCLI returns `zstd args... -q -c` (the v1.5.7 CLI) on in, cached
+// under name in the decode corpus's cache directory (keyed like corpus
+// frames), for frames too slow to generate on every run.
+func CachedCLI(t testing.TB, name string, in []byte, args ...string) []byte {
+	t.Helper()
+	bin := Bin(t)
+	cli := tool(t, "ref/zstd/programs/zstd", "run ref/fetch.sh")
+	dir := frameCacheDir(t, bin, cli)
+	args = append(args, "-q", "-c")
+	key, err := cacheKey(cli, args, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, strings.ReplaceAll(name, "/", "__")+"-"+key)
+	if b, err := os.ReadFile(p); err == nil {
+		return b
+	}
+	out, err := runCmd(cli, in, args...)
+	if err == nil {
+		err = writeAtomic(dir, p, out)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // cacheKey names a generated frame: a hash of the tool's name, its

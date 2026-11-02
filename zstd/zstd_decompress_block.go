@@ -2,6 +2,7 @@ package zstd
 
 import (
 	"encoding/binary"
+	"sync/atomic"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
 	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
@@ -763,4 +764,974 @@ func decodeSequence(s *seqState, longOffsets bool, isLastSeq bool) seq {
 	}
 
 	return sq
+}
+
+/*-*************************************************************
+ *   Sequence execution
+ ***************************************************************/
+
+// C: zstd_internal.h:WILDCOPY_VECLEN (WILDCOPY_OVERLENGTH is
+// wildcopyOverlength, shared with the encoder).
+const wildcopyVecLen = 16
+
+// overlapType. C: zstd_internal.h:ZSTD_overlap_e
+type overlapType uint8
+
+const (
+	noOverlap           overlapType = iota // C: ZSTD_no_overlap
+	overlapSrcBeforeDst                    // C: ZSTD_overlap_src_before_dst
+)
+
+// copy16 copies 16 bytes from src[ip:] to dst[op:], as a memmove (the
+// literal buffer can be within dst). C: zstd_internal.h:ZSTD_copy16
+func copy16(dst []byte, op int, src []byte, ip int) {
+	copy(dst[op:op+16], src[ip:ip+16])
+}
+
+// wildcopy copies length bytes from src[ip:] to dst[op:] in 8- or 16-byte
+// chunks, reading and writing up to WILDCOPY_OVERLENGTH bytes past the end
+// (all of it when length <= 0), exactly as C: with overlapSrcBeforeDst, src
+// and dst are the same buffer, ip < op, at least 8 bytes apart; with
+// noOverlap the two ranges are at least WILDCOPY_VECLEN bytes apart (or in
+// different buffers). C: zstd_internal.h:ZSTD_wildcopy
+func wildcopy(dst []byte, op int, src []byte, ip int, length int, ovtype overlapType) {
+	diff := op - ip
+	oend := op + length
+
+	if ovtype == overlapSrcBeforeDst && diff < wildcopyVecLen {
+		// Handle short offset copies.
+		for {
+			copy(dst[op:op+8], src[ip:ip+8]) // C: COPY8
+			op += 8
+			ip += 8
+			if op >= oend {
+				break
+			}
+		}
+	} else {
+		// Separate out the first COPY16() call because the copy length is
+		// almost certain to be short, so the branches have different
+		// probabilities. Since it is almost certain to be short, only do one
+		// COPY16() in the first call. Then, do two calls per loop since at
+		// that point it is more likely to have a high trip count.
+		copy16(dst, op, src, ip)
+		if 16 >= length {
+			return
+		}
+		op += 16
+		ip += 16
+		for {
+			copy16(dst, op, src, ip) // C: COPY16
+			op += 16
+			ip += 16
+			copy16(dst, op, src, ip)
+			op += 16
+			ip += 16
+			if op >= oend {
+				break
+			}
+		}
+	}
+}
+
+// C: ZSTD_overlapCopy8's dec32table (added) and dec64table (subtracted).
+var (
+	dec32table = [8]int{0, 1, 2, 1, 4, 4, 4, 4}
+	dec64table = [8]int{8, 8, 8, 7, 8, 9, 10, 11}
+)
+
+// overlapCopy8 copies 8 bytes from b[ip:] to b[op:] and returns op and ip
+// advanced, where ip <= op. If the offset is < 8 then the offset is spread
+// to at least 8 bytes. Postcondition: op - ip >= 8.
+// C: zstd_decompress_block.c:ZSTD_overlapCopy8
+func overlapCopy8(b []byte, op, ip int, offset int) (int, int) {
+	if offset < 8 {
+		// close range match, overlap
+		sub2 := dec64table[offset]
+		b[op] = b[ip]
+		b[op+1] = b[ip+1]
+		b[op+2] = b[ip+2]
+		b[op+3] = b[ip+3]
+		ip += dec32table[offset]
+		copy(b[op+4:op+8], b[ip:ip+4]) // C: ZSTD_copy4
+		ip -= sub2
+	} else {
+		copy(b[op:op+8], b[ip:ip+8]) // C: ZSTD_copy8
+	}
+	return op + 8, ip + 8
+}
+
+// safecopy is a memcpy() that may read up to WILDCOPY_OVERLENGTH bytes past
+// the input and write up to 16 bytes past oendW (op >= oendW is allowed).
+// It is only called in the uncommon case where the sequence is near the end
+// of the block. With noOverlap the source and destination are at least
+// WILDCOPY_VECLEN bytes apart (or in different buffers); with
+// overlapSrcBeforeDst src is out and ip <= op, any distance apart.
+// C: zstd_decompress_block.c:ZSTD_safecopy
+func safecopy(out []byte, op, oendW int, src []byte, ip int, length int, ovtype overlapType) {
+	diff := op - ip
+	oend := op + length
+
+	if length < 8 {
+		// Handle short lengths.
+		for op < oend {
+			out[op] = src[ip]
+			op++
+			ip++
+		}
+		return
+	}
+	if ovtype == overlapSrcBeforeDst {
+		// Copy 8 bytes and ensure the offset >= 8 when there can be overlap.
+		op, ip = overlapCopy8(out, op, ip, diff)
+		length -= 8
+	}
+
+	if oend <= oendW {
+		// No risk of overwrite.
+		wildcopy(out, op, src, ip, length, ovtype)
+		return
+	}
+	if op <= oendW {
+		// Wildcopy until we get close to the end.
+		wildcopy(out, op, src, ip, oendW-op, ovtype)
+		ip += oendW - op
+		op = oendW
+	}
+	// Handle the leftovers.
+	for op < oend {
+		out[op] = src[ip]
+		op++
+		ip++
+	}
+}
+
+// safecopyDstBeforeSrc allows overlap with dst before src, or handles the
+// non-overlap case with dst after src, within one buffer b.
+// C: zstd_decompress_block.c:ZSTD_safecopyDstBeforeSrc
+func safecopyDstBeforeSrc(b []byte, op, ip int, length int) {
+	diff := op - ip
+	oend := op + length
+
+	if length < 8 || diff > -8 {
+		// Handle short lengths, close overlaps, and dst not before src.
+		for op < oend {
+			b[op] = b[ip]
+			op++
+			ip++
+		}
+		return
+	}
+
+	if op <= oend-wildcopyOverlength && diff < -wildcopyVecLen {
+		n := oend - wildcopyOverlength - op
+		wildcopy(b, op, b, ip, n, noOverlap)
+		ip += n
+		op += n
+	}
+
+	// Handle the leftovers.
+	for op < oend {
+		b[op] = b[ip]
+		op++
+		ip++
+	}
+}
+
+// The sequence executors write the sequence at out[op:] and return its
+// size. Pointers become offsets: op, oend, oendW and prefixStart index out
+// (the output buffer, with the current segment from prefixStart), litPtr and
+// litLimit index lits, and the match source is out or extDict (C's
+// virtualStart..dictEnd, ending where the prefix starts). Offsets and
+// lengths compare as uint where C compares size_t, so an offset holding
+// C's huge size_t bits (negative here) is rejected on every GOARCH.
+//
+// Bounds: C reads and writes up to WILDCOPY_OVERLENGTH bytes past a copy,
+// within limits its callers guarantee, and so do these: writes stay below
+// oend (the fast paths need oMatchEnd <= oend - WILDCOPY_OVERLENGTH), and
+// literal reads below litLimit + WILDCOPY_OVERLENGTH, which every literal
+// buffer placement leaves room for (ZSTD_allocateLiteralsBuffer, and raw
+// literals referenced in src only with WILDCOPY_OVERLENGTH bytes after).
+
+// execSequenceEnd handles the cases near the end of the output buffer,
+// with more careful checks against overflow. It needs to be fast for a
+// single long sequence, but not for many small sequences, since those fall
+// into execSequence. C: zstd_decompress_block.c:ZSTD_execSequenceEnd
+func execSequenceEnd(out []byte, op, oend int, sequence seq,
+	lits []byte, litPtr *int, litLimit int, prefixStart int, extDict []byte) (int, dErr) {
+	oLitEnd := op + sequence.litLength
+	sequenceLength := sequence.litLength + sequence.matchLength
+	iLitEnd := *litPtr + sequence.litLength
+	oendW := oend - wildcopyOverlength
+	virtualStart := prefixStart - len(extDict)
+
+	// bounds checks : careful of address space overflow in 32-bit mode
+	if uint(sequenceLength) > uint(oend-op) {
+		return 0, dErrBlockDstSizeTooSmall // last match must fit within dstBuffer
+	}
+	if uint(sequence.litLength) > uint(litLimit-*litPtr) {
+		return 0, dErrCorruptionDetected // try to read beyond literal buffer
+	}
+
+	// copy literals
+	safecopy(out, op, oendW, lits, *litPtr, sequence.litLength, noOverlap)
+	op = oLitEnd
+	*litPtr = iLitEnd
+
+	// copy Match
+	match := oLitEnd - sequence.offset
+	if uint(sequence.offset) > uint(oLitEnd-prefixStart) {
+		// offset beyond prefix
+		if uint(sequence.offset) > uint(oLitEnd-virtualStart) {
+			return 0, dErrOffsetBeyondHistory
+		}
+		dmatch := len(extDict) - (prefixStart - match) // C: dictEnd - (prefixStart - match)
+		if dmatch+sequence.matchLength <= len(extDict) {
+			copy(out[oLitEnd:oLitEnd+sequence.matchLength], extDict[dmatch:]) // C: ZSTD_memmove
+			return sequenceLength, 0
+		}
+		// span extDict & currentPrefixSegment
+		length1 := len(extDict) - dmatch
+		copy(out[oLitEnd:oLitEnd+length1], extDict[dmatch:])
+		op = oLitEnd + length1
+		sequence.matchLength -= length1
+		match = prefixStart
+	}
+	safecopy(out, op, oendW, out, match, sequence.matchLength, overlapSrcBeforeDst)
+	return sequenceLength, 0
+}
+
+// execSequenceEndSplitLitBuffer is execSequenceEnd while the literal
+// buffer is still split: the literals are in out, ahead of op.
+// C: zstd_decompress_block.c:ZSTD_execSequenceEndSplitLitBuffer
+func execSequenceEndSplitLitBuffer(out []byte, op, oend, oendW int, sequence seq,
+	litPtr *int, litLimit int, prefixStart int, extDict []byte) (int, dErr) {
+	oLitEnd := op + sequence.litLength
+	sequenceLength := sequence.litLength + sequence.matchLength
+	iLitEnd := *litPtr + sequence.litLength
+	virtualStart := prefixStart - len(extDict)
+
+	// bounds checks : careful of address space overflow in 32-bit mode
+	if uint(sequenceLength) > uint(oend-op) {
+		return 0, dErrBlockDstSizeTooSmall // last match must fit within dstBuffer
+	}
+	if uint(sequence.litLength) > uint(litLimit-*litPtr) {
+		return 0, dErrCorruptionDetected // try to read beyond literal buffer
+	}
+
+	// copy literals
+	if op > *litPtr && op < *litPtr+sequence.litLength {
+		return 0, dErrBlockDstSizeTooSmall // output should not catch up to and overwrite literal buffer
+	}
+	safecopyDstBeforeSrc(out, op, *litPtr, sequence.litLength)
+	op = oLitEnd
+	*litPtr = iLitEnd
+
+	// copy Match
+	match := oLitEnd - sequence.offset
+	if uint(sequence.offset) > uint(oLitEnd-prefixStart) {
+		// offset beyond prefix
+		if uint(sequence.offset) > uint(oLitEnd-virtualStart) {
+			return 0, dErrOffsetBeyondHistory
+		}
+		dmatch := len(extDict) - (prefixStart - match) // C: dictEnd - (prefixStart - match)
+		if dmatch+sequence.matchLength <= len(extDict) {
+			copy(out[oLitEnd:oLitEnd+sequence.matchLength], extDict[dmatch:]) // C: ZSTD_memmove
+			return sequenceLength, 0
+		}
+		// span extDict & currentPrefixSegment
+		length1 := len(extDict) - dmatch
+		copy(out[oLitEnd:oLitEnd+length1], extDict[dmatch:])
+		op = oLitEnd + length1
+		sequence.matchLength -= length1
+		match = prefixStart
+	}
+	safecopy(out, op, oendW, out, match, sequence.matchLength, overlapSrcBeforeDst)
+	return sequenceLength, 0
+}
+
+// execSequence. C: zstd_decompress_block.c:ZSTD_execSequence
+func execSequence(out []byte, op, oend int, sequence seq,
+	lits []byte, litPtr *int, litLimit int, prefixStart int, extDict []byte) (int, dErr) {
+	oLitEnd := op + sequence.litLength
+	sequenceLength := sequence.litLength + sequence.matchLength
+	oMatchEnd := op + sequenceLength
+	oendW := oend - wildcopyOverlength
+	iLitEnd := *litPtr + sequence.litLength
+	virtualStart := prefixStart - len(extDict)
+
+	// C (aarch64): PREFETCH_L1(match); prefetching is Task 20's.
+
+	// Handle edge cases in a slow path:
+	//   - Read beyond end of literals
+	//   - Match end is within WILDCOPY_OVERLIMIT of oend
+	// C's third case (32-bit mode and the match length overflows) cannot
+	// happen with int offsets: lengths are below 2^18.
+	if iLitEnd > litLimit || oMatchEnd > oendW {
+		return execSequenceEnd(out, op, oend, sequence, lits, litPtr, litLimit, prefixStart, extDict)
+	}
+
+	// Copy Literals:
+	// Split out litLength <= 16 since it is nearly always true. +1.6% on
+	// gcc-9. We likely don't need the full 32-byte wildcopy.
+	copy16(out, op, lits, *litPtr)
+	if sequence.litLength > 16 {
+		wildcopy(out, op+16, lits, *litPtr+16, sequence.litLength-16, noOverlap)
+	}
+	op = oLitEnd
+	*litPtr = iLitEnd // update for next sequence
+
+	// Copy Match
+	match := oLitEnd - sequence.offset
+	if uint(sequence.offset) > uint(oLitEnd-prefixStart) {
+		// offset beyond prefix -> go into extDict
+		if uint(sequence.offset) > uint(oLitEnd-virtualStart) {
+			return 0, dErrOffsetBeyondHistory
+		}
+		dmatch := len(extDict) + (match - prefixStart) // C: dictEnd + (match - prefixStart)
+		if dmatch+sequence.matchLength <= len(extDict) {
+			copy(out[oLitEnd:oLitEnd+sequence.matchLength], extDict[dmatch:]) // C: ZSTD_memmove
+			return sequenceLength, 0
+		}
+		// span extDict & currentPrefixSegment
+		length1 := len(extDict) - dmatch
+		copy(out[oLitEnd:oLitEnd+length1], extDict[dmatch:])
+		op = oLitEnd + length1
+		sequence.matchLength -= length1
+		match = prefixStart
+	}
+	// Match within prefix of 1 or more bytes
+
+	// Nearly all offsets are >= WILDCOPY_VECLEN bytes, which means we can
+	// use wildcopy without overlap checking.
+	if uint(sequence.offset) >= wildcopyVecLen {
+		// We bet on a full wildcopy for matches, since we expect matches to
+		// be longer than literals (in general). In silesia, ~10% of matches
+		// are longer than 16 bytes.
+		wildcopy(out, op, out, match, sequence.matchLength, noOverlap)
+		return sequenceLength, 0
+	}
+
+	// Copy 8 bytes and spread the offset to be >= 8.
+	op, match = overlapCopy8(out, op, match, sequence.offset)
+
+	// If the match length is > 8 bytes, then continue with the wildcopy.
+	if sequence.matchLength > 8 {
+		wildcopy(out, op, out, match, sequence.matchLength-8, overlapSrcBeforeDst)
+	}
+	return sequenceLength, 0
+}
+
+// execSequenceSplitLitBuffer is execSequence while the literal buffer is
+// still split: the literals are in out, ahead of op, and oendW is the
+// caller's limit (C: litPtr + litLength - WILDCOPY_OVERLENGTH) that keeps
+// the wildcopy writes behind them.
+// C: zstd_decompress_block.c:ZSTD_execSequenceSplitLitBuffer
+func execSequenceSplitLitBuffer(out []byte, op, oend, oendW int, sequence seq,
+	litPtr *int, litLimit int, prefixStart int, extDict []byte) (int, dErr) {
+	oLitEnd := op + sequence.litLength
+	sequenceLength := sequence.litLength + sequence.matchLength
+	oMatchEnd := op + sequenceLength
+	iLitEnd := *litPtr + sequence.litLength
+	virtualStart := prefixStart - len(extDict)
+
+	// Handle edge cases in a slow path:
+	//   - Read beyond end of literals
+	//   - Match end is within WILDCOPY_OVERLIMIT of oend
+	// C's 32-bit overflow case cannot happen here (see execSequence).
+	if iLitEnd > litLimit || oMatchEnd > oendW {
+		return execSequenceEndSplitLitBuffer(out, op, oend, oendW, sequence, litPtr, litLimit, prefixStart, extDict)
+	}
+
+	// Copy Literals:
+	// Split out litLength <= 16 since it is nearly always true. +1.6% on
+	// gcc-9. We likely don't need the full 32-byte wildcopy.
+	copy16(out, op, out, *litPtr)
+	if sequence.litLength > 16 {
+		wildcopy(out, op+16, out, *litPtr+16, sequence.litLength-16, noOverlap)
+	}
+	op = oLitEnd
+	*litPtr = iLitEnd // update for next sequence
+
+	// Copy Match
+	match := oLitEnd - sequence.offset
+	if uint(sequence.offset) > uint(oLitEnd-prefixStart) {
+		// offset beyond prefix -> go into extDict
+		if uint(sequence.offset) > uint(oLitEnd-virtualStart) {
+			return 0, dErrOffsetBeyondHistory
+		}
+		dmatch := len(extDict) + (match - prefixStart) // C: dictEnd + (match - prefixStart)
+		if dmatch+sequence.matchLength <= len(extDict) {
+			copy(out[oLitEnd:oLitEnd+sequence.matchLength], extDict[dmatch:]) // C: ZSTD_memmove
+			return sequenceLength, 0
+		}
+		// span extDict & currentPrefixSegment
+		length1 := len(extDict) - dmatch
+		copy(out[oLitEnd:oLitEnd+length1], extDict[dmatch:])
+		op = oLitEnd + length1
+		sequence.matchLength -= length1
+		match = prefixStart
+	}
+	// Match within prefix of 1 or more bytes
+
+	// Nearly all offsets are >= WILDCOPY_VECLEN bytes, which means we can
+	// use wildcopy without overlap checking.
+	if uint(sequence.offset) >= wildcopyVecLen {
+		// We bet on a full wildcopy for matches, since we expect matches to
+		// be longer than literals (in general). In silesia, ~10% of matches
+		// are longer than 16 bytes.
+		wildcopy(out, op, out, match, sequence.matchLength, noOverlap)
+		return sequenceLength, 0
+	}
+
+	// Copy 8 bytes and spread the offset to be >= 8.
+	op, match = overlapCopy8(out, op, match, sequence.offset)
+
+	// If the match length is > 8 bytes, then continue with the wildcopy.
+	if sequence.matchLength > 8 {
+		wildcopy(out, op, out, match, sequence.matchLength-8, overlapSrcBeforeDst)
+	}
+	return sequenceLength, 0
+}
+
+/*-*************************************************************
+ *   Sequence loops
+ ***************************************************************/
+
+// The sequence loops decode nbSeq sequences from seqSrc (the rest of the
+// block after the sequences header) and execute them, with the literals
+// decodeLiteralsBlock left, into out[ostart:ostart+maxDstSize]. They return
+// the block's decoded size.
+
+// litBufferStart returns the buffer the literals are in and the offset of
+// d.litBuf within it: out itself when they are in dst (inDst, split),
+// since decodeLiteralsBlock was given out[ostart:].
+func (d *dctx) litBufferStart(out []byte, ostart int) ([]byte, int) {
+	if d.litBufferLocation == notInDst {
+		return d.litBuf, 0
+	}
+	return out, ostart
+}
+
+// initSeqState starts the sequence bitstream and the FSE states, with the
+// repeat offsets of the previous block (the prologue the C loops share).
+func (d *dctx) initSeqState(st *seqState, seqSrc []byte) dErr {
+	d.fseEntropy = true
+	for i := range st.prevOffset {
+		st.prevOffset[i] = int(d.entropy.rep[i])
+	}
+	if _, err := st.dStream.Init(seqSrc); err != nil {
+		return dErrCorruptionDetected
+	}
+	initFseState(&st.stateLL, &st.dStream, d.llTptr)
+	initFseState(&st.stateOffb, &st.dStream, d.ofTptr)
+	initFseState(&st.stateML, &st.dStream, d.mlTptr)
+	return 0
+}
+
+// saveReps saves the repeat offsets for the next block (as U32, like C).
+func (d *dctx) saveReps(st *seqState) {
+	for i := range st.prevOffset {
+		d.entropy.rep[i] = uint32(st.prevOffset[i])
+	}
+}
+
+// decompressSequencesBodySplitLitBuffer decodes the sequences while the
+// literals are split between dst and litExtraBuffer.
+// C: zstd_decompress_block.c:ZSTD_decompressSequences_bodySplitLitBuffer
+func (d *dctx) decompressSequencesBodySplitLitBuffer(out []byte, ostart, maxDstSize int,
+	seqSrc []byte, nbSeq int, isLongOffset bool) (int, dErr) {
+	oend := ostart + maxDstSize
+	op := ostart
+	lits := out // literals are split between internal buffer & output buffer
+	litPtr := ostart + d.litPtr
+	dctxLitBufferEnd := ostart + d.litBufferEnd // C: dctx->litBufferEnd
+	litBufferEnd := dctxLitBufferEnd
+	prefixStart := d.prefixStart
+	extDict := d.extDict
+
+	if nbSeq != 0 {
+		var seqState seqState
+		if e := d.initSeqState(&seqState, seqSrc); e != 0 {
+			return 0, e
+		}
+
+		// decompress without overrunning litPtr begins
+		{
+			var sequence seq
+			// Handle the initial state where litBuffer is currently split
+			// between dst and litExtraBuffer.
+			for ; nbSeq != 0; nbSeq-- {
+				sequence = decodeSequence(&seqState, isLongOffset, nbSeq == 1)
+				if litPtr+sequence.litLength > dctxLitBufferEnd {
+					break
+				}
+				oneSeqSize, e := execSequenceSplitLitBuffer(out, op, oend, litPtr+sequence.litLength-wildcopyOverlength,
+					sequence, &litPtr, litBufferEnd, prefixStart, extDict)
+				if e != 0 {
+					return 0, e
+				}
+				op += oneSeqSize
+			}
+
+			// If there are more sequences, they will need to read literals
+			// from litExtraBuffer; copy over the remainder from dst and update
+			// litPtr and litEnd.
+			if nbSeq > 0 {
+				leftoverLit := dctxLitBufferEnd - litPtr
+				if leftoverLit != 0 {
+					if uint(leftoverLit) > uint(oend-op) {
+						return 0, dErrBlockDstSizeTooSmall // remaining lit must fit within dstBuffer
+					}
+					safecopyDstBeforeSrc(out, op, litPtr, leftoverLit)
+					sequence.litLength -= leftoverLit
+					op += leftoverLit
+				}
+				lits = d.litExtraBuffer[:]
+				litPtr = 0
+				litBufferEnd = litBufferExtraSize
+				d.litBufferLocation = notInDst
+				oneSeqSize, e := execSequence(out, op, oend, sequence, lits, &litPtr, litBufferEnd, prefixStart, extDict)
+				if e != 0 {
+					return 0, e
+				}
+				op += oneSeqSize
+				nbSeq--
+			}
+		}
+
+		if nbSeq > 0 {
+			// there is remaining lit from extra buffer
+			for ; nbSeq != 0; nbSeq-- {
+				sequence := decodeSequence(&seqState, isLongOffset, nbSeq == 1)
+				oneSeqSize, e := execSequence(out, op, oend, sequence, lits, &litPtr, litBufferEnd, prefixStart, extDict)
+				if e != 0 {
+					return 0, e
+				}
+				op += oneSeqSize
+			}
+		}
+
+		// check if reached exact end
+		if nbSeq != 0 {
+			return 0, dErrCorruptionDetected
+		}
+		if !seqState.dStream.EndOfDStream() {
+			return 0, dErrCorruptionDetected
+		}
+		// save reps for next block
+		d.saveReps(&seqState)
+	}
+
+	// last literal segment
+	if d.litBufferLocation == split {
+		// split hasn't been reached yet, first get dst then copy litExtraBuffer
+		lastLLSize := litBufferEnd - litPtr
+		if uint(lastLLSize) > uint(oend-op) {
+			return 0, dErrBlockDstSizeTooSmall
+		}
+		copy(out[op:op+lastLLSize], out[litPtr:litBufferEnd]) // C: ZSTD_memmove
+		op += lastLLSize
+		lits = d.litExtraBuffer[:]
+		litPtr = 0
+		litBufferEnd = litBufferExtraSize
+		d.litBufferLocation = notInDst
+	}
+	// copy last literals from internal buffer
+	{
+		lastLLSize := litBufferEnd - litPtr
+		if uint(lastLLSize) > uint(oend-op) {
+			return 0, dErrBlockDstSizeTooSmall
+		}
+		copy(out[op:op+lastLLSize], lits[litPtr:litBufferEnd])
+		op += lastLLSize
+	}
+
+	return op - ostart, 0
+}
+
+// decompressSequencesBody decodes the sequences when the literals are not
+// split (in dst after the block's output, or elsewhere).
+// C: zstd_decompress_block.c:ZSTD_decompressSequences_body
+func (d *dctx) decompressSequencesBody(out []byte, ostart, maxDstSize int,
+	seqSrc []byte, nbSeq int, isLongOffset bool) (int, dErr) {
+	oend := ostart + d.litBuffer
+	if d.litBufferLocation == notInDst {
+		oend = ostart + maxDstSize
+	}
+	op := ostart
+	lits, litBase := d.litBufferStart(out, ostart)
+	litPtr := litBase + d.litPtr
+	litEnd := litPtr + d.litSize
+	prefixStart := d.prefixStart
+	extDict := d.extDict
+
+	// Regen sequences
+	if nbSeq != 0 {
+		var seqState seqState
+		if e := d.initSeqState(&seqState, seqSrc); e != 0 {
+			return 0, e
+		}
+
+		for ; nbSeq != 0; nbSeq-- {
+			sequence := decodeSequence(&seqState, isLongOffset, nbSeq == 1)
+			oneSeqSize, e := execSequence(out, op, oend, sequence, lits, &litPtr, litEnd, prefixStart, extDict)
+			if e != 0 {
+				return 0, e
+			}
+			op += oneSeqSize
+		}
+
+		// check if reached exact end
+		if !seqState.dStream.EndOfDStream() {
+			return 0, dErrCorruptionDetected
+		}
+		// save reps for next block
+		d.saveReps(&seqState)
+	}
+
+	// last literal segment
+	{
+		lastLLSize := litEnd - litPtr
+		if uint(lastLLSize) > uint(oend-op) {
+			return 0, dErrBlockDstSizeTooSmall
+		}
+		copy(out[op:op+lastLLSize], lits[litPtr:litEnd])
+		op += lastLLSize
+	}
+
+	return op - ostart, 0
+}
+
+// prefetchMatch returns the position (relative to prefixStart) after the
+// sequence. C prefetches the sequence's match here; in Go it is a no-op
+// until Task 20 (PREFETCHT0 in asm).
+// C: zstd_decompress_block.c:ZSTD_prefetchMatch
+func prefetchMatch(prefetchPos int, sequence seq) int {
+	prefetchPos += sequence.litLength
+	return prefetchPos + sequence.matchLength
+}
+
+// C: zstd_decompress_block.c:STORED_SEQS, STORED_SEQS_MASK, ADVANCED_SEQS
+const (
+	storedSeqs     = 8
+	storedSeqsMask = storedSeqs - 1
+	advancedSeqs   = storedSeqs
+)
+
+// seqLongBodyBlocks counts the blocks decoded by decompressSequencesLongBody
+// (test-only: it shows tests that a frame took the prefetch path).
+var seqLongBodyBlocks atomic.Int64
+
+// decompressSequencesLongBody decodes the sequences ADVANCED_SEQS ahead of
+// their execution, to prefetch their matches (employed when a block has a
+// significant portion of long-distance matches, or with a "cold"
+// dictionary). C: zstd_decompress_block.c:ZSTD_decompressSequencesLong_body
+func (d *dctx) decompressSequencesLongBody(out []byte, ostart, maxDstSize int,
+	seqSrc []byte, nbSeq int, isLongOffset bool) (int, dErr) {
+	seqLongBodyBlocks.Add(1)
+	oend := ostart + maxDstSize
+	if d.litBufferLocation == inDst {
+		oend = ostart + d.litBuffer
+	}
+	op := ostart
+	lits, litBase := d.litBufferStart(out, ostart)
+	litPtr := litBase + d.litPtr
+	dctxLitBufferEnd := litBase + d.litBufferEnd // C: dctx->litBufferEnd
+	litBufferEnd := dctxLitBufferEnd
+	prefixStart := d.prefixStart
+	extDict := d.extDict
+
+	// exec runs one sequence, switching the literals to litExtraBuffer first
+	// when they reach the split point (C repeats this block twice).
+	exec := func(sequence *seq) (int, dErr) {
+		if d.litBufferLocation == split && litPtr+sequence.litLength > dctxLitBufferEnd {
+			// lit buffer is reaching split point, empty out the first buffer
+			// and transition to litExtraBuffer
+			leftoverLit := dctxLitBufferEnd - litPtr
+			if leftoverLit != 0 {
+				if uint(leftoverLit) > uint(oend-op) {
+					return 0, dErrBlockDstSizeTooSmall // remaining lit must fit within dstBuffer
+				}
+				safecopyDstBeforeSrc(out, op, litPtr, leftoverLit)
+				sequence.litLength -= leftoverLit
+				op += leftoverLit
+			}
+			lits = d.litExtraBuffer[:]
+			litPtr = 0
+			litBufferEnd = litBufferExtraSize
+			d.litBufferLocation = notInDst
+			return execSequence(out, op, oend, *sequence, lits, &litPtr, litBufferEnd, prefixStart, extDict)
+		}
+		// lit buffer is either wholly contained in first or second split,
+		// or not split at all
+		if d.litBufferLocation == split {
+			return execSequenceSplitLitBuffer(out, op, oend, litPtr+sequence.litLength-wildcopyOverlength,
+				*sequence, &litPtr, litBufferEnd, prefixStart, extDict)
+		}
+		return execSequence(out, op, oend, *sequence, lits, &litPtr, litBufferEnd, prefixStart, extDict)
+	}
+
+	// Regen sequences
+	if nbSeq != 0 {
+		var sequences [storedSeqs]seq
+		seqAdvance := min(nbSeq, advancedSeqs)
+		var seqState seqState
+		prefetchPos := op - prefixStart // track position relative to prefixStart
+		if e := d.initSeqState(&seqState, seqSrc); e != 0 {
+			return 0, e
+		}
+
+		// prepare in advance
+		seqNb := 0
+		for ; seqNb < seqAdvance; seqNb++ {
+			sequence := decodeSequence(&seqState, isLongOffset, seqNb == nbSeq-1)
+			prefetchPos = prefetchMatch(prefetchPos, sequence)
+			sequences[seqNb] = sequence
+		}
+
+		// decompress without stomping litBuffer
+		for ; seqNb < nbSeq; seqNb++ {
+			sequence := decodeSequence(&seqState, isLongOffset, seqNb == nbSeq-1)
+			oneSeqSize, e := exec(&sequences[(seqNb-advancedSeqs)&storedSeqsMask])
+			if e != 0 {
+				return 0, e
+			}
+			prefetchPos = prefetchMatch(prefetchPos, sequence)
+			sequences[seqNb&storedSeqsMask] = sequence
+			op += oneSeqSize
+		}
+		if !seqState.dStream.EndOfDStream() {
+			return 0, dErrCorruptionDetected
+		}
+
+		// finish queue
+		seqNb -= seqAdvance
+		for ; seqNb < nbSeq; seqNb++ {
+			oneSeqSize, e := exec(&sequences[seqNb&storedSeqsMask])
+			if e != 0 {
+				return 0, e
+			}
+			op += oneSeqSize
+		}
+
+		// save reps for next block
+		d.saveReps(&seqState)
+	}
+
+	// last literal segment
+	if d.litBufferLocation == split {
+		// first deplete literal buffer in dst, then copy litExtraBuffer
+		lastLLSize := litBufferEnd - litPtr
+		if uint(lastLLSize) > uint(oend-op) {
+			return 0, dErrBlockDstSizeTooSmall
+		}
+		copy(out[op:op+lastLLSize], out[litPtr:litBufferEnd]) // C: ZSTD_memmove
+		op += lastLLSize
+		lits = d.litExtraBuffer[:]
+		litPtr = 0
+		litBufferEnd = litBufferExtraSize
+	}
+	{
+		lastLLSize := litBufferEnd - litPtr
+		if uint(lastLLSize) > uint(oend-op) {
+			return 0, dErrBlockDstSizeTooSmall
+		}
+		copy(out[op:op+lastLLSize], lits[litPtr:litBufferEnd]) // C: ZSTD_memmove
+		op += lastLLSize
+	}
+
+	return op - ostart, 0
+}
+
+/*-*************************************************************
+ *   Block decoder
+ ***************************************************************/
+
+// totalHistorySize returns the total size of the history referenceable by
+// zstd, including both the prefix and the extDict. At op any offset larger
+// than this is invalid. C: zstd_decompress_block.c:ZSTD_totalHistorySize
+func totalHistorySize(op, virtualStart int) int {
+	return op - virtualStart
+}
+
+// offsetInfo. C: zstd_decompress_block.c:ZSTD_OffsetInfo
+type offsetInfo struct {
+	longOffsetShare     uint32
+	maxNbAdditionalBits uint32
+}
+
+// getOffsetInfo returns the "share" of long offsets (arbitrarily defined as
+// > (1<<23)) compared to maximum possible of (1<<OffFSELog), as well as the
+// maximum number of additional bits required. offTable must be valid.
+// C: zstd_decompress_block.c:ZSTD_getOffsetInfo
+func getOffsetInfo(offTable []seqSymbol, nbSeq int) offsetInfo {
+	var info offsetInfo
+	// If nbSeq == 0, then the offTable is uninitialized, but we have no
+	// sequences, so both values should be 0.
+	if nbSeq != 0 {
+		tableLog := offTable[0].baseValue // C: ZSTD_seqSymbol_header.tableLog
+		table := offTable[1:]
+		maxU := uint32(1) << tableLog
+		for u := uint32(0); u < maxU; u++ {
+			info.maxNbAdditionalBits = max(info.maxNbAdditionalBits, uint32(table[u].nbAdditionalBits))
+			if table[u].nbAdditionalBits > 22 {
+				info.longOffsetShare++
+			}
+		}
+		info.longOffsetShare <<= offFSELog - tableLog // scale to OffFSELog
+	}
+	return info
+}
+
+// mem32Bits is C's MEM_32bits() for the sequence decoder: false on every
+// GOARCH, since decodeSequence uses C's 64-bit path everywhere (the bit
+// container is 64 bits wide). So 386 makes C's 64-bit choices too
+// (isLongOffset false, prefetch share 7).
+const mem32Bits = false
+
+// maxShortOffset returns the maximum offset we can decode in one read of our
+// bitstream, without reloading more bits in the middle of the offset bits
+// read. Any offsets larger than this must use the long offset decoder.
+// C: zstd_decompress_block.c:ZSTD_maxShortOffset (the MEM_64bits() branch:
+// we can decode any offset without reloading bits)
+func maxShortOffset() uint {
+	return ^uint(0)
+}
+
+// decompressBlockInternal decodes the compressed block src (its content,
+// without the block header) into dst[len(dst):len(dst)+dstCap] and returns
+// the decoded size. dst[:len(dst)] is the output buffer before the block
+// (the offsets prefixStart, virtualStart and previousDstEnd index it, after
+// checkContinuity). Precondition: cap(dst) >= len(dst)+dstCap.
+// C: zstd_decompress_block.c:ZSTD_decompressBlock_internal
+func (d *dctx) decompressBlockInternal(dst []byte, dstCap int, src []byte, streaming streamingOperation) (int, dErr) {
+	// blockType == blockCompressed
+	ip := 0
+	ostart := len(dst)
+	out := dst[:ostart+dstCap]
+
+	// Note : the wording of the specification allows compressed block to be
+	// sized exactly ZSTD_blockSizeMax(dctx). This generally does not happen,
+	// as it makes little sense, since an uncompressed block would feature
+	// same size and have no decompression cost. Also, note that decoder from
+	// reference libzstd before < v1.5.4 would consider this edge case as an
+	// error. As a consequence, avoid generating compressed blocks of size
+	// ZSTD_blockSizeMax(dctx) for broader compatibility with the deployed
+	// ecosystem of zstd decoders.
+	if len(src) > d.blockSizeMax() {
+		return 0, dErrCompressedSizeTooBig
+	}
+
+	// Decode literals section
+	{
+		litCSize, e := d.decodeLiteralsBlock(src, out[ostart:], dstCap, streaming)
+		if e != 0 {
+			return 0, e
+		}
+		ip += litCSize
+	}
+
+	// Build Decoding Tables
+	{
+		// Compute the maximum block size, which must also work when !frame
+		// and fParams are unset. Additionally, take the min with dstCapacity
+		// to ensure that the totalHistorySize fits in a size_t.
+		blockSizeMax := min(dstCap, d.blockSizeMax())
+		totalHistorySize := totalHistorySize(ostart+blockSizeMax, d.virtualStart)
+		// isLongOffset must be true if there are long offsets. Offsets are
+		// long if they are larger than ZSTD_maxShortOffset(). We don't
+		// expect that to be the case in 64-bit mode.
+		//
+		// We check here to see if our history is large enough to allow long
+		// offsets. If it isn't, then we can't possible have (valid) long
+		// offsets. If the offset is invalid, then it is okay to read it
+		// incorrectly.
+		//
+		// If isLongOffsets is true, then we will later check our decoding
+		// table to see if it is even possible to generate long offsets.
+		isLongOffset := mem32Bits && uint(totalHistorySize) > maxShortOffset()
+		usePrefetchDecoder := d.ddictIsCold
+
+		nbSeq, seqHSize, e := decodeSeqHeaders(d, src[ip:])
+		if e != 0 {
+			return 0, e
+		}
+		ip += seqHSize
+
+		if dstCap == 0 && nbSeq > 0 {
+			return 0, dErrBlockDstSizeTooSmall // NULL not handled
+		}
+		// C's "invalid dst" check (dst within 1 MiB of the top of the
+		// address space) has no Go counterpart.
+
+		// If we could potentially have long offsets, or we might want to use
+		// the prefetch decoder, compute information about the share of long
+		// offsets, and the maximum nbAdditionalBits.
+		// NOTE: could probably use a larger nbSeq limit
+		if isLongOffset || (!usePrefetchDecoder && totalHistorySize > 1<<24 && nbSeq > 8) {
+			info := getOffsetInfo(d.ofTptr, nbSeq)
+			if isLongOffset && info.maxNbAdditionalBits <= streamAccumulatorMin {
+				// If isLongOffset, but the maximum number of additional bits
+				// that we see in our table is small enough, then we know it
+				// is impossible to have too long an offset in this block, so
+				// we can use the regular offset decoder.
+				isLongOffset = false
+			}
+			if !usePrefetchDecoder {
+				const minShare = 7 // heuristic values, correspond to 2.73% and 7.81% (C: 20 on 32-bit, see mem32Bits)
+				usePrefetchDecoder = info.longOffsetShare >= minShare
+			}
+		}
+
+		d.ddictIsCold = false
+
+		if usePrefetchDecoder {
+			return d.decompressSequencesLongBody(out, ostart, dstCap, src[ip:], nbSeq, isLongOffset)
+		}
+
+		// else
+		if d.litBufferLocation == split {
+			return d.decompressSequencesBodySplitLitBuffer(out, ostart, dstCap, src[ip:], nbSeq, isLongOffset)
+		}
+		return d.decompressSequencesBody(out, ostart, dstCap, src[ip:], nbSeq, isLongOffset)
+	}
+}
+
+// checkContinuity makes the previous segment the extDict when the output
+// position len(dst) of the buffer dst is not where the previous output
+// ended, and dstSize > 0. C: zstd_decompress_block.c:ZSTD_checkContinuity
+func (d *dctx) checkContinuity(dst []byte, dstSize int) {
+	contiguous := cap(dst) > 0 && cap(d.prevDst) > 0 && &dst[:1][0] == &d.prevDst[:1][0] &&
+		len(dst) == d.previousDstEnd // C: dst == dctx->previousDstEnd
+	if !contiguous && dstSize > 0 {
+		d.extDict = d.prevDst[d.prefixStart:d.previousDstEnd] // C: dictEnd = previousDstEnd
+		d.virtualStart = len(dst) - len(d.extDict)
+		d.prefixStart = len(dst)
+		d.previousDstEnd = len(dst)
+		d.prevDst = dst[:cap(dst)]
+	}
+}
+
+// decompressBlock decodes the compressed block src (outside a frame:
+// blockSizeMax is ZSTD_BLOCKSIZE_MAX) into dst[len(dst):cap(dst)] and
+// returns its size; dst[:len(dst)] is the history. Raw and RLE blocks are
+// the caller's to copy (and to tell checkContinuity about).
+// C: zstd_decompress_block.c:ZSTD_decompressBlock (ZSTD_decompressBlock_deprecated)
+func (d *dctx) decompressBlock(dst, src []byte) (int, dErr) {
+	dstCap := cap(dst) - len(dst)
+	d.isFrameDecompression = false
+	d.checkContinuity(dst, dstCap)
+	dSize, e := d.decompressBlockInternal(dst, dstCap, src, notStreaming)
+	if e != 0 {
+		return 0, e
+	}
+	if dSize > 0 {
+		// C sets previousDstEnd = dst + dSize unconditionally; with dSize 0
+		// and dst not contiguous (dstCap 0, so checkContinuity kept the
+		// previous buffer) that pointer is in another buffer, which Go's
+		// offsets cannot express. It changes nothing when contiguous.
+		d.previousDstEnd = len(dst) + dSize
+	}
+	return dSize, 0
 }
