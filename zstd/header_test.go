@@ -3,11 +3,17 @@ package zstd
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
@@ -236,7 +242,7 @@ func TestHeaderDecode(t *testing.T) {
 			err := h.Decode(in)
 			var hs2 Header
 			remain, err2 := hs2.DecodeAndStrip(in)
-			if hs2 != h || !errors.Is(err2, err) {
+			if hs2 != h || !sameDecodeErr(err2, err) {
 				t.Errorf("%s, %d bytes: DecodeAndStrip %+v, %v; Decode %+v, %v", name, len(in), hs2, err2, h, err)
 			}
 			if len(in) < hs {
@@ -362,9 +368,7 @@ func FuzzHeaderDecode(f *testing.F) {
 			}
 		}
 		if wantErr != nil {
-			var ce, wce *corruptError
-			if errors.As(wantErr, &wce) && !(errors.As(err, &ce) && ce.code == wce.code) ||
-				wce == nil && err != wantErr {
+			if !sameDecodeErr(err, wantErr) {
 				t.Fatalf("Decode: %v, want %v", err, wantErr)
 			}
 			return
@@ -389,4 +393,95 @@ func FuzzHeaderDecode(f *testing.F) {
 			t.Fatalf("AppendTo %x decodes to\n%+v, want\n%+v", out, h2, want)
 		}
 	})
+}
+
+// sameDecodeErr reports whether err is the error want stands for: the same
+// sentinel, or a *corruptError with the same code.
+func sameDecodeErr(err, want error) bool {
+	var ce, wce *corruptError
+	if errors.As(want, &wce) {
+		return errors.As(err, &ce) && ce.code == wce.code
+	}
+	return err == want
+}
+
+// decoderSentinels are the exported decoder errors plus io.ErrUnexpectedEOF.
+var decoderSentinels = []error{
+	ErrBlockTooSmall, ErrCRCMismatch, ErrCompressedSizeTooBig, ErrDecoderClosed,
+	ErrDecoderNilInput, ErrDecoderSizeExceeded, ErrFrameSizeExceeded, ErrFrameSizeMismatch,
+	ErrMagicMismatch, ErrReservedBlockType, ErrSnappyCorrupt, ErrSnappyTooLarge,
+	ErrSnappyUnsupported, ErrUnexpectedBlockSize, ErrUnknownDictionary, ErrWindowSizeExceeded,
+	ErrWindowSizeTooSmall, io.ErrUnexpectedEOF,
+}
+
+// TestErrorsIs pins the error-mapping table rows reachable so far (through
+// Header.Decode), checking the sentinels directly. want nil means an error
+// that matches none of them (*corruptError).
+func TestErrorsIs(t *testing.T) {
+	zhdr := func(b ...byte) []byte { return append([]byte{0x28, 0xB5, 0x2F, 0xFD}, b...) }
+	for _, c := range []struct {
+		name string
+		in   []byte
+		want error
+	}{
+		{"bad magic", []byte{0x27, 0xB5, 0x2F, 0xFD, 0x00, 0x00}, ErrMagicMismatch},
+		{"3-byte non-magic prefix", []byte{0x28, 0xB5, 0x2E}, ErrMagicMismatch},
+		{"window log 32", zhdr(0x00, 22<<3), ErrWindowSizeExceeded},
+		{"reserved block type", zhdr(0x00, 0x00, 3<<1|1, 0, 0), ErrReservedBlockType},
+		{"short header", zhdr(0x00), io.ErrUnexpectedEOF},
+		{"short skippable header", []byte{0x50, 0x2A, 0x4D, 0x18, 0x00}, io.ErrUnexpectedEOF},
+		{"reserved bit", zhdr(0x08, 0x00), nil},
+	} {
+		var h Header
+		err := h.Decode(c.in)
+		if err == nil {
+			t.Errorf("%s: no error", c.name)
+			continue
+		}
+		for _, s := range decoderSentinels {
+			if errors.Is(err, s) != (s == c.want) {
+				t.Errorf("%s: %v: errors.Is(err, %q) = %v", c.name, err, s, errors.Is(err, s))
+			}
+		}
+		var ce *corruptError
+		if c.want == nil && !errors.As(err, &ce) {
+			t.Errorf("%s: %T %v, want *corruptError", c.name, err, err)
+		}
+	}
+}
+
+// TestDErrNames checks that every dErr constant declared in the package
+// has a C error name for corruptError.Error.
+func TestDErrNames(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, f := range pkgs["zstd"].Files {
+		ast.Inspect(f, func(nd ast.Node) bool {
+			vs, ok := nd.(*ast.ValueSpec)
+			if !ok || vs.Type == nil || fmt.Sprint(vs.Type) != "dErr" {
+				return true
+			}
+			for i, name := range vs.Names {
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				v, err := strconv.Atoi(lit.Value)
+				if !ok || err != nil {
+					t.Fatalf("%s: value is not an integer literal", name.Name)
+				}
+				n++
+				if _, ok := cErrorNames[dErr(v).cCode()]; !ok {
+					t.Errorf("%s (C code %d) has no cErrorNames entry", name.Name, dErr(v).cCode())
+				}
+			}
+			return true
+		})
+	}
+	if n == 0 {
+		t.Fatal("no dErr constants found")
+	}
 }

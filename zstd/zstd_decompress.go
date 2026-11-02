@@ -127,6 +127,9 @@ func getFrameHeaderAdvanced(zfh *frameHeader, src []byte) (need int, err dErr) {
 		wlByte := src[pos]
 		pos++
 		windowLog := uint32(wlByte>>3) + windowLogAbsoluteMin
+		// C: ZSTD_WINDOWLOG_MAX is 30 on 32-bit builds; this port uses 31 on
+		// every GOARCH. On 386 such a window (up to ~4.0e9) overflows int:
+		// callers cap it by MaxWindow/MaxMemory before converting.
 		if windowLog > windowLogMax {
 			return 0, dErrFrameParameterWindowTooLarge
 		}

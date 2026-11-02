@@ -3,6 +3,7 @@ package zstd
 import (
 	"errors"
 	"io"
+	"strconv"
 )
 
 var (
@@ -124,7 +125,11 @@ type corruptError struct {
 }
 
 func (e *corruptError) Error() string {
-	return "zstd: " + e.where + ": " + cErrorNames[e.code.cCode()]
+	name, ok := cErrorNames[e.code.cCode()]
+	if !ok {
+		name = "error code " + strconv.Itoa(e.code.cCode())
+	}
+	return "zstd: " + e.where + ": " + name
 }
 
 // toError returns the error the mapping table gives e: an exported

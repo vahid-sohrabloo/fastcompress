@@ -1390,6 +1390,8 @@ func writeFrameHeader(dst []byte, params *cctxParams, pledgedSrcSize uint64, dic
 		checksumFlag:     params.fParams.checksumFlag,
 		singleSegment:    params.fParams.contentSizeFlag && windowSize >= pledgedSrcSize,
 	}
+	// contentSizeFlag implies a known pledgedSrcSize (resetCCtxInternal
+	// clears it otherwise); unknown here would drop the FCS field.
 	if params.fParams.contentSizeFlag {
 		fh.frameContentSize = pledgedSrcSize
 	}
@@ -1413,7 +1415,9 @@ func writeFrameHeader(dst []byte, params *cctxParams, pledgedSrcSize uint64, dic
 // windowSize a header can hold (exponent and mantissa).
 func writeFrameHeaderFields(dst []byte, fh frameHeader) []byte {
 	if fh.frameType == zstdSkippableFrame {
-		dst = binary.LittleEndian.AppendUint32(dst, magicSkippableStart+fh.dictID)
+		// The variant is masked so the magic stays skippable (C's
+		// ZSTD_writeSkippableFrame rejects variants above 15).
+		dst = binary.LittleEndian.AppendUint32(dst, magicSkippableStart+fh.dictID&0xF)
 		return binary.LittleEndian.AppendUint32(dst, uint32(fh.frameContentSize))
 	}
 	var dictIDSizeCode byte
@@ -1480,6 +1484,8 @@ func windowDescriptor(windowSize uint64) byte {
 	}
 	exp := bits.Len64(windowSize) - 1
 	mantissa := (windowSize - 1<<exp) >> (exp - 3)
+	// No range check (Header.AppendTo does none): a window of 2^42 or more
+	// wraps the exponent bits.
 	return byte((exp-windowLogAbsoluteMin)<<3) | byte(mantissa)
 }
 

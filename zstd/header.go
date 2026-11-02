@@ -141,6 +141,7 @@ func (h *Header) DecodeAndStrip(in []byte) (remain []byte, err error) {
 		fb.Compressed = true
 		fb.CompressedSize = cSize
 	case btRLE:
+		// Per the doc, not the 1 byte the RLE block occupies.
 		fb.DecompressedSize = int(bp.origSize)
 		fb.CompressedSize = int(bp.origSize)
 	default: // btRaw
