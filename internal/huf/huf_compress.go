@@ -3,8 +3,8 @@
 // dual license), with the pieces of lib/common/huf.h it needs.
 //
 // HUF_readCTable is here too (with HUF_readStats, in entropy_common.go), to
-// load a dictionary's table; the Huffman decoder is not part of this
-// package.
+// load a dictionary's table. The decoder side, lib/decompress/huf_decompress.c,
+// is in huf_decompress.go.
 package huf
 
 import (
@@ -42,8 +42,9 @@ const (
 )
 
 // Flags. C: huf.h:HUF_flags_e. FlagBMI2, FlagDisableAsm and FlagDisableFast
-// are accepted and ignored: the encoder has a single Go body whose output
-// does not depend on them.
+// are accepted and ignored by the encoder: it has a single Go body whose
+// output does not depend on them. The decoder honours FlagDisableFast (see
+// Decompress4X1UsingDTable).
 const (
 	FlagBMI2                  = 1 << 0
 	FlagOptimalDepth          = 1 << 1

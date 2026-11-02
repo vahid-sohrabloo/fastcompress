@@ -123,14 +123,15 @@ var (
 )
 
 // DStream is the backward bit reader. C: bitstream.h:BIT_DStream_t. ptr is
-// a byte offset into src; C's limitPtr is start + 8, i.e. offset 8.
+// a byte offset into src; C's start is offset 0 and its limitPtr is start +
+// 8, i.e. offset 8.
 //
 // C: bitstream.h:BIT_reloadDStream — on overflow C keeps bitContainer and
-// only points ptr at a static zero word, for later reloads; here ptr stays
-// and the container is zeroed instead. Output-neutral: a stream stays in
-// overflow until reset, and its only reader, the FSE decoder, then decodes
-// one last symbol, which comes from the decoding state, not from the bits
-// read; only the discarded final state differs.
+// points ptr at a static zero word; here ptr stays where it is. No reader
+// can tell: a stream stays in overflow until reset (Reload returns before
+// touching ptr), and EndOfDStream is false either way (bitsConsumed > 64).
+// The container is kept, as in C, because the HUF fast decoder's finishing
+// pass keeps decoding from it and its output is accepted unchecked.
 type DStream struct {
 	bitContainer uint64
 	bitsConsumed uint32
@@ -196,8 +197,7 @@ func (d *DStream) ReadBits(nbBits uint32) uint64 {
 func (d *DStream) Reload() DStatus {
 	// note : once in overflow mode, a bitstream remains in this mode until it's reset
 	if d.bitsConsumed > 64 {
-		d.bitContainer = 0 // C: ptr = &zeroFilled
-		return DStreamOverflow
+		return DStreamOverflow // C: ptr = &zeroFilled; overflow detected, no update
 	}
 	if d.ptr >= 8 { // C: ptr >= limitPtr
 		d.ptr -= int(d.bitsConsumed >> 3)
@@ -223,4 +223,41 @@ func (d *DStream) Reload() DStatus {
 	d.bitsConsumed -= uint32(nbBytes) * 8
 	d.bitContainer = binary.LittleEndian.Uint64(d.src[d.ptr:]) // reminder : srcSize > 8, otherwise ptr == start
 	return result
+}
+
+// LookBitsFast is LookBits for nbBits >= 1 (C's form differs for
+// bitsConsumed+nbBits > 64). C: bitstream.h:BIT_lookBitsFast
+func (d *DStream) LookBitsFast(nbBits uint32) uint64 {
+	const regMask = 63
+	return (d.bitContainer << (d.bitsConsumed & regMask)) >> ((regMask + 1 - nbBits) & regMask)
+}
+
+// SkipBits consumes nbBits bits. C: bitstream.h:BIT_skipBits
+func (d *DStream) SkipBits(nbBits uint32) { d.bitsConsumed += nbBits }
+
+// ReloadFast is Reload for bitsConsumed <= 64; it returns DStreamOverflow
+// once ptr is below limitPtr, where Reload must be used instead.
+// C: bitstream.h:BIT_reloadDStreamFast (BIT_reloadDStream_internal)
+func (d *DStream) ReloadFast() DStatus {
+	if d.ptr < 8 { // C: ptr < limitPtr
+		return DStreamOverflow
+	}
+	d.ptr -= int(d.bitsConsumed >> 3)
+	d.bitsConsumed &= 7
+	d.bitContainer = binary.LittleEndian.Uint64(d.src[d.ptr:])
+	return DStreamUnfinished
+}
+
+// EndOfDStream reports whether the stream has exactly reached its end (all
+// bits consumed). C: bitstream.h:BIT_endOfDStream
+func (d *DStream) EndOfDStream() bool {
+	return d.ptr == 0 && d.bitsConsumed == 64
+}
+
+// SetRaw sets the reader's state directly: src (C: start = src), the read
+// offset ptr (0 <= ptr <= len(src)-8), the container and the consumed bit
+// count. It is how the HUF fast decoders hand a stream back to the generic
+// loop. C: huf_decompress.c:HUF_initRemainingDStream (the field stores)
+func (d *DStream) SetRaw(src []byte, ptr int, container uint64, bitsConsumed uint32) {
+	d.src, d.ptr, d.bitContainer, d.bitsConsumed = src, ptr, container, bitsConsumed
 }
