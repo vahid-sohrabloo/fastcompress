@@ -930,7 +930,9 @@ func decompress1X2Body(dst, src []byte, dt *DTable) error {
 }
 
 // Decompress1X2UsingDTable decodes the single stream src into exactly
-// len(dst) bytes with a table read by ReadDTableX2. flags is accepted for
+// len(dst) bytes with a table read by ReadDTableX2. Precondition (as in
+// C): dt must have been filled by a successful ReadDTableX2; on a DTable
+// that never was, the zero entries (length 0) make it loop forever. flags is accepted for
 // C parity (HUF_flags_bmi2 only picks a compiler target).
 // C: huf_decompress.c:HUF_decompress1X2_usingDTable_internal
 func Decompress1X2UsingDTable(dst, src []byte, dt *DTable, flags int) error {
@@ -1192,7 +1194,9 @@ func decompress4X2Fast(dst, src []byte, dt *DTable) (int, error) {
 
 // Decompress4X2UsingDTable decodes the four streams of src (6-byte jump
 // table first) into exactly len(dst) bytes with a table read by
-// ReadDTableX2. Flags as for Decompress4X1UsingDTable.
+// ReadDTableX2. Flags as for Decompress4X1UsingDTable. Precondition (as in
+// C): dt must have been filled by a successful ReadDTableX2; on a DTable
+// that never was, the zero entries (length 0) make it loop forever.
 // C: huf_decompress.c:HUF_decompress4X2_usingDTable_internal
 func Decompress4X2UsingDTable(dst, src []byte, dt *DTable, flags int) error {
 	if flags&FlagDisableFast == 0 {

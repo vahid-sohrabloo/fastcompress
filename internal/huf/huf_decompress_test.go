@@ -3,6 +3,7 @@ package huf
 import (
 	"bytes"
 	"encoding/binary"
+	"hash/fnv"
 	"sort"
 	"testing"
 
@@ -416,6 +417,19 @@ func TestHUFReadDTableX2(t *testing.T) {
 			t.Fatalf("x2[%#b]=%#x want %#x", c.index, e, c.want)
 		}
 	}
+	// Level-2 boundary of HUF_fillDTableX2 (targetLog-nbBits >= minBits):
+	// in the 11-bit table of weights 10,9,...,2,1,1,0 plus an implied 11,
+	// symbol 8 (weight 2) has the 10-bit code 0000000001 (DTable rank
+	// [2,4)) and symbol 12 (weight 11) the 1-bit code 1. 11-10 == minBits
+	// (1), so C builds the 2-symbol entry {8, 12}, 11 bits, at index 3.
+	dt.Init(TableLogMax)
+	if _, err := ReadDTableX2(&dt, []byte{128 + 11, 0xA9, 0x87, 0x65, 0x43, 0x21, 0x10}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if e, want := dt.x2[0b0000000001_1], uint32(8|12<<8|11<<16|2<<24); e != want {
+		t.Fatalf("x2[3]=%#x want %#x", e, want)
+	}
+
 	// maxTableLog below the tree's log.
 	dt.Init(2)
 	if _, err := ReadDTableX2(&dt, desc, 0); err != ErrTableLogTooLarge {
@@ -577,6 +591,93 @@ func TestHUF4X2FastReadBelowStart(t *testing.T) {
 		dt2 := dt
 		if err := Decompress4X2UsingDTable(make([]byte, 40000), src, &dt2, flags); err != ErrCorruptionDetected {
 			t.Fatalf("flags=%d: err=%v, want ErrCorruptionDetected", flags, err)
+		}
+	}
+}
+
+// TestHUF4XFastInputBound pins the fast loops' input-side iteration bound
+// (C: iters = (ip[0] - ilowest) / 7): four 700-byte all-zero streams decode
+// 11-bit symbols, about 6.9 bytes per iteration, into a large dst, so the
+// iteration count is limited by ip[0], not by the output. A weaker bound
+// runs ip[0] below 0. The streams run out of input: C's body rejects;
+// C's fast path, which never checks the stream end, accepts with output
+// FNV-1a 0xd10ad426093d7171 for X1 and X2 alike (C built from ref/zstd).
+func TestHUF4XFastInputBound(t *testing.T) {
+	desc := []byte{128 + 11, 0xA9, 0x87, 0x65, 0x43, 0x21, 0x10}
+	var s [4][]byte
+	for i := range s {
+		s[i] = make([]byte, 700)
+		s[i][699] = 0x01
+	}
+	src := jumpStreams(s)
+	for _, x2 := range []bool{false, true} {
+		var dt DTable
+		dt.Init(TableLogMax)
+		var err error
+		if x2 {
+			_, err = ReadDTableX2(&dt, desc, 0)
+		} else {
+			_, err = ReadDTableX1(&dt, desc, 0)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		var args decompressFastArgs
+		if r, _ := decompressFastArgsInit(&args, make([]byte, 40000), src, &dt); r != 1 {
+			t.Fatal("fast path not taken")
+		}
+		dst := make([]byte, 40000)
+		dt2 := dt
+		if err := Decompress4XUsingDTable(dst, src, &dt2, 0); err != nil {
+			t.Fatalf("x2=%v fast: err=%v", x2, err)
+		}
+		h := fnv.New64a()
+		h.Write(dst)
+		if got := h.Sum64(); got != 0xd10ad426093d7171 {
+			t.Fatalf("x2=%v fast: output hash %#x, C 0xd10ad426093d7171", x2, got)
+		}
+		if err := Decompress4XUsingDTable(dst, src, &dt2, FlagDisableFast); err != ErrCorruptionDetected {
+			t.Fatalf("x2=%v body: err=%v, want ErrCorruptionDetected", x2, err)
+		}
+	}
+}
+
+// TestHUF4XBodySegmentOverrun runs the 4X bodies on an input where stream
+// 1 decodes 2-symbol X2 entries (8 bytes per main-loop iteration) while
+// stream 4 decodes 11-bit single symbols (4 bytes), so X2's op1 passes
+// opStart2 in the main loop. C rejects it (op1 > opStart2 for X2; the end
+// check for X1, where every stream advances 4 bytes per iteration).
+//
+// With 64-bit semantics the op1/op2/op3 overrun checks cannot change the
+// result, so dropping them is an equivalent mutant: a stream that passed
+// its segment end is finished by decodeStream{X1,X2} with one Reload
+// only, and BIT_endOfDStream then needs ptr == start and bitsConsumed ==
+// 64 at the main-loop exit, which needs >= 57 bits in one iteration (at
+// most 4*12 are decoded). In X1 the check is unreachable: op1 - 0 ==
+// op4 - opStart4 <= oend - opStart4 <= segmentSize.
+func TestHUF4XBodySegmentOverrun(t *testing.T) {
+	desc := []byte{128 + 11, 0xA9, 0x87, 0x65, 0x43, 0x21, 0x10}
+	var s [4][]byte
+	for i := range s {
+		s[i] = bytes.Repeat([]byte{0xFF}, 64) // symbol 12, code "1"
+	}
+	s[3] = make([]byte, 64) // symbol 9, code 00000000000
+	s[3][63] = 0x01
+	src := jumpStreams(s)
+	for _, x2 := range []bool{false, true} {
+		var dt DTable
+		dt.Init(TableLogMax)
+		var err error
+		if x2 {
+			_, err = ReadDTableX2(&dt, desc, 0)
+		} else {
+			_, err = ReadDTableX1(&dt, desc, 0)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Decompress4XUsingDTable(make([]byte, 48), src, &dt, FlagDisableFast); err != ErrCorruptionDetected {
+			t.Fatalf("x2=%v: err=%v, want ErrCorruptionDetected", x2, err)
 		}
 	}
 }
