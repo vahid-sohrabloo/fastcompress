@@ -52,7 +52,8 @@ func TestGuardMem(t *testing.T) {
 	for _, mode := range []string{"after", "before"} {
 		t.Run(mode, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestGuardMemCrash$", "-test.v")
-			cmd.Env = append(os.Environ(), crashEnv+"="+mode)
+			// GOTRACEBACK=single: an inherited "none" would hide the signal report.
+			cmd.Env = append(os.Environ(), crashEnv+"="+mode, "GOTRACEBACK=single")
 			out, err := cmd.CombinedOutput()
 			var ee *exec.ExitError
 			if !errors.As(err, &ee) {

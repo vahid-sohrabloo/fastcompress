@@ -45,6 +45,14 @@ These replace the earlier "Open questions" section. Each answer below is binding
 | Snappy: a chunk decodes to more than 65536 bytes (framing spec) | `ErrSnappyTooLarge` |
 | Snappy: a reserved unskippable chunk type 0x02–0x7f | `ErrSnappyUnsupported` |
 
+#### C behaviours the table must account for (found by Task 3; pinned against cref)
+
+Tasks 4 and 9 must either mirror each of these or list it as a deliberate deviation.
+
+- **Truncation inside the 4-byte checksum.** One-shot C (`ZSTD_decompressFrame`: `remainingSrcSize < 4`) returns `checksum_wrong`, which this table maps to `ErrCRCMismatch`. Streaming C ends "incomplete", which maps to `io.ErrUnexpectedEOF`. Every other cut gives one-shot `srcSize_wrong` and streaming "incomplete". Pinned by `TestTruncationsCRef`.
+- **Skippable frame size 0xFFFFFFF8–0xFFFFFFFF.** `readSkippableFrameSize` rejects `size + 8` overflowing 32 bits with `frameParameter_unsupported`, before any length check. This matches no row, so it is `corrupt`, not `io.ErrUnexpectedEOF`. Size 0xFFFFFFF7 with too little input is `srcSize_wrong`, which maps to `io.ErrUnexpectedEOF`. Pinned by the `skip-size-ffffffff` and `skip-size-fffffff7` corpus cases.
+- **Bad magic after the input's frames.** One-shot C (`ZSTD_decompressMultiFrame`) returns `prefix_unknown` (→ `ErrMagicMismatch`) only when no zstd frame has completed yet; skippable frames do not count. After a real frame, it turns `prefix_unknown` into `srcSize_wrong` ("following bytes are garbage"). Under the "input ends inside a frame" row that would map to `io.ErrUnexpectedEOF`, not `ErrMagicMismatch`. Streaming C returns `prefix_unknown` in both cases. Separately, one-shot C returns `srcSize_wrong` for fewer than 9 trailing bytes (too short for a frame header plus a block header). Pinned by `TestTrailingGarbageCRef`. **Open for Task 4:** decide which error `DecodeAll` returns for garbage after a real frame.
+
 ### Concurrency (`WithDecoderConcurrency`)
 
 C's decoder is single-threaded. The design adds threads only at points C's own structure already separates. The doc text decides the defaults: n=0 means GOMAXPROCS, and the default is min(4, GOMAXPROCS).

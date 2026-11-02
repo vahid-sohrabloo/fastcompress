@@ -2,7 +2,8 @@
 # decodercheck.sh
 #
 # Decoder safety rules (Phase 2 plan, Global Constraints). Fails when:
-#   1. a decoder Go file (non-test) imports "unsafe" or calls recover(.
+#   1. a decoder Go file (non-test) imports "unsafe" or calls recover(
+#      (comments and string contents are ignored; needs perl).
 #      Decoder files: zstd/zstd_decompress*.go, zstd/zstd_ddict.go,
 #      zstd/decoder*.go, zstd/header.go, zstd/snappy.go,
 #      internal/huf/huf_decompress*.go.
@@ -15,6 +16,7 @@
 #      "." or the whole name with non-alphanumerics removed.
 #      ("huf.decompress4X1Fast" -> FuzzHUFAsmEquiv.)
 # Exit 0 when nothing is found (also when no decoder files exist yet).
+# Runs on bash 3.2 (macOS).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -27,18 +29,47 @@ err() {
 
 shopt -s nullglob
 decoder=()
+ndecoder=0
 for f in zstd/zstd_decompress*.go zstd/zstd_ddict.go zstd/decoder*.go zstd/header.go zstd/snappy.go \
   internal/huf/huf_decompress*.go; do
-  [[ -f $f && $f != *_test.go ]] && decoder+=("$f")
+  if [[ -f $f && $f != *_test.go ]]; then
+    decoder+=("$f")
+    ndecoder=$((ndecoder + 1))
+  fi
 done
 
-# 1. unsafe imports and recover calls (comments stripped first).
-for f in "${decoder[@]}"; do
-  code=$(sed -e 's://.*$::' "$f")
-  if grep -Eq '^[[:space:]]*(import[[:space:]]+)?([A-Za-z_.][A-Za-z0-9_]*[[:space:]]+)?"unsafe"' <<<"$code"; then
+# scan FILE prints one line per finding in a Go file: "unsafe", "recover",
+# and "asm <name>" for each cpu.RegisterAsm("<name>", ...). It tokenizes
+# comments, interpreted and raw strings and runes, so none of them can hide
+# or fake a match; imports are read from import declarations only, and a
+# call may span lines.
+scan() {
+  perl -0777 -ne '
+    my ($code, $blank) = ("", "");   # comments removed; also string contents blanked
+    while (length) {
+      if    (s{\A//[^\n]*}{})        { }
+      elsif (s{\A/\*.*?\*/}{}s)       { $code .= " "; $blank .= " "; }
+      elsif (s{\A("(?:[^"\\\n]|\\.)*")}{}) { $code .= $1; $blank .= "\"\""; }
+      elsif (s{\A(`[^`]*`)}{})       { $code .= $1; $blank .= "\"\""; }
+      elsif (s{\A(\x27(?:[^\x27\\\n]|\\.)+\x27)}{}) { $code .= $1; $blank .= "0"; }
+      elsif (s{\A([^/"`\x27]+|.)}{}s) { $code .= $1; $blank .= $1; }
+    }
+    my @specs;
+    while ($code =~ /\bimport\s*\((.*?)\)/gs) { push @specs, $1 }
+    while ($code =~ /\bimport\s+((?:[\w.]+\s+)?(?:"[^"]*"|`[^`]*`))/g) { push @specs, $1 }
+    for (@specs) { if (/(?:"unsafe"|`unsafe`)/) { print "unsafe\n"; last } }
+    print "recover\n" if $blank =~ /(?<![\w.])recover\s*\(/;
+    while ($code =~ /\bcpu\s*\.\s*RegisterAsm\s*\(\s*(?:"([^"]+)"|`([^`]+)`)/g) { print "asm ", $1 // $2, "\n" }
+  ' "$1"
+}
+
+# 1. unsafe imports and recover calls.
+for f in ${decoder[@]+"${decoder[@]}"}; do
+  findings=$(scan "$f")
+  if grep -qx unsafe <<<"$findings"; then
     err "$f imports \"unsafe\""
   fi
-  if grep -Eq '(^|[^A-Za-z0-9_.])recover[[:space:]]*\(' <<<"$code"; then
+  if grep -qx recover <<<"$findings"; then
     err "$f calls recover()"
   fi
 done
@@ -59,7 +90,7 @@ while IFS= read -r -d '' s; do
 done < <(find zstd internal -type f \( -name '*_decompress*_amd64.s' -o -name '*_decompress*_arm64.s' \) -print0)
 
 # 3. Every decoder-side asm routine has a FuzzXxxAsmEquiv target.
-for f in "${decoder[@]}"; do
+for f in ${decoder[@]+"${decoder[@]}"}; do
   dir=$(dirname "$f")
   while IFS= read -r name; do
     [[ -z $name ]] && continue
@@ -73,10 +104,10 @@ for f in "${decoder[@]}"; do
       fi
     done
     [[ $found == 1 ]] || err "$f: cpu.RegisterAsm(\"$name\") has no Fuzz${prefix}AsmEquiv / Fuzz${whole}AsmEquiv in $dir/*_test.go"
-  done < <(sed -e 's://.*$::' "$f" | grep -Eo 'cpu\.RegisterAsm\("[^"]+"' | sed -E 's/.*\("([^"]+)"/\1/' || true)
+  done < <(scan "$f" | sed -n 's/^asm //p')
 done
 
 if [[ $fail != 0 ]]; then
   exit 1
 fi
-echo "decodercheck: ok (${#decoder[@]} decoder files)"
+echo "decodercheck: ok ($ndecoder decoder files)"
