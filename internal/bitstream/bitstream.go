@@ -253,6 +253,14 @@ func (d *DStream) EndOfDStream() bool {
 	return d.ptr == 0 && d.bitsConsumed == 64
 }
 
+// BitsConsumed returns the number of consumed bits of the container.
+// C: BIT_DStream_t.bitsConsumed (read directly by HUF_decodeLastSymbolX2)
+func (d *DStream) BitsConsumed() uint32 { return d.bitsConsumed }
+
+// SetBitsConsumed sets the number of consumed bits of the container.
+// C: BIT_DStream_t.bitsConsumed (set directly by HUF_decodeLastSymbolX2)
+func (d *DStream) SetBitsConsumed(n uint32) { d.bitsConsumed = n }
+
 // SetRaw sets the reader's state directly: src (C: start = src), the read
 // offset ptr (0 <= ptr <= len(src)-8), the container and the consumed bit
 // count. It is how the HUF fast decoders hand a stream back to the generic

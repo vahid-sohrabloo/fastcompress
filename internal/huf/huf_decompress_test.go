@@ -6,6 +6,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
 )
 
@@ -341,4 +342,539 @@ func TestHUF4X1SevenByteStream(t *testing.T) {
 			}
 		}
 	}
+}
+
+// decodeX2 reads the table with ReadDTableX2 and decodes the rest of comp
+// into dstSize bytes.
+func decodeX2(comp []byte, dstSize int, four bool, maxTableLog uint, flags int) ([]byte, error) {
+	var dt DTable
+	dt.Init(maxTableLog)
+	hSize, err := ReadDTableX2(&dt, comp, flags)
+	if err != nil {
+		return nil, err
+	}
+	dst := make([]byte, dstSize)
+	if four {
+		err = Decompress4X2UsingDTable(dst, comp[hSize:], &dt, flags)
+	} else {
+		err = Decompress1X2UsingDTable(dst, comp[hSize:], &dt, flags)
+	}
+	return dst, err
+}
+
+func TestHUFDecompressX2RoundTrip(t *testing.T) {
+	for _, s := range hufStreams(t) {
+		// maxTableLog 12 (the zstd DTable): tables up to 11 bits are built
+		// at HUF_DECODER_FAST_TABLELOG; 4X takes the fast loop.
+		// maxTableLog = the stream's own table log: built at that log, so
+		// streams below 11 bits decode through the body.
+		var w [SymbolValueMax + 1]byte
+		var rank [TableLogMax + 1]uint32
+		_, tableLog, _, err := ReadStats(w[:], rank[:], s.comp)
+		if err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		for _, mtl := range []uint{TableLogMax, uint(tableLog)} {
+			for _, flags := range []int{0, FlagDisableFast} {
+				got, err := decodeX2(s.comp, len(s.src), s.four, mtl, flags)
+				if err != nil {
+					t.Fatalf("%s mtl=%d flags=%d: %v", s.name, mtl, flags, err)
+				}
+				if !bytes.Equal(got, s.src) {
+					t.Fatalf("%s mtl=%d flags=%d: output differs", s.name, mtl, flags)
+				}
+			}
+		}
+	}
+}
+
+func TestHUFReadDTableX2(t *testing.T) {
+	// Weights 1,2,3,0 plus the implied 1 (tableLog 3): symbols 2, 1, 4, 0
+	// have codes 1, 01, 001, 000. Built at 11 bits with maxTableLog 12.
+	desc := []byte{128 + 3, 0x12, 0x30}
+	var dt DTable
+	dt.Init(TableLogMax)
+	n, err := ReadDTableX2(&dt, desc, 0)
+	if err != nil || n != 3 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if dt.desc.tableLog != decoderFastTableLog || dt.desc.tableType != 1 || dt.desc.maxTableLog != TableLogMax {
+		t.Fatalf("desc=%+v", dt.desc)
+	}
+	// HUF_DEltX2 {sequence, nbBits, length} as sequence | nbBits<<16 | length<<24.
+	for _, c := range []struct {
+		index int
+		want  uint32
+	}{
+		{0b11 << 9, 2 | 2<<8 | 2<<16 | 2<<24},      // "1" "1": symbols 2, 2
+		{0b000_000 << 5, 0 | 0<<8 | 6<<16 | 2<<24}, // "000" "000": symbols 0, 0
+		{0b001_01 << 6, 4 | 1<<8 | 5<<16 | 2<<24},  // "001" "01": symbols 4, 1
+		{0b01_000 << 6, 1 | 0<<8 | 5<<16 | 2<<24},  // "01" "000": symbols 1, 0
+	} {
+		if e := dt.x2[c.index]; e != c.want {
+			t.Fatalf("x2[%#b]=%#x want %#x", c.index, e, c.want)
+		}
+	}
+	// maxTableLog below the tree's log.
+	dt.Init(2)
+	if _, err := ReadDTableX2(&dt, desc, 0); err != ErrTableLogTooLarge {
+		t.Fatalf("err=%v want ErrTableLogTooLarge", err)
+	}
+	// maxTableLog beyond HUF_TABLELOG_MAX.
+	dt.Init(TableLogMax + 1)
+	if _, err := ReadDTableX2(&dt, desc, 0); err != ErrTableLogTooLarge {
+		t.Fatalf("err=%v want ErrTableLogTooLarge", err)
+	}
+}
+
+// TestHUFSelectDecoder pins C's algoTime table verbatim and checks the
+// decision on a {dstSize, cSrcSize} grid that walks every quantisation
+// step Q = cSrcSize*16/dstSize (0..15, and cSrcSize >= dstSize). The
+// expected strings were printed by C's HUF_selectDecoder (v1.5.7
+// huf_decompress.c compiled with gcc), one digit per cSrcSize =
+// dstSize*q/16 for q = 0..16.
+func TestHUFSelectDecoder(t *testing.T) {
+	want := [16][2]algoTimeT{
+		{{0, 0}, {1, 1}},
+		{{0, 0}, {1, 1}},
+		{{150, 216}, {381, 119}},
+		{{170, 205}, {514, 112}},
+		{{177, 199}, {539, 110}},
+		{{197, 194}, {644, 107}},
+		{{221, 192}, {735, 107}},
+		{{256, 189}, {881, 106}},
+		{{359, 188}, {1167, 109}},
+		{{582, 187}, {1570, 114}},
+		{{688, 187}, {1712, 122}},
+		{{825, 186}, {1965, 136}},
+		{{976, 185}, {2131, 150}},
+		{{1180, 186}, {2070, 175}},
+		{{1377, 185}, {1731, 202}},
+		{{1412, 185}, {1695, 202}},
+	}
+	if algoTime != want {
+		t.Fatalf("algoTime differs from C")
+	}
+	grid := []struct {
+		dstSize int
+		want    string
+	}{
+		{1, "00000000000000000"},
+		{16, "00000000000000000"},
+		{255, "00000000000000000"},
+		{256, "00000000000000000"},
+		{1000, "00110000000000000"},
+		{4096, "00111111110000000"},
+		{10000, "00111111111100000"},
+		{32768, "00111111111110000"},
+		{65536, "00111111111111000"},
+		{100000, "00111111111111000"},
+		{131072, "00111111111111000"},
+	}
+	for _, g := range grid {
+		for q := 0; q <= 16; q++ {
+			c := g.dstSize * q / 16
+			if got := SelectDecoder(g.dstSize, c); got != uint32(g.want[q]-'0') {
+				t.Errorf("SelectDecoder(%d, %d) = %d, want %c", g.dstSize, c, got, g.want[q])
+			}
+		}
+	}
+}
+
+// decode4X2Both runs the 4X X2 decoder with the fast loop allowed and with
+// it disabled, on copies of the same table.
+func decode4X2Both(dt *DTable, src []byte, dstSize int) (fast, body []byte, errFast, errBody error) {
+	fast = make([]byte, dstSize)
+	body = make([]byte, dstSize)
+	dt2 := *dt
+	errFast = Decompress4X2UsingDTable(fast, src, dt, 0)
+	errBody = Decompress4X2UsingDTable(body, src, &dt2, FlagDisableFast)
+	return
+}
+
+// equalButSegmentEnds reports whether a and b are equal except possibly
+// at the last byte of each of the four 4X segments.
+//
+// C: huf_decompress.c:HUF_decodeLastSymbolX2 clamps bitsConsumed to 64, so
+// the X2 body accepts a stream whose last symbol's code runs past the
+// stream's start; its lookahead there sees zeros. The fast path's
+// remaining DStream starts at ilowest (HUF_initRemainingDStream), so the
+// same lookahead sees the previous stream's bytes and can decode another
+// last symbol. Checked against C's fast and body paths (built from
+// ref/zstd with ZSTD_DISABLE_ASM): Go matches C on such inputs, which
+// differ the same way in C.
+func equalButSegmentEnds(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seg := (len(a) + 3) / 4
+	for i := range a {
+		if a[i] != b[i] && i != len(a)-1 && (i+1)%seg != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func TestHUF4X2FastVsBody(t *testing.T) {
+	fastUsed := 0
+	for _, s := range hufStreams(t) {
+		if !s.four {
+			continue
+		}
+		var dt DTable
+		dt.Init(TableLogMax)
+		hSize, err := ReadDTableX2(&dt, s.comp, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		data := s.comp[hSize:]
+		var args decompressFastArgs
+		if r, _ := decompressFastArgsInit(&args, make([]byte, len(s.src)), data, &dt); r == 1 {
+			fastUsed++
+		}
+		// The whole stream, then truncated and bit-flipped variants.
+		variants := [][]byte{data, data[:len(data)-1]}
+		for _, off := range []int{0, 6, len(data) / 2, len(data) - 1} {
+			v := bytes.Clone(data)
+			v[off] ^= 0x5a
+			variants = append(variants, v)
+		}
+		for i, v := range variants {
+			for _, dstSize := range []int{len(s.src), len(s.src) - 1, len(s.src) + 1} {
+				fast, body, ef, eb := decode4X2Both(&dt, v, dstSize)
+				if eb == nil && (ef != nil || !equalButSegmentEnds(fast, body)) {
+					t.Fatalf("%s variant %d dstSize %d: body ok, fast err=%v equal=%v", s.name, i, dstSize, ef, equalButSegmentEnds(fast, body))
+				}
+				if i == 0 && dstSize == len(s.src) && (ef != nil || !bytes.Equal(fast, s.src)) {
+					t.Fatalf("%s: fast err=%v", s.name, ef)
+				}
+			}
+		}
+	}
+	if fastUsed == 0 {
+		t.Fatal("fast loop never taken")
+	}
+}
+
+// TestHUF4X2FastReadBelowStart is the X2 form of
+// TestHUF4X1FastReadBelowStart: streams 1-3 run below their start.
+func TestHUF4X2FastReadBelowStart(t *testing.T) {
+	var dt DTable
+	dt.Init(TableLogMax)
+	if _, err := ReadDTableX2(&dt, []byte{128 + 11, 0xA9, 0x87, 0x65, 0x43, 0x21, 0x10}, 0); err != nil {
+		t.Fatal(err)
+	}
+	var s [4][]byte
+	s[0] = bytes.Repeat([]byte{0xFF}, 700)
+	for i := 1; i < 4; i++ {
+		s[i] = make([]byte, 700)
+		s[i][699] = 0x01
+	}
+	src := jumpStreams(s)
+	for _, flags := range []int{0, FlagDisableFast} {
+		dt2 := dt
+		if err := Decompress4X2UsingDTable(make([]byte, 40000), src, &dt2, flags); err != ErrCorruptionDetected {
+			t.Fatalf("flags=%d: err=%v, want ErrCorruptionDetected", flags, err)
+		}
+	}
+}
+
+// TestHUFDecompress4XDispatchStaleX1 reads a 12-bit X1 table and then an
+// 11-bit X2 table into the same DTable: x1 keeps stale 12-bit entries
+// while desc.tableLog is 11. Decompress4XUsingDTable must dispatch on
+// desc.tableType (C: HUF_decompress4X_usingDTable) and never run the X1
+// fast loop on them (which would consume 8 bytes per iteration and run ip
+// below 0).
+func TestHUFDecompress4XDispatchStaleX1(t *testing.T) {
+	var dt DTable
+	dt.Init(TableLogMax)
+	// Weights 11,10,...,2,1,1 plus an implied 12: tableLog 12.
+	if _, err := ReadDTableX1(&dt, []byte{128 + 11, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x11}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if dt.desc.tableLog != 12 {
+		t.Fatalf("X1 tableLog %d", dt.desc.tableLog)
+	}
+	if _, err := ReadDTableX2(&dt, []byte{128 + 11, 0xA9, 0x87, 0x65, 0x43, 0x21, 0x10}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if dt.desc.tableLog != decoderFastTableLog || dt.desc.tableType != 1 {
+		t.Fatalf("desc=%+v", dt.desc)
+	}
+	var s [4][]byte
+	for i := range s {
+		s[i] = make([]byte, 200)
+		s[i][199] = 0x01
+	}
+	src := jumpStreams(s)
+	for _, flags := range []int{0, FlagDisableFast} {
+		dt2 := dt
+		_ = Decompress4XUsingDTable(make([]byte, 20000), src, &dt2, flags)
+		_ = Decompress1XUsingDTable(make([]byte, 20000), src, &dt2, flags)
+	}
+}
+
+func TestHUFDecompressEntryPoints(t *testing.T) {
+	for _, s := range hufStreams(t) {
+		var dt DTable
+		dt.Init(TableLogMax)
+		dst := make([]byte, len(s.src))
+		var err error
+		if s.four {
+			err = Decompress4XHufOnlyWksp(&dt, dst, s.comp, 0)
+		} else {
+			err = Decompress1XDCtxWksp(&dt, dst, s.comp, 0)
+		}
+		if err != nil || !bytes.Equal(dst, s.src) {
+			t.Fatalf("%s: err=%v equal=%v", s.name, err, bytes.Equal(dst, s.src))
+		}
+		if want := SelectDecoder(len(s.src), len(s.comp)); uint32(dt.desc.tableType) != want {
+			t.Fatalf("%s: tableType %d, SelectDecoder %d", s.name, dt.desc.tableType, want)
+		}
+		// Treeless repeat: the stream again with the table just read.
+		var w [SymbolValueMax + 1]byte
+		var rank [TableLogMax + 1]uint32
+		_, _, hSize, err := ReadStats(w[:], rank[:], s.comp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clear(dst)
+		if s.four {
+			err = Decompress4XUsingDTable(dst, s.comp[hSize:], &dt, 0)
+		} else {
+			err = Decompress1XUsingDTable(dst, s.comp[hSize:], &dt, 0)
+		}
+		if err != nil || !bytes.Equal(dst, s.src) {
+			t.Fatalf("%s repeat: err=%v equal=%v", s.name, err, bytes.Equal(dst, s.src))
+		}
+	}
+	// C's validation checks.
+	var dt DTable
+	dt.Init(TableLogMax)
+	if err := Decompress1XDCtxWksp(&dt, nil, []byte{1}, 0); err != ErrDstSizeTooSmall {
+		t.Fatalf("1X dstSize 0: %v", err)
+	}
+	if err := Decompress4XHufOnlyWksp(&dt, nil, []byte{1}, 0); err != ErrDstSizeTooSmall {
+		t.Fatalf("4X dstSize 0: %v", err)
+	}
+	if err := Decompress4XHufOnlyWksp(&dt, make([]byte, 4), nil, 0); err != ErrCorruptionDetected {
+		t.Fatalf("4X cSrcSize 0: %v", err)
+	}
+	if err := Decompress1XDCtxWksp(&dt, make([]byte, 2), []byte{1, 2, 3}, 0); err != ErrCorruptionDetected {
+		t.Fatalf("1X cSrcSize > dstSize: %v", err)
+	}
+	dst := make([]byte, 3)
+	if err := Decompress1XDCtxWksp(&dt, dst, []byte{7, 8, 9}, 0); err != nil || !bytes.Equal(dst, []byte{7, 8, 9}) {
+		t.Fatalf("1X raw: %v %v", err, dst)
+	}
+	if err := Decompress1XDCtxWksp(&dt, dst, []byte{5}, 0); err != nil || !bytes.Equal(dst, []byte{5, 5, 5}) {
+		t.Fatalf("1X rle: %v %v", err, dst)
+	}
+	// A table description with nothing after it: srcSize_wrong
+	// (dstSize 1000 with cSrcSize 3 selects X1).
+	desc := []byte{128 + 3, 0x12, 0x30}
+	if err := Decompress1XDCtxWksp(&dt, make([]byte, 1000), desc, 0); err != ErrSrcSizeWrong {
+		t.Fatalf("1X X1 header only: %v", err)
+	}
+	if err := Decompress4XHufOnlyWksp(&dt, make([]byte, 1000), desc, 0); err != ErrSrcSizeWrong {
+		t.Fatalf("4X X1 header only: %v", err)
+	}
+	// SelectDecoder picks X2 only for cSrcSize >= dstSize/8 with dstSize
+	// >= 768, which a bare description (at most ~130 bytes) cannot reach;
+	// check the X2 helpers directly.
+	if err := decompress1X2DCtxWksp(&dt, make([]byte, 1000), desc, 0); err != ErrSrcSizeWrong {
+		t.Fatalf("1X X2 header only: %v", err)
+	}
+	if err := decompress4X2DCtxWksp(&dt, make([]byte, 1000), desc, 0); err != ErrSrcSizeWrong {
+		t.Fatalf("4X X2 header only: %v", err)
+	}
+	if SelectDecoder(4096, 3) != 0 || SelectDecoder(4096, 1024) != 1 {
+		t.Fatal("selector grid assumption")
+	}
+	// X2 selected (Q=4 at 4096): description then garbage of the right size.
+	src := append(bytes.Clone(desc), make([]byte, 1021)...)
+	if err := Decompress4XHufOnlyWksp(&dt, make([]byte, 4096), src, 0); err == nil || dt.desc.tableType != 1 {
+		t.Fatalf("4X X2 garbage: err=%v type=%d", err, dt.desc.tableType)
+	}
+	if err := Decompress1XDCtxWksp(&dt, make([]byte, 4096), src, 0); err == nil || dt.desc.tableType != 1 {
+		t.Fatalf("1X X2 garbage: err=%v type=%d", err, dt.desc.tableType)
+	}
+}
+
+// FuzzHUFDecompress4X2 feeds an arbitrary table description, stream data
+// and DTable size to the X2 decoder: no panic, and the fast and body paths
+// agree whenever the body accepts. As for X1 this is one-way (the fast
+// path's finish, HUF_decompress4X2_usingDTable_internal_fast, never checks
+// BIT_endOfDStream), and the last byte of each segment may differ (see
+// equalButSegmentEnds).
+func FuzzHUFDecompress4X2(f *testing.F) {
+	wksp := make([]byte, WorkspaceSize)
+	for _, src := range [][]byte{
+		bytes.Repeat([]byte("abcdefghijklmnopqrstuvwxyz0123"), 40),
+		[]byte("the quick brown fox jumps over the lazy dog, again and again and again"),
+	} {
+		dst := make([]byte, CompressBound(len(src)))
+		rep := RepeatNone
+		n, err := Compress4XRepeat(dst, src, 255, 11, wksp, nil, &rep, 0)
+		if err != nil || n <= 1 {
+			f.Fatalf("seed: n=%d err=%v", n, err)
+		}
+		var dt DTable
+		dt.Init(TableLogMax)
+		h, err := ReadDTableX2(&dt, dst[:n], 0)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(dst[:h], dst[h:n], uint32(len(src)), uint8(TableLogMax))
+	}
+	f.Add([]byte{128 + 1, 0x10}, make([]byte, 40), uint32(64), uint8(TableLogMax))
+	f.Fuzz(func(t *testing.T, table, data []byte, dstSize uint32, mtl uint8) {
+		var dt DTable
+		dt.Init(uint(mtl % (TableLogMax + 2)))
+		if _, err := ReadDTableX2(&dt, table, 0); err != nil {
+			return
+		}
+		size := int(dstSize % (2 * BlockSizeMax))
+		fast, body, ef, eb := decode4X2Both(&dt, data, size)
+		if eb == nil && (ef != nil || !equalButSegmentEnds(fast, body)) {
+			t.Fatalf("body ok, fast err=%v equal=%v", ef, equalButSegmentEnds(fast, body))
+		}
+		// 1X on the same data must not panic either.
+		_ = Decompress1X2UsingDTable(body, data, &dt, 0)
+	})
+}
+
+// precheck4X returns the error C's 4X bodies (X1 and X2 alike) return
+// before decoding any symbol, or nil. C:
+// huf_decompress.c:HUF_decompress4X{1,2}_usingDTable_internal_body, the
+// checks up to the four BIT_initDStream calls. structural reports a size
+// check failing; the fast path rejects those inputs with
+// corruption_detected too (it either errors the same way or falls back to
+// the body), except at dstSize 4: HUF_DecompressFastArgs_init has no
+// dstSize < 6 check and only falls back when op[3] >= oend, which holds
+// for every dstSize < 6 but 4 (op[3] = 3). C's fast path then decodes
+// dstSize 4 (checked against C), so that case is not structural for it.
+func precheck4X(src []byte, dstSize int) (err error, structural bool) {
+	if len(src) < 10 || dstSize < 6 {
+		return ErrCorruptionDetected, true
+	}
+	l1 := int(binary.LittleEndian.Uint16(src))
+	l2 := int(binary.LittleEndian.Uint16(src[2:]))
+	l3 := int(binary.LittleEndian.Uint16(src[4:]))
+	l4 := len(src) - (l1 + l2 + l3 + 6)
+	if l4 < 0 || 3*((dstSize+3)/4) > dstSize {
+		return ErrCorruptionDetected, true
+	}
+	var d bitstream.DStream
+	for _, s := range [][]byte{src[6 : 6+l1], src[6+l1 : 6+l1+l2], src[6+l1+l2 : 6+l1+l2+l3], src[6+l1+l2+l3:]} {
+		if _, err := d.Init(s); err != nil {
+			return err, false
+		}
+	}
+	return nil, false
+}
+
+// FuzzHUFDecompressX1VsX2 reads one table description as X1 and as X2
+// (both built at the same log: X1 rescales up to 11, X2 builds at
+// min(maxTableLog, 11) when tableLog <= 11, and both keep 12) and decodes
+// the same data with both.
+//
+// What C guarantees, and what is checked:
+//   - Both bodies succeed => equal output. A body succeeds only when every
+//     stream ends exactly (BIT_endOfDStream), so the bits were read
+//     without overflow and both decode the same prefix code; a level-2 X2
+//     entry is the two X1 symbols it replaces. Each fast path matches its
+//     body whenever the body succeeds (FuzzHUFDecompress4X1/4X2), so the
+//     fast outputs are equal then too.
+//   - Errors raised before any symbol is decoded (precheck4X) are equal:
+//     the X1 and X2 bodies run the same checks in the same order.
+//
+// What C does not guarantee, and is not checked:
+//   - Equal errors after decoding. HUF_decodeLastSymbolX2 skips a whole
+//     2-symbol entry's bits for the last symbol and clamps bitsConsumed to
+//     64, so X2 accepts trailing bits that make X1's BIT_endOfDStream fail
+//     (and the converse when X2's last pair reads past the end).
+//   - Equal output when only the fast paths succeed: they do not check
+//     the stream end (HUF_decompress4X{1,2}_usingDTable_internal_fast), and
+//     past the end X1 and X2 consume the garbage bits differently.
+func FuzzHUFDecompressX1VsX2(f *testing.F) {
+	wksp := make([]byte, WorkspaceSize)
+	for _, src := range [][]byte{
+		bytes.Repeat([]byte("abcdefghijklmnopqrstuvwxyz0123"), 40),
+		[]byte("the quick brown fox jumps over the lazy dog, again and again and again"),
+	} {
+		for _, four := range []bool{false, true} {
+			dst := make([]byte, CompressBound(len(src)))
+			rep := RepeatNone
+			var n int
+			var err error
+			if four {
+				n, err = Compress4XRepeat(dst, src, 255, 11, wksp, nil, &rep, 0)
+			} else {
+				n, err = Compress1XRepeat(dst, src, 255, 11, wksp, nil, &rep, 0)
+			}
+			if err != nil || n <= 1 {
+				f.Fatalf("seed: n=%d err=%v", n, err)
+			}
+			var dt DTable
+			dt.Init(TableLogMax)
+			h, err := ReadDTableX1(&dt, dst[:n], 0)
+			if err != nil {
+				f.Fatal(err)
+			}
+			f.Add(dst[:h], dst[h:n], uint32(len(src)), four)
+		}
+	}
+	// dstSize 4: C's fast path decodes it, the body rejects it (precheck4X).
+	f.Add([]byte("\x150z0010210110000108101"), []byte("\v\x00\f\x00\t\x000000000000000000000000000000000000000000"), uint32(4), true)
+	f.Fuzz(func(t *testing.T, table, data []byte, dstSize uint32, four bool) {
+		var dt1, dt2 DTable
+		dt1.Init(TableLogMax)
+		dt2.Init(TableLogMax)
+		if _, err := ReadDTableX1(&dt1, table, 0); err != nil {
+			return
+		}
+		if _, err := ReadDTableX2(&dt2, table, 0); err != nil {
+			return
+		}
+		if dt1.desc.tableLog != dt2.desc.tableLog {
+			t.Fatalf("tableLog X1 %d X2 %d", dt1.desc.tableLog, dt2.desc.tableLog)
+		}
+		size := int(dstSize % (2 * BlockSizeMax))
+		if !four {
+			o1, o2 := make([]byte, size), make([]byte, size)
+			e1 := Decompress1X1UsingDTable(o1, data, &dt1, 0)
+			e2 := Decompress1X2UsingDTable(o2, data, &dt2, 0)
+			if e1 == nil && e2 == nil && !bytes.Equal(o1, o2) {
+				t.Fatal("1X: both ok, output differs")
+			}
+			var d bitstream.DStream
+			if _, err := d.Init(data); err != nil && (e1 != err || e2 != err) {
+				t.Fatalf("1X: init err %v, X1 %v, X2 %v", err, e1, e2)
+			}
+			return
+		}
+		pre, structural := precheck4X(data, size)
+		var bodyOK [2][]byte
+		for _, flags := range []int{FlagDisableFast, 0} {
+			o1, o2 := make([]byte, size), make([]byte, size)
+			e1 := Decompress4X1UsingDTable(o1, data, &dt1, flags)
+			e2 := Decompress4X2UsingDTable(o2, data, &dt2, flags)
+			fastDst4 := flags != FlagDisableFast && size == 4
+			if ((structural && !fastDst4) || (pre != nil && flags == FlagDisableFast)) && (e1 != pre || e2 != pre) {
+				t.Fatalf("flags=%d: precheck %v, X1 %v, X2 %v", flags, pre, e1, e2)
+			}
+			if flags == FlagDisableFast {
+				if e1 == nil && e2 == nil {
+					if !bytes.Equal(o1, o2) {
+						t.Fatal("bodies ok, output differs")
+					}
+					bodyOK = [2][]byte{o1, o2}
+				}
+			} else if bodyOK[0] != nil && (e1 != nil || e2 != nil || !bytes.Equal(o1, bodyOK[0]) || !bytes.Equal(o2, bodyOK[1])) {
+				t.Fatalf("bodies ok, fast X1 %v X2 %v", e1, e2)
+			}
+		}
+	})
 }
