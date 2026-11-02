@@ -265,3 +265,80 @@ func FuzzHUFDecompress4X1(f *testing.F) {
 		_ = Decompress1X1UsingDTable(body, data, &dt, 0)
 	})
 }
+
+// craftedX1Table reads the table with weights 10,9,...,2,1,1,0 plus an
+// implied 11: tableLog 11, so the fast loop applies; an all-ones stream
+// decodes 1-bit symbols and an all-zero stream 11-bit ones.
+func craftedX1Table(t *testing.T) *DTable {
+	t.Helper()
+	var dt DTable
+	dt.Init(TableLogMax)
+	if _, err := ReadDTableX1(&dt, []byte{128 + 11, 0xA9, 0x87, 0x65, 0x43, 0x21, 0x10}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if dt.desc.tableLog != decoderFastTableLog {
+		t.Fatalf("tableLog %d", dt.desc.tableLog)
+	}
+	return &dt
+}
+
+// jumpStreams joins four streams behind a 6-byte jump table.
+func jumpStreams(s [4][]byte) []byte {
+	out := make([]byte, 6)
+	for i := 0; i < 3; i++ {
+		binary.LittleEndian.PutUint16(out[2*i:], uint16(len(s[i])))
+	}
+	for _, b := range s {
+		out = append(out, b...)
+	}
+	return out
+}
+
+// TestHUF4X1FastReadBelowStart pins HUF_initRemainingDStream's check that a
+// stream did not read below its start: streams 1-3 decode 11-bit symbols
+// from 700 bytes, far fewer than their segments need, so they run into the
+// stream before them. C (fast and body) rejects this.
+func TestHUF4X1FastReadBelowStart(t *testing.T) {
+	dt := craftedX1Table(t)
+	var s [4][]byte
+	s[0] = bytes.Repeat([]byte{0xFF}, 700)
+	for i := 1; i < 4; i++ {
+		s[i] = make([]byte, 700)
+		s[i][699] = 0x01
+	}
+	src := jumpStreams(s)
+	for _, flags := range []int{0, FlagDisableFast} {
+		dt2 := *dt
+		if err := Decompress4X1UsingDTable(make([]byte, 40000), src, &dt2, flags); err != ErrCorruptionDetected {
+			t.Fatalf("flags=%d: err=%v, want ErrCorruptionDetected", flags, err)
+		}
+	}
+}
+
+// TestHUF4X1SevenByteStream pins the fast init's 8-byte minimum per stream:
+// with one stream of 7 bytes the fast path must decline, so both paths
+// run the body and agree exactly, error or not.
+func TestHUF4X1SevenByteStream(t *testing.T) {
+	dt := craftedX1Table(t)
+	for short := 0; short < 4; short++ {
+		for _, fill := range []byte{0xFF, 0x00, 0x5a} {
+			var s [4][]byte
+			for i := range s {
+				n := 64
+				if i == short {
+					n = 7
+				}
+				s[i] = bytes.Repeat([]byte{fill}, n)
+				s[i][n-1] |= 0x01
+			}
+			src := jumpStreams(s)
+			for _, dstSize := range []int{40, 300, 1000} {
+				fast, body, ef, eb := decode4X1Both(dt, src, dstSize)
+				if ef != eb || !bytes.Equal(fast, body) {
+					t.Fatalf("short=%d fill=%#x dst=%d: fast err=%v body err=%v equal=%v",
+						short, fill, dstSize, ef, eb, bytes.Equal(fast, body))
+				}
+			}
+		}
+	}
+}

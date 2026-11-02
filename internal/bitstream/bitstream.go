@@ -130,8 +130,7 @@ var (
 // points ptr at a static zero word; here ptr stays where it is. No reader
 // can tell: a stream stays in overflow until reset (Reload returns before
 // touching ptr), and EndOfDStream is false either way (bitsConsumed > 64).
-// The container is kept, as in C, because the HUF fast decoder's finishing
-// pass keeps decoding from it and its output is accepted unchecked.
+// The container is kept as in C.
 type DStream struct {
 	bitContainer uint64
 	bitsConsumed uint32

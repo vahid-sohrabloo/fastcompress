@@ -136,3 +136,30 @@ func TestNoAllocInline(t *testing.T) {
 		t.Fatalf("allocs=%v", n)
 	}
 }
+
+// TestReloadOverflowKeepsContainer: once more than 64 bits are consumed,
+// Reload reports DStreamOverflow and, as C's BIT_reloadDStream, leaves the
+// container untouched (and keeps doing so on later reloads).
+func TestReloadOverflowKeepsContainer(t *testing.T) {
+	src := []byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x81}
+	var d DStream
+	if _, err := d.Init(src); err != nil {
+		t.Fatal(err)
+	}
+	d.SkipBits(70)
+	before := d.LookBitsFast(11)
+	if before == 0 {
+		t.Fatal("test needs a nonzero look")
+	}
+	for i := 0; i < 2; i++ {
+		if st := d.Reload(); st != DStreamOverflow {
+			t.Fatalf("reload %d: status %d, want DStreamOverflow", i, st)
+		}
+		if got := d.LookBitsFast(11); got != before {
+			t.Fatalf("reload %d: LookBitsFast = %#x, want %#x (container changed)", i, got, before)
+		}
+	}
+	if d.EndOfDStream() {
+		t.Fatal("EndOfDStream true after overflow")
+	}
+}

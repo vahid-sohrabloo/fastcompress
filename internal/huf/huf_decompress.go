@@ -502,7 +502,9 @@ func decompress4X1FastCLoop(args *decompressFastArgs) {
 
 		for {
 			// Decode 5 symbols in each of the 4 streams.
-			// C: HUF_4X1_DECODE_SYMBOL, symbol-major over the streams.
+			// C: HUF_4X1_DECODE_SYMBOL decodes symbol-major across the
+			// streams; the streams are independent, so stream-major is
+			// equivalent.
 			for stream := 0; stream < 4; stream++ {
 				b := bits4[stream]
 				o := dst[op[stream] : op[stream]+5]
