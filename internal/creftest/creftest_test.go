@@ -165,3 +165,104 @@ func TestCrefUnpledgedMatchesSingleChunkStream(t *testing.T) {
 		t.Fatalf("compress -pledged 0 (%d bytes) != stream single chunk (%d bytes)", len(a), len(b))
 	}
 }
+
+func TestCrefDecodeModes(t *testing.T) {
+	fs := Frames(t)
+	names := make([]string, 0, len(fs))
+	for k := range fs {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		f := fs[name]
+		t.Run(name, func(t *testing.T) {
+			check := func(mode string, got []byte, e *CError) {
+				t.Helper()
+				if e != nil {
+					t.Fatalf("%s: %v", mode, e)
+				}
+				if !bytes.Equal(got, f.Want) {
+					t.Fatalf("%s: got %d bytes, want %d", mode, len(got), len(f.Want))
+				}
+			}
+			got, e := DecodeCRef(t, f.Data, f.Args...)
+			check("decompress", got, e)
+			got, e = DStreamCRef(t, f.Data, append([]string{"-chunk-size", "4096", "-out-size", "131072"}, f.Args...)...)
+			check("dstream 4096/131072", got, e)
+			// One byte in, one byte out costs a C call per byte: only up to 8 MiB.
+			if len(f.Data)+len(f.Want) <= 8*mib {
+				got, e = DStreamCRef(t, f.Data, append([]string{"-chunk-size", "1", "-out-size", "1"}, f.Args...)...)
+				check("dstream 1/1", got, e)
+			}
+		})
+	}
+}
+
+func TestCrefDecodeErrors(t *testing.T) {
+	in := text(8, 50000)
+	frame := Run(t, in, "compress", "-level", "3", "-checksum", "1")
+
+	h := FHeaderCRef(t, frame)
+	for k, want := range map[string]string{
+		"needed": "0", "frameContentSize": "50000", "frameType": "0", "dictID": "0",
+		"checksumFlag": "1", "compressedSize": strconv.Itoa(len(frame)),
+		"decompressBound": "50000", "lastBlock": "1",
+	} {
+		if h[k] != want {
+			t.Errorf("fheader %s=%q, want %q (all: %v)", k, h[k], want, h)
+		}
+	}
+	if h := FHeaderCRef(t, frame[:5]); h["needed"] == "0" || h["needed"] == "" {
+		t.Errorf("fheader on 5 bytes: needed=%q", h["needed"])
+	}
+	if h := FHeaderCRef(t, []byte("not a zstd frame")); h["err"] == "" || h["errName"] == "" {
+		t.Errorf("fheader on garbage: %v", h)
+	}
+
+	// Checksum mismatch: flip the last byte (the checksum's top byte).
+	bad := bytes.Clone(frame)
+	bad[len(bad)-1] ^= 1
+	if _, e := DecodeCRef(t, bad); e == nil || e.Name != "Restored data doesn't match checksum" {
+		t.Errorf("checksum flip: %v", e)
+	}
+	if got, e := DecodeCRef(t, bad, "-ignore-checksum", "1"); e != nil || !bytes.Equal(got, in) {
+		t.Errorf("checksum flip with -ignore-checksum 1: %v", e)
+	}
+	// C checks the checksum before it flushes the last block's output.
+	got, e := DStreamCRef(t, bad, "-chunk-size", "1000", "-out-size", "1000")
+	if e == nil || e.Code != 22 || !bytes.HasPrefix(in, got) {
+		t.Errorf("dstream checksum flip: %v, %d bytes", e, len(got))
+	}
+	if _, e := DStreamCRef(t, frame[:len(frame)-10], "-chunks", strconv.Itoa(len(frame)-10), "-out-size", "4096"); e == nil || e.Code != -1 {
+		t.Errorf("dstream truncated: %v", e)
+	}
+	big := Run(t, text(9, 300*kib), "compress", "-level", "3", "-pledged", "0", "-window-log", "18")
+	// ZSTD_d_windowLogMax limits only streaming decompression.
+	if _, e := DStreamCRef(t, big, "-max-window-log", "17", "-chunk-size", "4096", "-out-size", "4096"); e == nil || e.Name != "Frame requires too much memory for decoding" {
+		t.Errorf("dstream -max-window-log 17: %v", e)
+	}
+	if got, e := DecodeCRef(t, big, "-max-window-log", "17"); e != nil || len(got) != 300*kib {
+		t.Errorf("decompress -max-window-log 17: %v", e)
+	}
+
+	sk := Run(t, []byte("payload"), "skippable", "-variant", "5")
+	if want := append([]byte{0x55, 0x2a, 0x4d, 0x18, 7, 0, 0, 0}, "payload"...); !bytes.Equal(sk, want) {
+		t.Errorf("skippable: % x", sk)
+	}
+
+	content := filepath.Join(t.TempDir(), "content")
+	if err := os.WriteFile(content, text(10, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var samples []byte
+	var sizes []string
+	for i := range 50 {
+		s := text(uint64(100+i), 1000+i*10)
+		samples = append(samples, s...)
+		sizes = append(sizes, strconv.Itoa(len(s)))
+	}
+	d := Run(t, samples, "finalize-dict", "-level", "3", "-dict-id", "1234", "-content", content, "-sizes", strings.Join(sizes, ","))
+	if len(d) < 4096+8 || !bytes.Equal(d[:8], []byte{0x37, 0xa4, 0x30, 0xec, 0xd2, 0x04, 0, 0}) {
+		t.Errorf("finalize-dict: %d bytes, header % x", len(d), d[:min(8, len(d))])
+	}
+}

@@ -5,6 +5,9 @@ package creftest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -12,6 +15,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -241,6 +247,55 @@ func itoa(n int) string {
 	return string(s)
 }
 
+// rleSeqs is 8192 random bytes from a 64-symbol alphabet without 'x', then
+// 201 records of one 'x' and a 16-byte copy from 5000 bytes back (inside the
+// random part, never next to an 'x'): many identical sequences (literal
+// length 1, match length 16, one offset or repcode 1). Compressed with a
+// flush after the first record, the frames reach RLE literals and the RLE
+// literal-length and match-length table modes (levels 1 and 3) and the RLE
+// offset mode (level 19).
+func rleSeqs() []byte {
+	r := rand.New(rand.NewPCG(11, 6))
+	b := make([]byte, 8192, 8192+201*17)
+	for i := range b {
+		b[i] = '0' + byte(r.IntN(64)) // '0'..'o'
+	}
+	for range 201 {
+		p := len(b) + 1 - 5000
+		b = append(b, 'x')
+		b = append(b, b[p:p+16]...)
+	}
+	return b
+}
+
+// deBruijn is the de Bruijn sequence B(16, 3) over 'a'..'p' (4096 bytes):
+// every 3-byte string occurs at most once, so a compressor finds no match
+// and the block is compressed literals with no sequences.
+func deBruijn() []byte {
+	const k, n = 16, 3
+	a := make([]int, k*n)
+	var b []byte
+	var db func(t, p int)
+	db = func(t, p int) {
+		if t > n {
+			if n%p == 0 {
+				for _, v := range a[1 : p+1] {
+					b = append(b, 'a'+byte(v))
+				}
+			}
+			return
+		}
+		a[t] = a[t-p]
+		db(t+1, p)
+		for j := a[t-p] + 1; j < k; j++ {
+			a[t] = j
+			db(t+1, t)
+		}
+	}
+	db(1, 1)
+	return b
+}
+
 // Inputs returns the deterministic input corpus for C-vs-Go comparisons: the
 // synthetic set (sizes 0, 1, 16KiB±1, 128KiB±1, 256KiB±1, window-size±1,
 // all-zero, single repeated byte, random, periods 2..8, text, and the
@@ -328,4 +383,373 @@ func Inputs(t testing.TB) map[string][]byte {
 		add("silesia/"+filepath.Base(p), b)
 	}
 	return m
+}
+
+// CError is a libzstd error reported by a cref decoder mode: its
+// ZSTD_getErrorCode value and ZSTD_getErrorName text. Code -1 with Name
+// "incomplete" is dstream's input ending inside a frame (C returns no
+// error code for that; ZSTD_decompressStream just still wants input).
+type CError struct {
+	Code int
+	Name string
+}
+
+func (e *CError) Error() string { return "zstd error " + strconv.Itoa(e.Code) + ": " + e.Name }
+
+// runDec runs `cref mode args...` on frame and returns its stdout, plus the
+// parsed error when cref reports one (exit 1 with an ERR or INCOMPLETE line).
+// Any other failure fails the test.
+func runDec(t testing.TB, mode string, frame []byte, args ...string) ([]byte, *CError) {
+	t.Helper()
+	args = append([]string{mode}, args...)
+	cmd := exec.Command(Bin(t), args...)
+	cmd.Stdin = bytes.NewReader(frame)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return out.Bytes(), nil
+	}
+	msg := strings.TrimSuffix(stderr.String(), "\n")
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		if rest, ok := strings.CutPrefix(msg, "ERR "); ok {
+			code, name, _ := strings.Cut(rest, " ")
+			if n, err := strconv.Atoi(code); err == nil {
+				return out.Bytes(), &CError{Code: n, Name: name}
+			}
+		}
+		if strings.HasPrefix(msg, "INCOMPLETE ") {
+			return out.Bytes(), &CError{Code: -1, Name: "incomplete"}
+		}
+	}
+	t.Fatalf("cref %v: %v: %s", args, err, msg)
+	return nil, nil
+}
+
+// DecodeCRef decompresses frame (any number of frames) with `cref
+// decompress args...` (ZSTD_decompressDCtx). On a libzstd error it returns
+// the error and no output.
+func DecodeCRef(t testing.TB, frame []byte, args ...string) ([]byte, *CError) {
+	t.Helper()
+	return runDec(t, "decompress", frame, args...)
+}
+
+// DStreamCRef decompresses frame with `cref dstream args...`
+// (ZSTD_decompressStream; args must give -chunks or -chunk-size, and
+// -out-size). It returns every byte produced, including those produced before
+// an error.
+func DStreamCRef(t testing.TB, frame []byte, args ...string) ([]byte, *CError) {
+	t.Helper()
+	return runDec(t, "dstream", frame, args...)
+}
+
+// FHeaderCRef returns the key=value lines of `cref fheader` on in.
+func FHeaderCRef(t testing.TB, in []byte) map[string]string {
+	t.Helper()
+	m := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(string(Run(t, in, "fheader"))), "\n") {
+		k, v, ok := strings.Cut(l, "=")
+		if !ok {
+			t.Fatalf("cref fheader: bad line %q", l)
+		}
+		m[k] = v
+	}
+	return m
+}
+
+// Frame is one decode corpus entry. Data is the compressed input (one or
+// more frames, possibly with skippable frames), Want what it decodes to.
+// Dict is the dictionary it needs (nil: none), RawDict whether that
+// dictionary is raw content, and Args the extra cref decompress/dstream
+// arguments that load it (-dict FILE [-raw-dict 1]).
+type Frame struct {
+	Data, Want, Dict []byte
+	RawDict          bool
+	Args             []string
+}
+
+var frames struct {
+	once sync.Once
+	m    map[string]Frame
+	ok   bool
+}
+
+// Frames returns the decode corpus (see buildFrames), built once per test
+// binary. Callers must not modify the map or the slices.
+func Frames(t testing.TB) map[string]Frame {
+	t.Helper()
+	bin := Bin(t)
+	cli := tool(t, "ref/zstd/programs/zstd", "run ref/fetch.sh")
+	frames.once.Do(func() {
+		frames.m = buildFrames(t, bin, cli)
+		frames.ok = true
+	})
+	if !frames.ok {
+		t.Fatal("decode corpus: building it failed in an earlier test")
+	}
+	return frames.m
+}
+
+// mustRead reads a file, failing the test on error.
+func mustRead(t testing.TB, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// buildFrames builds the decode corpus with cref and the v1.5.7 zstd CLI:
+//
+//   - compress/<input>/L<l>/c<0|1>/p<0|1>: every Inputs entry at levels
+//     -5, 1, 3, 7, 11, 19, checksum 0/1, pledged size 0/1 (cref compress).
+//     This includes all-zero input (RLE blocks), random input (raw blocks,
+//     raw literals) and litrle (RLE literals).
+//   - stream/...: cref stream frames with flush points (short blocks, and
+//     the empty last block after a flush).
+//   - window/<input>/L<l>/W<10|17>: -window-log 10 and 17 frames.
+//   - dict/<dict>/<input>/L<l>/c<0|1>: frames compressed with train.dict,
+//     train-12k.dict and raw-content dickens-32k.raw (zstd/testdata).
+//   - multi/...: concatenations of frames.
+//   - skippable/...: skippable frames before, between and after frames, and
+//     skippable-only input.
+//   - seed/...: small frames with RLE literals, RLE sequence table modes
+//     (rleSeqs) and a compressed block without sequences (deBruijn).
+//   - cli/...: `zstd -T4 -19 -B512KiB` (zstdmt job boundaries), `zstd
+//     --long=27 -19` (stdin: the 128 MiB window stays in the header) and
+//     `zstd --rsyncable -T2` frames.
+//
+// Every generated frame is cached under os.TempDir()/fastzstd-frames-<hash
+// of the cref and zstd binaries>, in a file named after the entry and a hash
+// of its tool, arguments and input, so changed inputs regenerate.
+// Inputs over 1 MiB are included only when !testing.Short().
+func buildFrames(t testing.TB, bin, cli string) map[string]Frame {
+	t.Helper()
+	h := sha256.New()
+	h.Write(mustRead(t, bin))
+	h.Write(mustRead(t, cli))
+	dir := filepath.Join(os.TempDir(), "fastzstd-frames-"+hex.EncodeToString(h.Sum(nil))[:16])
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	type job struct {
+		name, tool string
+		in         []byte
+		args       []string
+		f          Frame
+	}
+	var jobs []job
+	cref := func(name string, in []byte, f Frame, args ...string) {
+		f.Want = in
+		jobs = append(jobs, job{name, bin, in, args, f})
+	}
+	zcli := func(name string, in []byte, args ...string) {
+		jobs = append(jobs, job{name, cli, in, append(args, "-q", "-c"), Frame{Want: in}})
+	}
+
+	inputs := Inputs(t)
+	names := make([]string, 0, len(inputs))
+	for k := range inputs {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, l := range []string{"-5", "1", "3", "7", "11", "19"} {
+			for _, c := range []string{"0", "1"} {
+				for _, p := range []string{"0", "1"} {
+					cref("compress/"+name+"/L"+l+"/c"+c+"/p"+p, inputs[name], Frame{},
+						"compress", "-level", l, "-checksum", c, "-pledged", p)
+				}
+			}
+		}
+	}
+
+	for _, name := range []string{"size0", "text128KiB+1", "zstd-format.md", "litrle"} {
+		in := inputs[name]
+		// Odd cut points with a flush after each of the first four chunks
+		// (two of them back to back, the second flushing nothing).
+		var cs []string
+		pos := 0
+		for _, sz := range []int{1000, 0, 1, 5000, 30000} {
+			sz = min(sz, len(in)-pos)
+			cs = append(cs, itoa(sz))
+			pos += sz
+		}
+		cs = append(cs, itoa(len(in)-pos))
+		cref("stream/"+name+"/cuts", in, Frame{}, "stream", "-level", "3", "-checksum", "1",
+			"-chunks", strings.Join(cs, ","), "-flush-after", "0,1,2,3")
+		// 4 KiB chunks, each flushed: short blocks; then an empty last block.
+		cs, fl := nil, []string{}
+		for i := 0; i*4096 < len(in); i++ {
+			cs = append(cs, itoa(min(4096, len(in)-i*4096)))
+			fl = append(fl, itoa(i))
+		}
+		if len(cs) == 0 {
+			cs, fl = []string{"0"}, []string{"0"}
+		}
+		cref("stream/"+name+"/flush4k", in, Frame{}, "stream", "-level", "1",
+			"-chunks", strings.Join(cs, ","), "-flush-after", strings.Join(fl, ","))
+	}
+
+	for _, name := range []string{"text256KiB", "zstd-format.md", "litrle"} {
+		for _, l := range []string{"3", "19"} {
+			for _, w := range []string{"10", "17"} {
+				cref("window/"+name+"/L"+l+"/W"+w, inputs[name], Frame{},
+					"compress", "-level", l, "-window-log", w)
+			}
+		}
+	}
+
+	for _, d := range []struct {
+		file string
+		raw  bool
+	}{{"train.dict", false}, {"train-12k.dict", false}, {"dickens-32k.raw", true}} {
+		p := filepath.Join(root(), "zstd", "testdata", d.file)
+		f := Frame{Dict: mustRead(t, p), RawDict: d.raw, Args: []string{"-dict", p}}
+		if d.raw {
+			f.Args = append(f.Args, "-raw-dict", "1")
+		}
+		for _, name := range []string{"size0", "size1", "random-small", "text16KiB", "zstd-README.md"} {
+			for _, l := range []string{"1", "3", "19"} {
+				for _, c := range []string{"0", "1"} {
+					cref("dict/"+d.file+"/"+name+"/L"+l+"/c"+c, inputs[name], f,
+						append([]string{"compress", "-level", l, "-checksum", c}, f.Args...)...)
+				}
+			}
+		}
+	}
+
+	skip := map[string][]byte{
+		"s0":     []byte("a skippable frame payload"),
+		"s7":     {},
+		"s15":    random(46, 1000),
+		"s15big": random(47, 70000),
+	}
+	for _, k := range []string{"s0", "s7", "s15", "s15big"} {
+		v := strings.TrimSuffix(strings.TrimPrefix(k, "s"), "big")
+		jobs = append(jobs, job{"skippable-frame/" + k, bin, skip[k], []string{"skippable", "-variant", v}, Frame{}})
+	}
+
+	// Small frames for the decoder seeds' coverage: RLE literals and RLE
+	// sequence table modes, and a compressed block with no sequences.
+	rs := rleSeqs()
+	for _, l := range []string{"1", "3", "19"} {
+		cref("seed/rle-seqs/L"+l, rs, Frame{}, "stream", "-level", l, "-checksum", "1",
+			"-chunks", "8209,"+itoa(len(rs)-8209), "-flush-after", "0")
+		cref("seed/no-seqs/L"+l, deBruijn(), Frame{}, "compress", "-level", l)
+	}
+
+	mt := text(1234, mib)
+	zcli("cli/T4-19-B512KiB/text1MiB", mt, "-T4", "-19", "-B512KiB")
+	zcli("cli/rsyncable/text1MiB", mt, "--rsyncable", "-T2", "-3")
+	for _, name := range []string{"text256KiB", "zstd-format.md"} {
+		zcli("cli/long27-19/"+name, inputs[name], "--long=27", "-19")
+	}
+	if !testing.Short() {
+		zcli("cli/T4-19/text4MiB", inputs["text4MiB"], "-T4", "-19")
+		zcli("cli/rsyncable/text4MiB", inputs["text4MiB"], "--rsyncable", "-T2", "-3")
+		zcli("cli/long27-19/text4MiB", inputs["text4MiB"], "--long=27", "-19")
+	}
+
+	// Run the jobs in parallel, through the cache.
+	out := make([][]byte, len(jobs))
+	errs := make([]error, len(jobs))
+	sem := make(chan struct{}, max(1, runtime.GOMAXPROCS(0)/2))
+	var wg sync.WaitGroup
+	for i, j := range jobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			k := sha256.New()
+			k.Write([]byte(filepath.Base(j.tool) + "\x00" + strings.Join(j.args, "\x00") + "\x00"))
+			k.Write(j.in)
+			p := filepath.Join(dir, strings.ReplaceAll(j.name, "/", "__")+"-"+hex.EncodeToString(k.Sum(nil))[:12])
+			if b, err := os.ReadFile(p); err == nil {
+				out[i] = b
+				return
+			}
+			b, err := runCmd(j.tool, j.in, j.args...)
+			if err == nil {
+				err = writeAtomic(dir, p, b)
+			}
+			out[i], errs[i] = b, err
+		}()
+	}
+	wg.Wait()
+	m := map[string]Frame{}
+	for i, j := range jobs {
+		if errs[i] != nil {
+			t.Fatalf("decode corpus %s: %v", j.name, errs[i])
+		}
+		j.f.Data = out[i]
+		m[j.name] = j.f
+	}
+
+	cat := func(name string, parts ...string) {
+		var f Frame
+		for _, p := range parts {
+			g, ok := m[p]
+			if !ok {
+				t.Fatalf("decode corpus %s: no part %s", name, p)
+			}
+			f.Data = append(f.Data, g.Data...)
+			f.Want = append(f.Want, g.Want...)
+		}
+		f.Want = append([]byte{}, f.Want...) // non-nil
+		m[name] = f
+	}
+	a := "compress/text16KiB/L3/c1/p1"
+	b := "compress/zstd-README.md/L1/c0/p0"
+	cat("multi/3", "compress/text16KiB/L1/c1/p1", "compress/zstd-README.md/L19/c0/p1", "compress/size0/L3/c0/p0")
+	cat("multi/zeros+random", "compress/zeros300KiB/L1/c0/p1", "compress/random-small/L7/c1/p0")
+	cat("multi/stream+compress", "stream/text128KiB+1/flush4k", "compress/litrle/L11/c1/p1")
+	cat("skippable/only", "skippable-frame/s0")
+	cat("skippable/only-multi", "skippable-frame/s0", "skippable-frame/s7", "skippable-frame/s15big")
+	cat("skippable/before", "skippable-frame/s15", a)
+	cat("skippable/between", a, "skippable-frame/s0", b)
+	cat("skippable/after", a, "skippable-frame/s7")
+	cat("skippable/all", "skippable-frame/s15", a, "skippable-frame/s7", b, "skippable-frame/s15big")
+	for k := range skip {
+		delete(m, "skippable-frame/"+k)
+	}
+	return m
+}
+
+// runCmd runs path with args and stdin in, returning stdout.
+func runCmd(path string, in []byte, args ...string) ([]byte, error) {
+	cmd := exec.Command(path, args...)
+	cmd.Stdin = bytes.NewReader(in)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s %v: %w: %s", filepath.Base(path), args, err, stderr.String())
+	}
+	return out.Bytes(), nil
+}
+
+// writeAtomic writes b to p through a temporary file in dir, so concurrent
+// test binaries never see a partial file.
+func writeAtomic(dir, p string, b []byte) error {
+	f, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), p)
+	}
+	if err != nil {
+		os.Remove(f.Name())
+	}
+	return err
 }

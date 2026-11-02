@@ -147,6 +147,53 @@
  *   first 128 KiB of stdin (input must be at least 128 KiB, else exit 1).
  *   Output: the returned split position as a decimal line, e.g. "65536\n".
  *
+ * decompress [-dict FILE] [-raw-dict 0|1] [-max-window-log W] [-ignore-checksum 0|1]
+ *   One ZSTD_DCtx: ZSTD_DCtx_setParameter(ZSTD_d_windowLogMax, W) when W is
+ *   given, ZSTD_d_forceIgnoreChecksum when -ignore-checksum 1; a dictionary is
+ *   a ZSTD_createDDict_advanced (ZSTD_dlm_byCopy, ZSTD_dct_auto or
+ *   ZSTD_dct_rawContent) attached with ZSTD_DCtx_refDDict. Then one
+ *   ZSTD_decompressDCtx over all of stdin (every frame, skippable frames
+ *   skipped) into a buffer of ZSTD_decompressBound(stdin) bytes; when the bound
+ *   is an error, the buffer starts at 1 MiB and doubles (up to 1 GiB) while the
+ *   call fails with dstSize_tooSmall.
+ *   Output: the decompressed bytes. On error nothing is written to stdout;
+ *   stderr gets "ERR <ZSTD_getErrorCode> <ZSTD_getErrorName>\n", exit 1.
+ *
+ * dstream [decompress opts] (-chunks N1,N2,... | -chunk-size N) -out-size M
+ *   The same DCtx setup, then ZSTD_decompressStream with the input fed in the
+ *   given chunks (-chunks must sum to the input length; a 0 is one call with
+ *   empty input; -chunk-size N cuts the input into N-byte chunks, the last one
+ *   shorter) and an output buffer of exactly M bytes. Each chunk is offered
+ *   until it is consumed and the output buffer comes back not full. Stdout
+ *   gets the output of every call as it is produced, including the bytes
+ *   before an error. On error: the ERR line of decompress, exit 1. When the
+ *   input ends inside a frame (the last call that consumed input or produced
+ *   output returned > 0) stderr gets "INCOMPLETE <that value>\n", exit 1.
+ *   NOTE: C applies ZSTD_d_windowLogMax only here, never in decompress.
+ *
+ * fheader              Frame header queries on stdin, as key=value lines:
+ *   ZSTD_getFrameHeader_advanced(ZSTD_f_zstd1): "err=<code>" and
+ *   "errName=<name>" on error, else "needed=<rc>" (0: header complete) and,
+ *   when rc == 0, frameContentSize windowSize blockSizeMax frameType
+ *   headerSize dictID checksumFlag (decimal; frameContentSize UNKNOWN is
+ *   18446744073709551615). Then "compressedSize=" ZSTD_findFrameCompressedSize
+ *   ("err:<code>" on error) and "decompressBound=" ZSTD_decompressBound (raw
+ *   value; ZSTD_CONTENTSIZE_ERROR is 18446744073709551614). For a complete
+ *   zstd (not skippable) header, the first block header is decoded with
+ *   ZSTD_getcBlockSize: "blockType=" (0 raw, 1 rle, 2 compressed, 3 reserved),
+ *   "blockSize=" (return value, "err:<code>" on error), "blockOrigSize=" and
+ *   "lastBlock=".
+ *
+ * skippable -variant V ZSTD_writeSkippableFrame(stdin, magicVariant V).
+ *   Output: the skippable frame.
+ *
+ * finalize-dict -level L -dict-id N -content FILE -sizes N1,N2,...
+ *   ZDICT_finalizeDictionary with the content of FILE, the samples
+ *   concatenated on stdin (sizes N1.. must sum to the input length), params
+ *   { L, notificationLevel 0, N } and a capacity of content size + 64 KiB (so
+ *   the content is never truncated). Output: the dictionary. On error: the
+ *   ERR line of decompress, exit 1.
+ *
  * OUTPUT BUFFER CONTRACT: every ZSTD_compressStream2 call in cref (compress
  * -pledged 0, and stream) uses an output buffer of exactly
  * ZSTD_CStreamOutSize() bytes which is drained into the result after each
@@ -172,12 +219,18 @@
 #include "hist.h"
 #include "zstd_compress_internal.h"
 #include "zstd_preSplit.h"
+#include "zdict.h"
 
 extern void (*ZSTD_crefHook)(const SeqStore_t*, size_t, int); /* seqdump.patch */
 
 static void die(const char* msg) { fprintf(stderr, "cref: %s\n", msg); exit(1); }
 static void dieZ(const char* what, size_t rc) {
     fprintf(stderr, "cref: %s: %s\n", what, ZSTD_getErrorName(rc)); exit(1);
+}
+/* dieErr is the decoder modes' error report: "ERR <code> <name>". */
+static void dieErr(size_t rc) {
+    fflush(stdout);
+    fprintf(stderr, "ERR %d %s\n", (int)ZSTD_getErrorCode(rc), ZSTD_getErrorName(rc)); exit(1);
 }
 
 typedef struct {
@@ -191,6 +244,10 @@ typedef struct {
     const char *sizes, *levels, *checksums, *windowLogs, *saltOut;
     long long pledgedSize; /* -1: not given */
     size_t chunkSize, flushEvery;
+    int maxWindowLog, ignoreChecksum, variant;
+    size_t outSize;
+    unsigned dictID;
+    const char* contentFile;
 } Opts;
 
 static void* readAll(FILE* f, size_t* n) {
@@ -249,6 +306,12 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-pledged-size")) o->pledgedSize = strtoll(v, NULL, 10);
         else if (!strcmp(a, "-chunk-size")) o->chunkSize = (size_t)strtoull(v, NULL, 10);
         else if (!strcmp(a, "-flush-every")) o->flushEvery = (size_t)strtoull(v, NULL, 10);
+        else if (!strcmp(a, "-max-window-log")) o->maxWindowLog = atoi(v);
+        else if (!strcmp(a, "-ignore-checksum")) o->ignoreChecksum = atoi(v);
+        else if (!strcmp(a, "-out-size"))   o->outSize = (size_t)strtoull(v, NULL, 10);
+        else if (!strcmp(a, "-variant"))    o->variant = atoi(v);
+        else if (!strcmp(a, "-dict-id"))    o->dictID = (unsigned)strtoul(v, NULL, 10);
+        else if (!strcmp(a, "-content"))    o->contentFile = v;
     else { fprintf(stderr, "cref: unknown option %s\n", a); exit(2); }
     }
 }
@@ -574,6 +637,156 @@ static int cmdPresplit(const Opts* o, const unsigned char* src, size_t n) {
     return 0;
 }
 
+static void* readFile(const char* path, size_t* n) {
+    FILE* f = fopen(path, "rb");
+    if (!f) die("cannot open file");
+    void* b = readAll(f, n);
+    fclose(f);
+    return b;
+}
+
+static ZSTD_DCtx* newDCtx(const Opts* o) {
+    ZSTD_DCtx* d = ZSTD_createDCtx();
+    if (!d) die("ZSTD_createDCtx");
+    size_t r;
+    if (o->maxWindowLog) {
+        r = ZSTD_DCtx_setParameter(d, ZSTD_d_windowLogMax, o->maxWindowLog);
+        if (ZSTD_isError(r)) dieErr(r);
+    }
+    if (o->ignoreChecksum) {
+        r = ZSTD_DCtx_setParameter(d, ZSTD_d_forceIgnoreChecksum, ZSTD_d_ignoreChecksum);
+        if (ZSTD_isError(r)) dieErr(r);
+    }
+    if (o->dictFile) {
+        size_t dn; void* db = readFile(o->dictFile, &dn);
+        ZSTD_DDict* dd = ZSTD_createDDict_advanced(db, dn, ZSTD_dlm_byCopy,
+                o->rawDict ? ZSTD_dct_rawContent : ZSTD_dct_auto, ZSTD_defaultCMem);
+        if (!dd) die("ZSTD_createDDict_advanced");
+        free(db);
+        r = ZSTD_DCtx_refDDict(d, dd);
+        if (ZSTD_isError(r)) dieErr(r);
+    }
+    return d;
+}
+
+static int cmdDecompress(const Opts* o, const unsigned char* src, size_t n) {
+    ZSTD_DCtx* d = newDCtx(o);
+    unsigned long long bound = ZSTD_decompressBound(src, n);
+    int known = bound != ZSTD_CONTENTSIZE_ERROR;
+    size_t cap = known ? (size_t)bound : (size_t)1 << 20;
+    for (;;) {
+        unsigned char* dst = malloc(cap ? cap : 1);
+        if (!dst) die("oom");
+        size_t r = ZSTD_decompressDCtx(d, dst, cap, src, n);
+        if (!ZSTD_isError(r)) { writeAll(dst, r); return 0; }
+        free(dst);
+        if (known || ZSTD_getErrorCode(r) != ZSTD_error_dstSize_tooSmall || cap >= (size_t)1 << 30)
+            dieErr(r);
+        cap *= 2;
+    }
+}
+
+static int cmdDStream(const Opts* o, const unsigned char* src, size_t n) {
+    if (!o->outSize) die("dstream needs -out-size");
+    if (!o->chunks == !o->chunkSize) die("dstream needs one of -chunks and -chunk-size");
+    ZSTD_DCtx* d = newDCtx(o);
+    unsigned char* buf = malloc(o->outSize);
+    if (!buf) die("oom");
+    char* cs = o->chunks ? strdup(o->chunks) : NULL;
+    char* save = NULL;
+    char* t = cs ? strtok_r(cs, ",", &save) : NULL;
+    size_t pos = 0, last = 0;
+    for (;;) {
+        size_t sz;
+        if (cs) {
+            if (!t) break;
+            sz = (size_t)strtoull(t, NULL, 10);
+            if (sz > n - pos) die("chunks exceed input length");
+            t = strtok_r(NULL, ",", &save);
+        } else {
+            if (pos == n) break;
+            sz = n - pos < o->chunkSize ? n - pos : o->chunkSize;
+        }
+        ZSTD_inBuffer ib = { src + pos, sz, 0 };
+        ZSTD_outBuffer ob;
+        do {
+            ob.dst = buf; ob.size = o->outSize; ob.pos = 0;
+            size_t in0 = ib.pos;
+            size_t r = ZSTD_decompressStream(d, &ob, &ib);
+            writeAll(buf, ob.pos);
+            if (ZSTD_isError(r)) dieErr(r);
+            if (ib.pos != in0 || ob.pos) last = r; /* a call without progress (e.g. after a frame end) says nothing */
+        } while (ib.pos < ib.size || ob.pos == ob.size);
+        pos += sz;
+    }
+    if (pos != n) die("chunks do not cover input length");
+    if (last) {
+        fflush(stdout);
+        fprintf(stderr, "INCOMPLETE %zu\n", last);
+        exit(1);
+    }
+    return 0;
+}
+
+static int cmdFHeader(const unsigned char* src, size_t n) {
+    ZSTD_FrameHeader h;
+    size_t rc = ZSTD_getFrameHeader_advanced(&h, src, n, ZSTD_f_zstd1);
+    if (ZSTD_isError(rc)) {
+        printf("err=%d\nerrName=%s\n", (int)ZSTD_getErrorCode(rc), ZSTD_getErrorName(rc));
+    } else {
+        printf("needed=%zu\n", rc);
+        if (rc == 0)
+            printf("frameContentSize=%llu\nwindowSize=%llu\nblockSizeMax=%u\nframeType=%d\n"
+                   "headerSize=%u\ndictID=%u\nchecksumFlag=%u\n",
+                   h.frameContentSize, h.windowSize, h.blockSizeMax, (int)h.frameType,
+                   h.headerSize, h.dictID, h.checksumFlag);
+    }
+    size_t cs = ZSTD_findFrameCompressedSize(src, n);
+    if (ZSTD_isError(cs)) printf("compressedSize=err:%d\n", (int)ZSTD_getErrorCode(cs));
+    else printf("compressedSize=%zu\n", cs);
+    printf("decompressBound=%llu\n", ZSTD_decompressBound(src, n));
+    if (!ZSTD_isError(rc) && rc == 0 && h.frameType == ZSTD_frame) {
+        blockProperties_t bp;
+        size_t bs = ZSTD_getcBlockSize(src + h.headerSize, n - h.headerSize, &bp);
+        if (ZSTD_isError(bs)) printf("blockSize=err:%d\n", (int)ZSTD_getErrorCode(bs));
+        else printf("blockType=%d\nblockSize=%zu\nblockOrigSize=%u\nlastBlock=%u\n",
+                    (int)bp.blockType, bs, bp.origSize, bp.lastBlock);
+    }
+    return 0;
+}
+
+static int cmdSkippable(const Opts* o, const unsigned char* src, size_t n) {
+    size_t cap = n + ZSTD_SKIPPABLEHEADERSIZE;
+    unsigned char* dst = malloc(cap);
+    if (!dst) die("oom");
+    size_t r = ZSTD_writeSkippableFrame(dst, cap, src, n, (unsigned)o->variant);
+    if (ZSTD_isError(r)) dieErr(r);
+    writeAll(dst, r);
+    return 0;
+}
+
+static int cmdFinalizeDict(const Opts* o, const unsigned char* src, size_t n) {
+    if (!o->contentFile || !o->sizes) die("finalize-dict needs -content and -sizes");
+    size_t cn; void* content = readFile(o->contentFile, &cn);
+    size_t nb = 1;
+    for (const char* p = o->sizes; *p; p++) nb += *p == ',';
+    size_t* sizes = malloc(nb * sizeof(size_t));
+    char* ss = strdup(o->sizes);
+    char* save = NULL;
+    size_t i = 0, tot = 0;
+    for (char* t = strtok_r(ss, ",", &save); t; t = strtok_r(NULL, ",", &save))
+        tot += sizes[i++] = (size_t)strtoull(t, NULL, 10);
+    if (tot != n) die("sizes do not cover input length");
+    size_t cap = cn + (64 << 10);
+    unsigned char* dst = malloc(cap);
+    if (!sizes || !ss || !dst) die("oom");
+    ZDICT_params_t p = { o->level, 0, o->dictID };
+    size_t r = ZDICT_finalizeDictionary(dst, cap, content, cn, src, sizes, (unsigned)i, p);
+    if (ZDICT_isError(r)) dieErr(r);
+    writeAll(dst, r);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: cref <mode> [options] < in > out\n"); return 2; }
     const char* m = argv[1];
@@ -597,6 +810,11 @@ int main(int argc, char** argv) {
     else if (!strcmp(m, "huf4x"))    rc = cmdHuf(&o, src, n, 4);
     else if (!strcmp(m, "seqs"))     rc = cmdSeqs(&o, src, n);
     else if (!strcmp(m, "presplit")) rc = cmdPresplit(&o, src, n);
+    else if (!strcmp(m, "decompress")) rc = cmdDecompress(&o, src, n);
+    else if (!strcmp(m, "dstream"))  rc = cmdDStream(&o, src, n);
+    else if (!strcmp(m, "fheader"))  rc = cmdFHeader(src, n);
+    else if (!strcmp(m, "skippable")) rc = cmdSkippable(&o, src, n);
+    else if (!strcmp(m, "finalize-dict")) rc = cmdFinalizeDict(&o, src, n);
     else { fprintf(stderr, "cref: unknown mode %s\n", m); return 2; }
     if (fflush(stdout)) die("write error");
     return rc;
