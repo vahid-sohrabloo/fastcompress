@@ -42,7 +42,7 @@ match-offset-history-plus1.zst ErrWindowSizeTooSmall C="Data corruption detected
 seq-fse-ll-tablelog10.zst corrupt C="Data corruption detected" LL table FSE-compressed with tableLog 10 (max 9), other tables predefined
 seq-fse-ml-tablelog10.zst corrupt C="Data corruption detected" ML table FSE-compressed with tableLog 10 (max 9), other tables predefined
 seq-fse-of-tablelog9.zst corrupt C="Data corruption detected" OF table FSE-compressed with tableLog 9 (max 8), other tables predefined
-seq-nbseq-max.zst corrupt C="Data corruption detected" nbSeq = 0x7F00+0xFFFF (header FF FF FF), predefined tables, a 4-byte bitstream
+seq-nbseq-max.zst ErrWindowSizeTooSmall C="Data corruption detected" nbSeq = 0x7F00+0xFFFF (header FF FF FF), predefined tables, a 4-byte bitstream (the first match offset is beyond the empty history)
 seq-no-endmark.zst corrupt C="Data corruption detected" frame A with the last byte of the sequence bitstream zeroed (no end mark)
 seq-repeat-first.zst corrupt C="Data corruption detected" LL table in repeat mode in the first block of a frame: no previous table
 seq-rle-of32.zst corrupt C="Data corruption detected" OF table in RLE mode with symbol 32 (> MaxOff 31)

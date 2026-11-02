@@ -1,6 +1,10 @@
 package zstd
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"math"
+	"slices"
+)
 
 // Frame-level decoding. C: lib/decompress/zstd_decompress.c (v1.5.7),
 // format ZSTD_f_zstd1 only (no magicless frames, no legacy formats).
@@ -218,6 +222,9 @@ func readSkippableFrame(dst, src []byte) (n int, magicVariant uint32, err dErr) 
 
 // frameSizeInfo. C: zstd_internal.h:ZSTD_frameSizeInfo; err replaces C's
 // error code in compressedSize (decompressedBound is then contentSizeError).
+// On an error in the block walk, nbBlocks is the number of whole blocks
+// before it (C leaves it unset); decompressMultiFrame sizes its output
+// from it.
 type frameSizeInfo struct {
 	nbBlocks          int
 	compressedSize    int
@@ -250,13 +257,18 @@ func findFrameSizeInfo(src []byte) frameSizeInfo {
 	}
 	ip := int(zfh.headerSize)
 	nbBlocks := 0
+	walkError := func(err dErr) frameSizeInfo {
+		fsi := errorFrameSizeInfo(err)
+		fsi.nbBlocks = nbBlocks
+		return fsi
+	}
 	for {
 		cBlockSize, bp, err := getcBlockSize(src[ip:])
 		if err != 0 {
-			return errorFrameSizeInfo(err)
+			return walkError(err)
 		}
 		if blockHeaderSize+cBlockSize > len(src)-ip {
-			return errorFrameSizeInfo(dErrSrcSizeWrong)
+			return walkError(dErrSrcSizeWrong)
 		}
 		ip += blockHeaderSize + cBlockSize
 		nbBlocks++
@@ -267,7 +279,7 @@ func findFrameSizeInfo(src []byte) frameSizeInfo {
 	// Final frame content checksum
 	if zfh.checksumFlag {
 		if len(src)-ip < 4 {
-			return errorFrameSizeInfo(dErrSrcSizeWrong)
+			return walkError(dErrSrcSizeWrong)
 		}
 		ip += 4
 	}
@@ -332,10 +344,305 @@ func (d *dctx) decompressBegin() {
 	d.prevDst = nil
 	d.entropy.hufTable.Init(hufDTableCapacityLog) // C: hufTable[0] = ZSTD_HUFFDTABLE_CAPACITY_LOG * 0x1000001
 	d.litEntropy, d.fseEntropy = false, false
+	d.dictID = 0
 	d.isFrameDecompression = true
 	d.entropy.rep = repStartValue // initial repcodes
 	d.llTptr = d.entropy.llTable[:]
 	d.mlTptr = d.entropy.mlTable[:]
 	d.ofTptr = d.entropy.ofTable[:]
 	d.hufPtr = &d.entropy.hufTable
+}
+
+// Decoder parameter defaults (no C counterparts: the klauspost doc text
+// decides them, see docs/superpowers/phase2-api-decisions.md).
+const (
+	// defaultMaxWindowSize is WithDecoderMaxWindow's default, MaxWindowSize
+	// (C: ZSTD_MAXWINDOWSIZE_DEFAULT, (1<<27)+1).
+	defaultMaxWindowSize = MaxWindowSize
+	// defaultMaxMemory is WithDecoderMaxMemory's default, 64 GiB.
+	defaultMaxMemory = 64 << 30
+	// frameHeaderSizeMin. C: ZSTD_FRAMEHEADERSIZE_MIN(ZSTD_f_zstd1)
+	frameHeaderSizeMin = 6
+)
+
+// ddict is a digested decoder dictionary. C: zstd_ddict.c:ZSTD_DDict.
+// Placeholder: the dictionary task gives it its fields, in zstd_ddict.go.
+type ddict struct{}
+
+// newDCtx returns a decompression context with default parameters.
+// C: zstd_decompress.c:ZSTD_createDCtx (ZSTD_initDCtx_internal)
+func newDCtx() *dctx {
+	d := new(dctx)
+	d.reset(false)
+	return d
+}
+
+// reset resets the session (and, unless sessionOnly, the parameters).
+// The streaming and dictionary state come with the tasks that port them.
+// C: zstd_decompress.c:ZSTD_DCtx_reset (ZSTD_reset_session_only, or
+// ZSTD_reset_session_and_parameters)
+func (d *dctx) reset(sessionOnly bool) {
+	d.isFrameDecompression = true
+	if !sessionOnly {
+		// C: ZSTD_DCtx_resetParameters
+		d.maxWindowSize = defaultMaxWindowSize
+		d.forceIgnoreChecksum = false
+		d.maxMemory = defaultMaxMemory
+	}
+}
+
+// setMaxWindow sets the largest window a frame may declare, in bytes.
+// C: ZSTD_DCtx_setMaxWindowSize (ZSTD_d_windowLogMax at byte granularity);
+// the option layer checks the bounds.
+func (d *dctx) setMaxWindow(n uint64) { d.maxWindowSize = n }
+
+// setIgnoreChecksum. C: ZSTD_DCtx_setParameter(ZSTD_d_forceIgnoreChecksum)
+func (d *dctx) setIgnoreChecksum(b bool) { d.forceIgnoreChecksum = b }
+
+// decodeFrameHeader decodes the frame header src (exactly headerSize
+// bytes) into d.fParams. C: zstd_decompress.c:ZSTD_decodeFrameHeader
+func (d *dctx) decodeFrameHeader(src []byte) dErr {
+	need, e := getFrameHeaderAdvanced(&d.fParams, src)
+	if e != 0 {
+		return e // invalid header
+	}
+	if need > 0 {
+		return dErrSrcSizeWrong // headerSize too small
+	}
+	// C: ZSTD_DCtx_selectFrameDDict when referencing multiple DDicts (the
+	// dictionary task).
+	if d.fParams.dictID != 0 && d.dictID != d.fParams.dictID {
+		return dErrDictionaryWrong
+	}
+	d.validateChecksum = d.fParams.checksumFlag && !d.forceIgnoreChecksum
+	if d.validateChecksum {
+		d.xxhState.Reset()
+	}
+	return 0
+}
+
+// copyRawBlock. C: zstd_decompress.c:ZSTD_copyRawBlock
+func copyRawBlock(dst, src []byte) (int, dErr) {
+	if len(src) > len(dst) {
+		return 0, dErrBlockDstSizeTooSmall
+	}
+	copy(dst, src)
+	return len(src), 0
+}
+
+// setRLEBlock. C: zstd_decompress.c:ZSTD_setRleBlock
+func setRLEBlock(dst []byte, b byte, regenSize int) (int, dErr) {
+	if regenSize > len(dst) {
+		return 0, dErrBlockDstSizeTooSmall
+	}
+	memset(dst[:regenSize], b)
+	return regenSize, 0
+}
+
+// decompressFrame decodes the frame starting src into dst[:cap(dst)], the
+// frame's output buffer from its start (as given to checkContinuity), and
+// returns the bytes written and the bytes of src consumed. On an error,
+// written is the output of the blocks decoded before it.
+// C: zstd_decompress.c:ZSTD_decompressFrame
+func (d *dctx) decompressFrame(dst, src []byte) (written, consumed int, err dErr) {
+	out := dst[:cap(dst)]
+	oend := len(out)
+	op, ip := 0, 0
+	remainingSrcSize := len(src)
+
+	// check
+	if remainingSrcSize < frameHeaderSizeMin+blockHeaderSize {
+		return 0, 0, dErrSrcSizeWrong
+	}
+
+	// Frame Header
+	frameHeaderSize, e := frameHeaderSizeInternal(src[:startingInputLength])
+	if e != 0 {
+		return 0, 0, e
+	}
+	if remainingSrcSize < frameHeaderSize+blockHeaderSize {
+		return 0, 0, dErrSrcSizeWrong
+	}
+	if e := d.decodeFrameHeader(src[:frameHeaderSize]); e != 0 {
+		return 0, 0, e
+	}
+	ip += frameHeaderSize
+	remainingSrcSize -= frameHeaderSize
+
+	// Go: C's one-shot path does not check the window. DecodeAll applies
+	// the streaming check (ZSTD_decompressStream, after
+	// ZSTD_decodeFrameHeader) too: a deliberate deviation, see the error
+	// mapping table.
+	if max(d.fParams.windowSize, 1<<windowLogAbsoluteMin) > d.maxWindowSize {
+		return 0, ip, dErrFrameParameterWindowTooLarge
+	}
+
+	// C shrinks blockSizeMax to maxBlockSizeParam here; no option sets it.
+
+	// Loop on each block
+	for {
+		cBlockSize, bp, e := getcBlockSize(src[ip:])
+		if e != 0 {
+			return op, ip, e
+		}
+		ip += blockHeaderSize
+		remainingSrcSize -= blockHeaderSize
+		if cBlockSize > remainingSrcSize {
+			return op, ip, dErrSrcSizeWrong
+		}
+		// C limits the output to ip when decompressing in place (src
+		// inside dst); Go's src and dst are separate slices here.
+		block := src[ip : ip+cBlockSize]
+
+		var decodedSize int
+		switch bp.blockType {
+		case btCompressed:
+			decodedSize, e = d.decompressBlockInternal(out[:op], oend-op, block, notStreaming)
+		case btRaw:
+			decodedSize, e = copyRawBlock(out[op:oend], block)
+		case btRLE:
+			decodedSize, e = setRLEBlock(out[op:oend], block[0], int(bp.origSize))
+		default: // btReserved: getcBlockSize has rejected it
+			return op, ip, dErrCorruptionDetected
+		}
+		if e != 0 {
+			return op, ip, e
+		}
+		// Go: streaming C's check (ZSTD_decompressContinue), which one-shot
+		// C does not make: a block regenerating more than blockSizeMax.
+		// DecodeAll and streaming then agree (a deliberate deviation, see
+		// the error mapping table).
+		if decodedSize > int(d.fParams.blockSizeMax) {
+			return op, ip, dErrDecodedBlockTooLarge
+		}
+		if d.validateChecksum {
+			d.xxhState.Write(out[op : op+decodedSize])
+		}
+		op += decodedSize
+		ip += cBlockSize
+		remainingSrcSize -= cBlockSize
+		if bp.lastBlock {
+			break
+		}
+	}
+
+	if d.fParams.frameContentSize != contentSizeUnknown && uint64(op) != d.fParams.frameContentSize {
+		return op, ip, dErrFrameSizeMismatch
+	}
+	if d.fParams.checksumFlag { // Frame content checksum verification
+		if remainingSrcSize < 4 {
+			// Go: C returns checksum_wrong here; streaming C waits for
+			// more input. DecodeAll reports the cut input like streaming
+			// (io.ErrUnexpectedEOF): a deliberate deviation.
+			return op, ip, dErrSrcSizeWrong
+		}
+		if !d.forceIgnoreChecksum {
+			checkCalc := uint32(d.xxhState.Sum64())
+			checkRead := binary.LittleEndian.Uint32(src[ip:])
+			if checkRead != checkCalc {
+				return op, ip, dErrChecksumWrong
+			}
+		}
+		ip += 4
+	}
+	return op, ip, 0
+}
+
+// decompressMultiFrame decodes every frame of src (skipping skippable
+// frames), appending the output to dst, which it grows as the allocation
+// rule says (docs/superpowers/phase2-api-decisions.md): each frame gets
+// min(frame content size, blocks × blockSizeMax) bytes, cut to
+// d.maxMemory less the output so far. dst[:len(dst)] is never modified.
+// On an error the result holds the output decoded before it.
+// C: zstd_decompress.c:ZSTD_decompressMultiFrame (via ZSTD_decompressDCtx)
+func (d *dctx) decompressMultiFrame(dst, src []byte, dd *ddict) ([]byte, error) {
+	out, e := d.decompressFrames(dst, src, dd)
+	if e != 0 {
+		return out, e.toError("decompress")
+	}
+	return out, nil
+}
+
+// decompressFrames is decompressMultiFrame returning the dErr.
+func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
+	start := len(dst)
+	for len(src) >= startingInputLength {
+		magic := binary.LittleEndian.Uint32(src)
+		if magic&magicSkippableMask == magicSkippableStart {
+			// skippable frame detected: skip it
+			skippableSize, e := readSkippableFrameSize(src)
+			if e != 0 {
+				return dst, e // invalid skippable frame
+			}
+			src = src[skippableSize:]
+			continue // check next frame
+		}
+		// Go: C reaches prefix_unknown through ZSTD_decompressFrame, after
+		// a srcSize_wrong check for fewer than 9 bytes, and turns it into
+		// srcSize_wrong once a frame has completed. DecodeAll follows
+		// streaming C instead: bytes that start no frame are
+		// prefix_unknown however few they are (a deliberate deviation, see
+		// the error mapping table).
+		if magic != magicNumber {
+			return dst, dErrPrefixUnknown
+		}
+
+		// C: ZSTD_decompressBegin_usingDDict when dd is set (the
+		// dictionary task).
+		d.decompressBegin()
+
+		// Go: the allocation rule. The frame's output space: its frame
+		// content size, but at most what its blocks can regenerate
+		// (ZSTD_decompressBound's nbBlocks × blockSizeMax; the blocks
+		// before the walk failed when it did) and the memory left. A
+		// frame whose header fails, or declares a window too large, gets
+		// none: decompressFrame reports that before any output.
+		limit := min(d.maxMemory-min(d.maxMemory, uint64(len(dst)-start)), uint64(math.MaxInt-len(dst)))
+		var frameCap uint64
+		byFCS, byLimit := false, false
+		var zfh frameHeader
+		if need, e := getFrameHeaderAdvanced(&zfh, src); e == 0 && need == 0 &&
+			max(zfh.windowSize, 1<<windowLogAbsoluteMin) <= d.maxWindowSize {
+			fsi := findFrameSizeInfo(src)
+			frameCap = uint64(fsi.nbBlocks) * uint64(zfh.blockSizeMax)
+			if zfh.frameContentSize < frameCap { // contentSizeUnknown never is
+				frameCap, byFCS = zfh.frameContentSize, true
+				if frameCap > limit {
+					return dst, dErrDecoderSizeExceeded
+				}
+			}
+			if frameCap > limit {
+				frameCap, byLimit = limit, true
+			}
+		}
+		dst = slices.Grow(dst, int(frameCap))
+		buf := dst[len(dst) : len(dst) : len(dst)+int(frameCap)]
+
+		d.checkContinuity(buf, len(buf))
+		n, consumed, e := d.decompressFrame(buf, src)
+		dst = dst[:len(dst)+n]
+		if e != 0 {
+			if e.cCode() == int(dErrDstSizeTooSmall) {
+				// Go: name what limited the output space.
+				switch {
+				case byLimit:
+					e = dErrDecoderSizeExceeded
+				case byFCS:
+					e = dErrFrameSizeExceeded
+				}
+			}
+			return dst, e
+		}
+		src = src[consumed:]
+	}
+	if len(src) > 0 {
+		// C: srcSize_wrong ("input not entirely consumed"). Go: a tail that
+		// cannot start a frame is prefix_unknown (see above).
+		var zfh frameHeader
+		if _, e := getFrameHeaderAdvanced(&zfh, src); e != 0 {
+			return dst, e
+		}
+		return dst, dErrSrcSizeWrong
+	}
+	return dst, 0
 }

@@ -1,6 +1,9 @@
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/huf"
+import (
+	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastzstd/internal/xxhash"
+)
 
 // Objects and definitions shared within the decoder.
 // C: lib/decompress/zstd_decompress_internal.h (v1.5.7)
@@ -134,10 +137,20 @@ type dctx struct {
 	prevDst []byte
 
 	fParams              frameHeader
+	xxhState             xxhash.Digest
 	litEntropy           bool // C: U32 litEntropy
 	fseEntropy           bool // C: U32 fseEntropy
 	isFrameDecompression bool
-	ddictIsCold          bool // C: int ddictIsCold; the dictionary task sets it
+	validateChecksum     bool   // C: int validateChecksum
+	dictID               uint32 // C: U32 dictID; the dictionary task sets it
+	ddictIsCold          bool   // C: int ddictIsCold; the dictionary task sets it
+
+	// parameters
+	maxWindowSize       uint64 // C: size_t maxWindowSize
+	forceIgnoreChecksum bool   // C: ZSTD_forceIgnoreChecksum_e forceIgnoreChecksum
+	// maxMemory caps decompressMultiFrame's output (no C counterpart):
+	// WithDecoderMaxMemory, or the WithDecodeAllCapLimit capacity.
+	maxMemory uint64
 
 	litBuf            []byte
 	litPtr            int

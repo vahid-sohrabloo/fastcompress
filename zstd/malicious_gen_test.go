@@ -633,8 +633,8 @@ func buildMaliciousCases(t testing.TB) []malCase {
 		}
 		return malFrame{hdr: plain.bytes(), blocks: []malBlock{malCBlock(body, true)}}.bytes()
 	}
-	add(malCase{name: "seq-nbseq-max", expect: "corrupt",
-		desc: "nbSeq = 0x7F00+0xFFFF (header FF FF FF), predefined tables, a 4-byte bitstream",
+	add(malCase{name: "seq-nbseq-max", expect: "ErrWindowSizeTooSmall",
+		desc: "nbSeq = 0x7F00+0xFFFF (header FF FF FF), predefined tables, a 4-byte bitstream (the first match offset is beyond the empty history)",
 		data: seqBlock([]byte{0xFF, 0xFF, 0xFF, 0x00}, []byte{0x12, 0x34, 0x56, 0x80})})
 	for _, tl := range []struct {
 		name  string
@@ -907,7 +907,11 @@ func TestMaliciousCorpusC(t *testing.T) {
 // TestTruncationsCRef cuts frames of every type at every byte and checks
 // that C rejects each prefix: one-shot with srcSize_wrong (checksum_wrong
 // for a cut inside the checksum), streaming by ending mid-frame
-// ("incomplete", which the decoder maps to io.ErrUnexpectedEOF).
+// ("incomplete", which the decoder maps to io.ErrUnexpectedEOF). The
+// one-shot decoder (truncCheck) must reject the same prefixes, with
+// io.ErrUnexpectedEOF also for a cut inside the checksum (streaming C's
+// answer, a deliberate deviation from one-shot C), and decode the prefixes
+// that end at a part boundary.
 func TestTruncationsCRef(t *testing.T) {
 	creftest.Bin(t)
 	text := malText(600)
@@ -999,6 +1003,17 @@ func TestTruncationsCRef(t *testing.T) {
 			}
 			stream := f.c
 			stream.stream = true
+			if f.c.dict == "" { // the dictionary task covers dictid
+				var wants [][]byte
+				for _, p := range f.parts {
+					w, err := dctxDecode(p)
+					if err != nil {
+						t.Fatal(err)
+					}
+					wants = append(wants, w)
+				}
+				truncCheck(t, f.parts, wants)
+			}
 			names := map[string]int{}
 			for n := 1; n < len(data); n++ {
 				cut := data[:n]

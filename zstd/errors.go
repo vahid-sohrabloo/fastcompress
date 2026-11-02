@@ -114,8 +114,9 @@ const (
 	dErrLitDstSizeTooSmall dErr = 132
 	// dErrBlockDstSizeTooSmall is dstSize_tooSmall from sequence execution
 	// (ZSTD_execSequence*, the ZSTD_decompressSequences* last literals and
-	// split-buffer checks) and ZSTD_decompressBlock_internal (sequences with
-	// no output space): the block regenerates more than its output space.
+	// split-buffer checks), ZSTD_decompressBlock_internal (sequences with
+	// no output space), ZSTD_copyRawBlock and ZSTD_setRleBlock: the block
+	// regenerates more than its output space.
 	dErrBlockDstSizeTooSmall dErr = 133
 	// dErrOffsetBeyondHistory is corruption_detected from ZSTD_execSequence*:
 	// a match offset beyond the prefix and the extDict (dictionary).
@@ -124,16 +125,34 @@ const (
 	// ZSTD_decompressBlock_internal: compressed block size >
 	// ZSTD_blockSizeMax(dctx).
 	dErrCompressedSizeTooBig dErr = 135
+	// dErrFrameSizeExceeded is dstSize_tooSmall from a block of a frame
+	// whose output space is its frame content size (decompressMultiFrame):
+	// the frame regenerates more than its header says.
+	dErrFrameSizeExceeded dErr = 136
+	// dErrFrameSizeMismatch is corruption_detected from
+	// ZSTD_decompressFrame: the frame ends with an output size other than
+	// its frame content size.
+	dErrFrameSizeMismatch dErr = 137
+	// dErrDecoderSizeExceeded has no C counterpart: dstSize_tooSmall from a
+	// block of a frame whose output space was cut to the decoder's memory
+	// limit (dctx.maxMemory), or a frame content size above that limit.
+	dErrDecoderSizeExceeded dErr = 138
+	// dErrDecodedBlockTooLarge is corruption_detected from
+	// ZSTD_decompressContinue ("Decompressed Block Size Exceeds Maximum"):
+	// a block regenerates more than blockSizeMax. Streaming C's check, which
+	// decompressFrame makes too.
+	dErrDecodedBlockTooLarge dErr = 139
 )
 
 // cCode returns the C ZSTD_ErrorCode e stands for.
 func (e dErr) cCode() int {
 	switch e {
-	case dErrReservedBlockType, dErrBlockTooSmall, dErrLitSizeTooLarge, dErrOffsetBeyondHistory:
+	case dErrReservedBlockType, dErrBlockTooSmall, dErrLitSizeTooLarge, dErrOffsetBeyondHistory,
+		dErrFrameSizeMismatch, dErrDecodedBlockTooLarge:
 		return int(dErrCorruptionDetected)
 	case dErrSeqHeaderTooSmall, dErrCompressedSizeTooBig:
 		return int(dErrSrcSizeWrong)
-	case dErrLitDstSizeTooSmall, dErrBlockDstSizeTooSmall:
+	case dErrLitDstSizeTooSmall, dErrBlockDstSizeTooSmall, dErrFrameSizeExceeded, dErrDecoderSizeExceeded:
 		return int(dErrDstSizeTooSmall)
 	}
 	return int(e)
@@ -181,12 +200,18 @@ func (e dErr) toError(where string) error {
 		return ErrReservedBlockType
 	case dErrBlockTooSmall, dErrSeqHeaderTooSmall:
 		return ErrBlockTooSmall
-	case dErrLitSizeTooLarge, dErrLitDstSizeTooSmall, dErrBlockDstSizeTooSmall:
+	case dErrLitSizeTooLarge, dErrLitDstSizeTooSmall, dErrBlockDstSizeTooSmall, dErrDecodedBlockTooLarge:
 		return ErrUnexpectedBlockSize
 	case dErrOffsetBeyondHistory:
 		return ErrWindowSizeTooSmall
 	case dErrCompressedSizeTooBig:
 		return ErrCompressedSizeTooBig
+	case dErrFrameSizeExceeded:
+		return ErrFrameSizeExceeded
+	case dErrFrameSizeMismatch:
+		return ErrFrameSizeMismatch
+	case dErrDecoderSizeExceeded:
+		return ErrDecoderSizeExceeded
 	case dErrChecksumWrong:
 		return ErrCRCMismatch
 	case dErrDictionaryWrong:
