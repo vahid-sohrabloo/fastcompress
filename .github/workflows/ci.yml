@@ -75,6 +75,8 @@ jobs:
         env:
           GOARCH: arm64
         run: go vet ./...
+      - name: Decoder safety check
+        run: scripts/decodercheck.sh
 
   cross-build:
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
