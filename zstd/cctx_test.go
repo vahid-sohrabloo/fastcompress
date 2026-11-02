@@ -542,6 +542,9 @@ func checkOverflowCorrection(t *testing.T, c compress2Case, name string, src []b
 	ms := &cc.blockState.matchState
 	start := uint32(currentMax) - uint32(len(src)/2) - 12345
 	ms.window.nextSrc, ms.window.lowLimit, ms.window.dictLimit = start, start, start
+	// base is still empty: anchor it (and dictBase) at start, so that
+	// nextSrc - baseIdx stays within base as in a real context.
+	ms.window.baseIdx, ms.window.dictBaseIdx = start, start
 	ms.nextToUpdate = start
 	out := make([]byte, compressBound(len(src)))
 	n, err := cc.compressEnd(out, src)

@@ -435,8 +435,11 @@ func windowUpdate(w *window, src []byte, forceNonContiguous bool) bool {
 		return true
 	}
 	contiguous := true
-	next := w.at(w.nextSrc)
-	if forceNonContiguous || cap(w.base) < next+len(src) || &w.base[:next+1][next] != &src[0] {
+	// next is nextSrc's position in w.base (w.at), kept unsigned and
+	// compared in 64 bits: when base is not contiguous with nextSrc it may
+	// exceed cap(w.base), and math.MaxInt32 on 32-bit platforms.
+	next := w.nextSrc - w.baseIdx
+	if forceNonContiguous || uint64(cap(w.base)) < uint64(next)+uint64(len(src)) || &w.base[:next+1][next] != &src[0] {
 		// not contiguous
 		distanceFromBase := w.nextSrc
 		w.lowLimit = w.dictLimit
@@ -448,7 +451,7 @@ func windowUpdate(w *window, src []byte, forceNonContiguous bool) bool {
 		}
 		contiguous = false
 	} else {
-		w.base = w.base[:next+len(src)]
+		w.base = w.base[:int(next)+len(src)]
 	}
 	w.nextSrc += uint32(len(src))
 	// if input and dictionary overlap : reduce dictionary (area presumed modified by input)
