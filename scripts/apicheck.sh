@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# apicheck.sh [--subset]
+# apicheck.sh [--subset|--missing]
 #
 # Compares the exported API of ./zstd against api/klauspost-zstd.txt.
 # api/fastzstd-extensions.txt lists the (normalised) declarations this port
 # adds on top of klauspost's API; they are removed before comparing.
 #   --subset  every normalised declaration of ./zstd must appear in the snapshot
+#   --missing print snapshot lines ./zstd does not export yet (always exit 0)
 #   (default) additionally every snapshot line must exist in ./zstd
 #
 # Normalisation of `go doc -all` output (applied identically to the snapshot):
@@ -43,7 +44,10 @@ mode="${1:-}"
 tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
 go doc -all ./zstd | normalise | LC_ALL=C comm -23 - api/fastzstd-extensions.txt > "$tmp"
 
-if [ "$mode" = "--subset" ]; then
+if [ "$mode" = "--missing" ]; then
+  LC_ALL=C comm -13 "$tmp" api/klauspost-zstd.txt
+  exit 0
+elif [ "$mode" = "--subset" ]; then
   extra="$(LC_ALL=C comm -23 "$tmp" api/klauspost-zstd.txt)"
   if [ -n "$extra" ]; then echo "not in klauspost snapshot:"; echo "$extra"; exit 1; fi
 else
