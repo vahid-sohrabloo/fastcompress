@@ -243,6 +243,41 @@ func TestDecodeSeqsLongBits(t *testing.T) {
 	}
 }
 
+// TestDecodeSeqsZeroRepeatOffset: a repeat offset that resolves to 0
+// (rep0 - 1 with rep0 == 1) becomes C's (size_t)-1, so that the sequence
+// executor rejects it. C: ZSTD_decodeSequence, temp -= !temp.
+func TestDecodeSeqsZeroRepeatOffset(t *testing.T) {
+	var c bitstream.CStream
+	buf := make([]byte, 16)
+	if err := c.Init(buf); err != nil {
+		t.Fatal(err)
+	}
+	c.AddBits(1, 1) // OF code 1's extra bit
+	c.FlushBits()
+	n := c.Close()
+	// One sequence; LL, OF and ML RLE with symbols 0 (ll0), 1 and 0.
+	section := append([]byte{1, 0x54, 0, 1, 0}, buf[:n]...)
+	d := newTestDctx(blockSizeMax)
+	nbSeq, hSize, e := decodeSeqHeaders(d, section)
+	if e != 0 || nbSeq != 1 {
+		t.Fatalf("decodeSeqHeaders: nbSeq %d err %d", nbSeq, e)
+	}
+	st := seqState{prevOffset: [repNum]int{1, 4, 8}}
+	if _, err := st.dStream.Init(section[hSize:]); err != nil {
+		t.Fatal(err)
+	}
+	initFseState(&st.stateLL, &st.dStream, d.llTptr)
+	initFseState(&st.stateOffb, &st.dStream, d.ofTptr)
+	initFseState(&st.stateML, &st.dStream, d.mlTptr)
+	sq := decodeSequence(&st, false, true)
+	if uint(sq.offset) != ^uint(0) || st.prevOffset != [repNum]int{sq.offset, 1, 4} {
+		t.Fatalf("offset %d, prevOffset %v; want -1 and [-1 1 4]", sq.offset, st.prevOffset)
+	}
+	if sq.litLength != 0 || sq.matchLength != 3 || !st.dStream.EndOfDStream() {
+		t.Fatalf("seq %+v, end %v", sq, st.dStream.EndOfDStream())
+	}
+}
+
 // checkTableBound checks every cell of a sequence table (header first)
 // against nextState + (1<<nbBits) <= 1<<tableLog: the next state is always
 // inside the table.
@@ -430,6 +465,7 @@ func TestLitBufferPlacements(t *testing.T) {
 			want        litLocation
 		}{
 			{"in_dst", notStreaming, bsMax + 2*wildcopyOverlength + size + 1, inDst},
+			{"in_dst-boundary", notStreaming, bsMax + 2*wildcopyOverlength + size, map[bool]litLocation{false: notInDst, true: split}[big]},
 			{"not_in_dst-or-split", isStreaming, bsMax, map[bool]litLocation{false: notInDst, true: split}[big]},
 			{"tight", notStreaming, size, map[bool]litLocation{false: notInDst, true: split}[big]},
 		}
@@ -456,6 +492,7 @@ func TestLitBufferPlacements(t *testing.T) {
 					if got := decodedLits(d); !bytes.Equal(got, c.want) {
 						t.Fatalf("literals differ (%d bytes, want %d)", len(got), len(c.want))
 					}
+					checkLitOffsets(t, d, dst, p.dstCapacity, size)
 				})
 			}
 		}
@@ -471,6 +508,64 @@ func TestLitBufferPlacements(t *testing.T) {
 				t.Fatalf("raw literals not referenced in place")
 			}
 		})
+	}
+}
+
+// checkLitOffsets checks d's literal buffer offsets against C's
+// ZSTD_allocateLiteralsBuffer formulas (for a Huffman split, after
+// ZSTD_decodeLiteralsBlock's fix-up, which gives the same offsets as the
+// immediate split). dst is the dst decodeLiteralsBlock was given.
+func checkLitOffsets(t *testing.T, d *dctx, dst []byte, dstCapacity, litSize int) {
+	t.Helper()
+	bsMax := d.blockSizeMax()
+	ews := min(bsMax, dstCapacity) // C: expectedWriteSize
+	var buf, end int
+	inExtra := false
+	switch d.litBufferLocation {
+	case inDst:
+		buf = bsMax + wildcopyOverlength
+		end = buf + litSize
+	case notInDst:
+		buf, end, inExtra = 0, litSize, true
+	case split:
+		buf = ews - litSize + litBufferExtraSize - wildcopyOverlength
+		end = ews - wildcopyOverlength
+	}
+	if d.litBuffer != buf || d.litBufferEnd != end || d.litPtr != buf {
+		t.Fatalf("location %d: litBuffer %d litBufferEnd %d litPtr %d, want %d %d %d",
+			d.litBufferLocation, d.litBuffer, d.litBufferEnd, d.litPtr, buf, end, buf)
+	}
+	want := &dst[0]
+	if inExtra {
+		want = &d.litExtraBuffer[0]
+	}
+	if &d.litBuf[0] != want {
+		t.Fatalf("location %d: litBuf is not the expected array", d.litBufferLocation)
+	}
+}
+
+// TestLitBufferDstTooSmall: literals that fit blockSizeMax but not
+// dstCapacity are dstSize_tooSmall (C: expectedWriteSize < litSize).
+func TestLitBufferDstTooSmall(t *testing.T) {
+	const size = 1000
+	text := creftest.Inputs(t)["zstd-format.md"][:size]
+	var ct hufCTables
+	for _, section := range [][]byte{
+		litSection(t, text, setBasic, nil),
+		litSection(t, bytes.Repeat([]byte{'z'}, size), setRLE, nil),
+		litSection(t, text, setCompressed, &ct),
+	} {
+		for _, dstCapacity := range []int{size - 1, size} {
+			d := newTestDctx(blockSizeMax)
+			_, e := d.decodeLiteralsBlock(section, make([]byte, dstCapacity), dstCapacity, notStreaming)
+			want := dErr(0)
+			if dstCapacity < size {
+				want = dErrLitDstSizeTooSmall
+			}
+			if e != want {
+				t.Errorf("type %d, dstCapacity %d: err %d, want %d", section[0]&3, dstCapacity, e, want)
+			}
+		}
 	}
 }
 
@@ -504,52 +599,64 @@ func crefOneBlockFrame(block []byte, fcs uint32) []byte {
 }
 
 // TestDecodeSeqsHeaderErrorsCref runs hostile literals and sequences
-// headers through C (each as the only block of a frame) and checks that
-// whenever the Go header decoders fail, C fails with the same C error code,
-// and that Go accepts every block C decodes.
+// headers through C (each as the only block of a frame). Each hand-made case
+// has its exact expected Go result: an error must also be C's error code,
+// and 0 means both headers decode (C may fail later, in code not ported
+// here). For random mutations of real blocks it checks one direction:
+// whenever Go fails, C fails with the same code, and Go accepts every block
+// C decodes.
 func TestDecodeSeqsHeaderErrorsCref(t *testing.T) {
 	type tc struct {
 		block []byte
 		fcs   uint32
+		hand  bool // want is the exact expected result
+		want  dErr
 	}
 	var cases []tc
-	add := func(fcs uint32, b ...byte) { cases = append(cases, tc{b, fcs}) }
+	add := func(want dErr, fcs uint32, b ...byte) { cases = append(cases, tc{b, fcs, true, want}) }
 	// Literals headers.
-	add(100, 0x00)                                // srcSize < MIN_CBLOCK_SIZE
-	add(100, 0x02, 0x00, 0x00, 0x00)              // compressed, srcSize < 5
-	add(100, 0x03, 0x00, 0x00, 0x00, 0x00)        // treeless, no table: dictionary_corrupted
-	add(100, 0x0f, 0x00, 0x00, 0x00, 0x00)        // treeless, no table, lhlCode 3
-	add(100, 0x56, 0x00, 0x00, 0x00, 0x00)        // 4 streams, litSize 5: literals_headerWrong
-	add(100, 0x02, 0xf0, 0x07, 0x00, 0x00)        // litSize 768 > blockSizeMax 100
-	add(4000, 0x0e, 0x00, 0x00, 0x40, 0x00, 0x00) // lhlCode 3, 4 streams, litSize 0
-	add(4000, 0x0e, 0x40, 0x00, 0x40, 0x00, 0x00) // lhlCode 3, litSize 4, litCSize 256 past src
-	add(4000, 0x0a, 0x00, 0x01, 0x00, 0x01, 0x00) // lhlCode 2, litSize 4096 > 4000
-	add(4000, 0x0a, 0x40, 0x00, 0x00, 0x01, 0x00) // lhlCode 2, litSize 4, litCSize 64 past src
-	add(100, 0x0c, 0x00)                          // raw, lhlCode 3, srcSize < 3
-	add(100, 0x04, 0x05)                          // raw lhlCode 1, litSize 80 past src
-	add(40, 0x04, 0x05, 0x00)                     // raw litSize 80 > blockSizeMax 40
-	add(100, 0x05, 0x00)                          // RLE lhlCode 1, srcSize < 3
-	add(100, 0x0d, 0x00, 0x00)                    // RLE lhlCode 3, srcSize < 4
-	add(10, 0xf9, 'a', 0x00)                      // RLE litSize 31 > blockSizeMax 10
-	add(100, 0x09, 'a')                           // RLE 1 literal, no sequences section
+	add(dErrBlockTooSmall, 100, 0x00)                                                // srcSize < MIN_CBLOCK_SIZE
+	add(dErrBlockTooSmall, 100, 0x02, 0x00, 0x00, 0x00)                              // compressed, srcSize < 5
+	add(dErrBlockTooSmall, 100, 0x0e, 0x00, 0x00, 0x00)                              // compressed lhlCode 3, srcSize 4 < 5
+	add(dErrDictionaryCorrupted, 100, 0x03, 0x00, 0x00, 0x00, 0x00)                  // treeless, no table
+	add(dErrDictionaryCorrupted, 100, 0x0f, 0x00, 0x00, 0x00, 0x00)                  // treeless, no table, lhlCode 3
+	add(dErrLiteralsHeaderWrong, 100, 0x56, 0x00, 0x00, 0x00, 0x00)                  // 4 streams, litSize 5
+	add(dErrCorruptionDetected, 100, 0x66, 0x80, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) // 4 streams, litSize 6: header ok, HUF fails
+	add(dErrLitSizeTooLarge, 100, 0x02, 0xf0, 0x07, 0x00, 0x00)                      // litSize 768 > blockSizeMax 100
+	add(dErrLitSizeTooLarge, 100, 0x52, 0x46, 0x00, 0x00, 0x00)                      // compressed litSize 101 > blockSizeMax 100
+	add(dErrCorruptionDetected, 100, 0x42, 0x46, 0x00, 0x00, 0x00)                   // compressed litSize 100: header ok, HUF fails
+	add(dErrLiteralsHeaderWrong, 4000, 0x0e, 0x00, 0x00, 0x40, 0x00, 0x00)           // lhlCode 3, 4 streams, litSize 0
+	add(dErrBlockTooSmall, 4000, 0x0e, 0x40, 0x00, 0x40, 0x00, 0x00)                 // lhlCode 3, litSize 1024, litCSize 256 past src
+	add(dErrLitSizeTooLarge, 4000, 0x0a, 0x00, 0x01, 0x00, 0x01, 0x00)               // lhlCode 2, litSize 4096 > 4000
+	add(dErrCorruptionDetected, 4000, 0x0a, 0x40, 0x00, 0x00, 0x01, 0x00)            // lhlCode 2, litSize 1024, litCSize 0: HUF fails
+	add(dErrBlockTooSmall, 100, 0x0c, 0x00)                                          // raw, lhlCode 3, srcSize < 3
+	add(dErrBlockTooSmall, 100, 0x04, 0x05)                                          // raw lhlCode 1, litSize 80 past src
+	add(dErrLitSizeTooLarge, 40, 0x04, 0x05, 0x00)                                   // raw litSize 80 > blockSizeMax 40
+	add(dErrBlockTooSmall, 100, 0x05, 0x00)                                          // RLE lhlCode 1, srcSize < 3
+	add(dErrBlockTooSmall, 100, 0x0d, 0x00, 0x00)                                    // RLE lhlCode 3, srcSize < 4
+	add(dErrLitSizeTooLarge, 10, 0xf9, 'a', 0x00)                                    // RLE litSize 31 > blockSizeMax 10
+	add(dErrLitSizeTooLarge, 100, 0x55, 0x06, 'a')                                   // RLE litSize 101 > blockSizeMax 100
+	add(dErrSeqHeaderTooSmall, 100, 0x45, 0x06, 'a')                                 // RLE litSize 100, no sequences section
+	add(dErrSeqHeaderTooSmall, 100, 0x09, 'a')                                       // RLE 1 literal, no sequences section
 	// Sequences headers after 1 RLE literal (0x09 'a').
-	seqs := func(fcs uint32, b ...byte) { add(fcs, append([]byte{0x09, 'a'}, b...)...) }
-	seqs(100, 0x00)                         // nbSeq 0
-	seqs(100, 0x00, 0x00)                   // nbSeq 0 with extra data
-	seqs(100, 0x80)                         // 2-byte nbSeq cut
-	seqs(100, 0xff, 0x00)                   // 3-byte nbSeq cut
-	seqs(100, 0x01)                         // no table descriptor byte
-	seqs(100, 0x01, 0x01)                   // reserved bits set
-	seqs(100, 0x01, 0xfc)                   // all repeat, no fseEntropy
-	seqs(100, 0x01, 0x40)                   // LL RLE, symbol missing
-	seqs(100, 0x01, 0x40, 0x24)             // LL RLE symbol 36 > MaxLL
-	seqs(100, 0x01, 0x10, 0x20)             // OF RLE symbol 32 > MaxOff
-	seqs(100, 0x01, 0x04, 0x35)             // ML RLE symbol 53 > MaxML
-	seqs(100, 0x01, 0x80)                   // LL FSE header missing
-	seqs(100, 0x01, 0x80, 0x0f, 0x00, 0x00) // LL FSE tableLog 20
-	seqs(100, 0x01, 0x80, 0x05, 0x00, 0x00) // LL FSE tableLog 10 > 9
-	seqs(100, 0x01, 0x20, 0x04, 0x00)       // OF FSE tableLog 9 > 8
-	seqs(100, 0x01, 0x00, 0x08)             // predefined, bitstream 0x08
+	seqs := func(want dErr, fcs uint32, b ...byte) { add(want, fcs, append([]byte{0x09, 'a'}, b...)...) }
+	seqs(0, 100, 0x00)                                              // nbSeq 0
+	seqs(dErrCorruptionDetected, 100, 0x00, 0x00)                   // nbSeq 0 with extra data
+	seqs(dErrSeqHeaderTooSmall, 100, 0x80)                          // 2-byte nbSeq cut
+	seqs(dErrSeqHeaderTooSmall, 100, 0xff, 0x00)                    // 3-byte nbSeq cut
+	seqs(dErrSeqHeaderTooSmall, 100, 0x01)                          // no table descriptor byte
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x01)                   // reserved bit 0 set
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x02)                   // reserved bit 1 set
+	seqs(dErrCorruptionDetected, 100, 0x01, 0xfc)                   // all repeat, no fseEntropy
+	seqs(dErrBlockTooSmall, 100, 0x01, 0x40)                        // LL RLE, symbol missing
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x40, 0x24)             // LL RLE symbol 36 > MaxLL
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x10, 0x20)             // OF RLE symbol 32 > MaxOff
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x04, 0x35)             // ML RLE symbol 53 > MaxML
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x80)                   // LL FSE header missing
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x80, 0x0f, 0x00, 0x00) // LL FSE tableLog 20
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x80, 0x05, 0x00, 0x00) // LL FSE tableLog 10 > 9
+	seqs(dErrCorruptionDetected, 100, 0x01, 0x20, 0x04, 0x00)       // OF FSE tableLog 9 > 8
+	seqs(0, 100, 0x01, 0x00, 0x08)                                  // predefined, bitstream 0x08
 
 	// Mutations of real first blocks.
 	rng := rand.New(rand.NewPCG(3, 5))
@@ -564,7 +671,7 @@ func TestDecodeSeqsHeaderErrorsCref(t *testing.T) {
 		}
 		block := frame[int(zfh.headerSize)+blockHeaderSize:][:cSize]
 		fcs := uint32(min(len(inputs[name]), blockSizeMax))
-		cases = append(cases, tc{block, fcs})
+		cases = append(cases, tc{block: block, fcs: fcs})
 		for k := 0; k < 40; k++ {
 			m := append([]byte(nil), block...)
 			switch k % 4 {
@@ -575,10 +682,10 @@ func TestDecodeSeqsHeaderErrorsCref(t *testing.T) {
 			case 2: // flip anywhere
 				m[rng.IntN(len(m))] ^= byte(1 + rng.IntN(255))
 			case 3: // smaller frame
-				cases = append(cases, tc{m, uint32(rng.IntN(int(fcs) + 1))})
+				cases = append(cases, tc{block: m, fcs: uint32(rng.IntN(int(fcs) + 1))})
 				continue
 			}
-			cases = append(cases, tc{m, fcs})
+			cases = append(cases, tc{block: m, fcs: fcs})
 		}
 	}
 
@@ -593,6 +700,9 @@ func TestDecodeSeqsHeaderErrorsCref(t *testing.T) {
 		d.decompressBegin()
 		d.fParams = zfh
 		if len(c.block) > d.blockSizeMax() {
+			if c.hand {
+				t.Fatalf("case %d: block larger than blockSizeMax", i)
+			}
 			continue // C: srcSize_wrong before the literals
 		}
 		var dst []byte
@@ -606,6 +716,16 @@ func TestDecodeSeqsHeaderErrorsCref(t *testing.T) {
 			_, _, e = decodeSeqHeaders(d, c.block[n:])
 		}
 		_, cerr := creftest.DecodeCRef(t, frame)
+		if c.hand {
+			compared++
+			if e != c.want {
+				t.Errorf("case %d (block %x, fcs %d): Go error %d, want %d", i, c.block, c.fcs, e, c.want)
+			}
+			if c.want != 0 && (cerr == nil || cerr.Code != c.want.cCode()) {
+				t.Errorf("case %d (block %x, fcs %d): C %v, want C code %d", i, c.block, c.fcs, cerr, c.want.cCode())
+			}
+			continue
+		}
 		switch {
 		case e != 0:
 			compared++

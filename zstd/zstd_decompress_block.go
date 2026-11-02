@@ -75,8 +75,10 @@ func (d *dctx) allocateLiteralsBuffer(dst []byte, dstCapacity, litSize int,
 // decodeLiteralsBlock decodes the literals section at the start of src (a
 // compressed block's content) and returns the number of bytes it read.
 // dst[:dstCapacity] is the output space of the block; dst nil stands for
-// C's NULL. Where it is possible to do so without being stomped by the
-// output during decompression, the literals are stored in dst: in full
+// C's NULL. Precondition (C's contract; a caller bug otherwise, which
+// panics): cap(dst) >= dstCapacity, and dst == nil implies
+// dstCapacity == 0. Where it is possible to do so without being stomped by
+// the output during decompression, the literals are stored in dst: in full
 // after the block's output when there is room, otherwise at the end of the
 // block's output space with a part in litExtraBuffer to keep them "ahead"
 // of the output. C: zstd_decompress_block.c:ZSTD_decodeLiteralsBlock
