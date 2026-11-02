@@ -171,11 +171,22 @@ func decompressUsingDTable(dst, src []byte, dt *dTable) (int, error) {
 	return op, nil
 }
 
+// DecompressWkspSizeU32 is the workspace size, in U32, that
+// FSE_decompress_wksp needs for a table of maxTableLog and maxSymbolValue.
+// C: fse.h:FSE_DECOMPRESS_WKSP_SIZE_U32
+func DecompressWkspSizeU32(maxTableLog, maxSymbolValue uint) uint {
+	dtableSizeU32 := 1 + uint(1)<<maxTableLog                          // C: FSE_DTABLE_SIZE_U32
+	buildDTableWksp := 2*(maxSymbolValue+1) + uint(1)<<maxTableLog + 8 // C: FSE_BUILD_DTABLE_WKSP_SIZE
+	return dtableSizeU32 + 1 + (buildDTableWksp+3)/4 + (255+1)/2 + 1
+}
+
 // DecompressWksp decodes an FSE stream (NCount header || payload) of byte
 // symbols into dst and returns the number of bytes written. maxLog is the
-// largest table log accepted. C: fse_decompress.c:FSE_decompress_wksp_bmi2
-// (FSE_decompress_wksp_body) — the workspace is internal here.
-func DecompressWksp(dst, src []byte, maxLog uint) (int, error) {
+// largest table log accepted. wkspSizeU32 is the size of C's caller
+// workspace: the workspace itself is internal here, but C rejects a table
+// that would not fit in it, so the budget is checked as in C.
+// C: fse_decompress.c:FSE_decompress_wksp_bmi2 (FSE_decompress_wksp_body)
+func DecompressWksp(dst, src []byte, maxLog, wkspSizeU32 uint) (int, error) {
 	var ncount [maxSymbolValue + 1]int16
 	maxSV := uint(maxSymbolValue)
 
@@ -188,6 +199,10 @@ func DecompressWksp(dst, src []byte, maxLog uint) (int, error) {
 		return 0, ErrTableLogTooLarge
 	}
 	src = src[nCountLength:]
+
+	if DecompressWkspSizeU32(tableLog, maxSV) > wkspSizeU32 {
+		return 0, ErrTableLogTooLarge
+	}
 
 	var dt dTable
 	if err := buildDTable(&dt, ncount[:], uint32(maxSV), uint32(tableLog)); err != nil {

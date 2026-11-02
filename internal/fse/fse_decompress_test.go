@@ -96,12 +96,25 @@ func TestDecompressWkspRoundTrip(t *testing.T) {
 			continue // not compressible or RLE
 		}
 		out := make([]byte, n+16)
-		d, err := DecompressWksp(out, dst[:c], 6)
+		d, err := DecompressWksp(out, dst[:c], 6, DecompressWkspSizeU32(6, maxSymbolValue))
 		if err != nil {
 			t.Fatalf("case %d: %v", i, err)
 		}
 		if !bytes.Equal(out[:d], src) {
 			t.Fatalf("case %d: round trip mismatch", i)
 		}
+	}
+}
+
+// TestDecompressWkspSizeU32 pins FSE_DECOMPRESS_WKSP_SIZE_U32 at the
+// HUF_readStats budget, (6, HUF_TABLELOG_MAX-1) = 219 U32, and at its
+// limits: tableLog 6 fits maxSymbolValue 11, tableLog 5 fits 91.
+func TestDecompressWkspSizeU32(t *testing.T) {
+	const budget = 219
+	if got := DecompressWkspSizeU32(6, 11); got != budget {
+		t.Fatalf("(6, 11) = %d, want %d", got, budget)
+	}
+	if DecompressWkspSizeU32(6, 12) <= budget || DecompressWkspSizeU32(5, 91) > budget || DecompressWkspSizeU32(5, 92) <= budget {
+		t.Fatal("budget limits differ from C")
 	}
 }

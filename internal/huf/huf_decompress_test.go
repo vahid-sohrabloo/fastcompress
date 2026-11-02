@@ -8,6 +8,7 @@ import (
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
 )
 
 // hufStream is one Huffman-compressed input: the table description
@@ -877,4 +878,27 @@ func FuzzHUFDecompressX1VsX2(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestHUFReadStatsFSEWorkspace pins C's FSE workspace budget in
+// HUF_readStats: FSE_decompress_wksp_body (fse_decompress.c) returns
+// tableLog_tooLarge when FSE_DECOMPRESS_WKSP_SIZE(tableLog, maxSymbolValue)
+// exceeds HUF_READ_STATS_WORKSPACE_SIZE = FSE_DECOMPRESS_WKSP_SIZE(6, 11).
+// This well-formed weight header has FSE tableLog 6 and maxSymbolValue 12
+// (weights 12, 5x127, 4, 3, 2, 1, implied 1); C rejects it.
+func TestHUFReadStatsFSEWorkspace(t *testing.T) {
+	desc := []byte{0x0d, 0x11, 0x20, 0x08, 0x82, 0xe0, 0xb7, 0x03, 0xc0, 0x4a, 0x09, 0xc0, 0xce, 0xaa}
+	var w [SymbolValueMax + 1]byte
+	var rank [TableLogMax + 1]uint32
+	if _, _, _, err := ReadStats(w[:], rank[:], desc); err != fse.ErrTableLogTooLarge {
+		t.Fatalf("ReadStats err=%v, want fse.ErrTableLogTooLarge", err)
+	}
+	var dt DTable
+	dt.Init(TableLogMax)
+	if _, err := ReadDTableX1(&dt, desc, 0); err != fse.ErrTableLogTooLarge {
+		t.Fatalf("ReadDTableX1 err=%v", err)
+	}
+	if _, err := ReadDTableX2(&dt, desc, 0); err != fse.ErrTableLogTooLarge {
+		t.Fatalf("ReadDTableX2 err=%v", err)
+	}
 }

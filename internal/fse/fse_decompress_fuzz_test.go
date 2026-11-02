@@ -50,7 +50,7 @@ func FuzzReadNCount(f *testing.F) {
 			}
 		}
 		out := make([]byte, 300)
-		if n, err := DecompressWksp(out, hb, 6); err == nil && n > len(out) {
+		if n, err := DecompressWksp(out, hb, 6, DecompressWkspSizeU32(6, maxSymbolValue)); err == nil && n > len(out) {
 			t.Fatalf("decoded %d > capacity", n)
 		}
 	})
