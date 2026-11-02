@@ -216,9 +216,9 @@ func (r *dictRuns) require(t *testing.T, keys ...string) {
 // dictionary one Encoder serves every input, so the dictionary is attached
 // or copied again for each frame of a reused context: EncodeAll is compared
 // with `cref compress-seq` (one reused ZSTD_CCtx, ZSTD_compress2 per input),
-// the Writer with `cref stream-pipe` (unknown size: always attached) and,
-// with ResetContentSize, `cref stream-pipe -pledged-size` (copied above the
-// cutoff).
+// the Writer with `cref stream-pipe` (1000-byte chunks) or `cref stream`
+// (random chunks), with unknown size (always attached) and, with
+// ResetContentSize, `-pledged-size` (copied above the cutoff).
 func TestDictCref(t *testing.T) {
 	names, inputs := dictInputs(t)
 	var runs dictRuns
@@ -255,26 +255,29 @@ func TestDictCref(t *testing.T) {
 					t.Run("EncodeAll/"+name, func(t *testing.T) { sameFrames(t, d, got[i], want) })
 				}
 
-				// Writer, reused, unknown size and pledged. An empty stream
-				// writes nothing (no WithZeroFrames), unlike cref.
+				// Writer, reused, unknown size and pledged, in 1000-byte
+				// and random chunks. An empty stream writes nothing (no
+				// WithZeroFrames), unlike cref.
 				for _, name := range names {
 					src := inputs[name]
 					if len(src) == 0 {
 						continue
 					}
 					for _, pledged := range []bool{false, true} {
-						sc := streamCase{level: lv.c, checksum: true, chunk: 1000}
-						if pledged {
-							sc.pledged = int64(len(src))
-						}
-						t.Run("Writer/"+sc.String()+"/"+name, func(t *testing.T) {
-							gotS, err := writerStream(e, sc, src)
-							if err != nil {
-								t.Fatal(err)
+						for _, chunk := range []int{1000, 0} {
+							sc := streamCase{level: lv.c, checksum: true, chunk: chunk}
+							if pledged {
+								sc.pledged = int64(len(src))
 							}
-							want := creftest.Run(t, src, append(sc.crefArgs(len(src)), dargs...)...)
-							sameFrames(t, d, gotS, want)
-						})
+							t.Run("Writer/"+sc.String()+"/"+name, func(t *testing.T) {
+								gotS, err := writerStream(e, sc, src)
+								if err != nil {
+									t.Fatal(err)
+								}
+								want := creftest.Run(t, src, append(sc.crefArgs(len(src)), dargs...)...)
+								sameFrames(t, d, gotS, want)
+							})
+						}
 					}
 				}
 			})
