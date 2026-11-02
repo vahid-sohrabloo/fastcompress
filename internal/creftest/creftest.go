@@ -634,8 +634,9 @@ func mustRead(t testing.TB, p string) []byte {
 //     `zstd --rsyncable -T2` frames.
 //
 // Only compressed frames are cached, under os.TempDir()/fastzstd-frames-<hash
-// of the cref and zstd binaries>, in files named after the entry and a hash
-// of its tool, arguments and input, so changed inputs regenerate. Creating a
+// of the cref and zstd binaries>, in files named after the entry and
+// cacheKey (tool, arguments, dictionary contents, input), so changed inputs
+// or dictionaries regenerate. Creating a
 // new hash directory deletes the other fastzstd-frames-* directories. Inputs
 // are generated one job at a time and dropped, so memory stays bounded by
 // the parallel jobs.
@@ -823,10 +824,12 @@ func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
 			if !j.e.noWant {
 				j.e.sum = sha256.Sum256(b)
 			}
-			k := sha256.New()
-			k.Write([]byte(filepath.Base(j.tool) + "\x00" + strings.Join(j.args, "\x00") + "\x00"))
-			k.Write(b)
-			j.e.file = filepath.Join(dir, strings.ReplaceAll(j.name, "/", "__")+"-"+hex.EncodeToString(k.Sum(nil))[:12])
+			key, err := cacheKey(j.tool, j.args, b)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			j.e.file = filepath.Join(dir, strings.ReplaceAll(j.name, "/", "__")+"-"+key)
 			if _, err := os.Stat(j.e.file); err == nil {
 				return
 			}
@@ -864,6 +867,25 @@ func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
 	cat("skippable/after", a, "skippable-frame/s7")
 	cat("skippable/all", "skippable-frame/s15", a, "skippable-frame/s7", b, "skippable-frame/s15big")
 	return m
+}
+
+// cacheKey names a generated frame: a hash of the tool's name, its
+// arguments, the contents of every file an argument names (-dict, -content:
+// a regenerated dictionary at the same path is a new key) and the input.
+func cacheKey(tool string, args []string, in []byte) (string, error) {
+	k := sha256.New()
+	k.Write([]byte(filepath.Base(tool) + "\x00" + strings.Join(args, "\x00") + "\x00"))
+	for i := 1; i < len(args); i++ {
+		if args[i-1] == "-dict" || args[i-1] == "-content" {
+			b, err := os.ReadFile(args[i])
+			if err != nil {
+				return "", err
+			}
+			k.Write(b)
+		}
+	}
+	k.Write(in)
+	return hex.EncodeToString(k.Sum(nil))[:12], nil
 }
 
 // runCmd runs path with args and stdin in, returning stdout.

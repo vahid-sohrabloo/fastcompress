@@ -303,3 +303,28 @@ func TestCrefDecodeErrors(t *testing.T) {
 		t.Errorf("finalize-dict: %d bytes, header % x", len(d), d[:min(8, len(d))])
 	}
 }
+
+func TestCacheKeyDictContent(t *testing.T) {
+	d := filepath.Join(t.TempDir(), "d")
+	key := func(dict []byte) string {
+		t.Helper()
+		if err := os.WriteFile(d, dict, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		k, err := cacheKey("cref", []string{"compress", "-dict", d}, []byte("in"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	a, b := key([]byte("dictionary one")), key([]byte("dictionary two"))
+	if a == b {
+		t.Fatalf("same key %s for different dictionary contents at one path", a)
+	}
+	if a != key([]byte("dictionary one")) {
+		t.Fatal("key is not deterministic")
+	}
+	if _, err := cacheKey("cref", []string{"-dict", d + ".missing"}, nil); err == nil {
+		t.Fatal("missing dictionary file: no error")
+	}
+}
