@@ -16,24 +16,24 @@ import (
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
 )
 
-// Test dictionaries (zstd/testdata):
+// Test dictionaries (zstd/testdata; provenance in testdata/README.md):
 //
-// train.dict (112640 bytes, sha256 e9bdb330278e5323918bde0c1dc8cc0e4cef4a4365fc3f262a9f3ffc5dddf6dc)
-// was trained with zstd v1.5.7 on 200 pieces of 4 KiB of the Silesia
-// corpus, from the repository root:
+// train.dict (112640 bytes, sha256 0b550253d7f093f5d177a5aad747831b5897003c9d28041ca36e09cc6feaac51)
+// was trained with zstd v1.5.7 on the 200 synthetic 4 KiB samples that
+// testdata/gentrain.go writes, from the repository root:
 //
 //	D=$(mktemp -d)
-//	for i in $(seq 0 199); do
-//	  dd if=bench/corpus/silesia.tar of=$D/s$(printf %03d $i) bs=4096 skip=$((i*258)) count=1 status=none
-//	done
+//	go run zstd/testdata/gentrain.go $D
 //	ref/zstd/programs/zstd --train $D/* -o zstd/testdata/train.dict
 //
-// train-12k.dict (12288 bytes, sha256 1344064d77cd31542a3b965d37665f2fcc77708a7e9968302b673b41c3c6c438)
+// train-12k.dict (12288 bytes, sha256 1ce7515fd0f42166981c0374386ed5568cdbe126da794ac84fc496bc18d477ca)
 // is trained on the same samples with --maxdict=12288:
 //
 //	ref/zstd/programs/zstd --train --maxdict=12288 $D/* -o zstd/testdata/train-12k.dict
 //
-// dickens-32k.raw is `head -c 32768 bench/corpus/silesia/dickens`.
+// dickens-32k.raw is the first 32 KiB of Charles Dickens' collected works
+// (public domain; Project Gutenberg header included), as in the Silesia
+// corpus's dickens file: `head -c 32768 bench/corpus/silesia/dickens`.
 
 func readTestdata(t testing.TB, name string) []byte {
 	t.Helper()
