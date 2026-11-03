@@ -530,16 +530,20 @@ func TestDecodeAllTrialCold(t *testing.T) {
 	data := []byte("(\xb5/\xfd\xa000\x04\x00T\x00\x00%00\x01\x000001\x020")
 	raw := readTestdata(t, "dickens-32k.raw")
 	results := map[string]bool{}
-	for _, dst := range [][]byte{nil, make([]byte, 0, 10)} {
+	dsts := [][]byte{nil}
+	for spare := 1; spare <= 2048; spare = spare*2 + 1 {
+		dsts = append(dsts, make([]byte, 0, spare), make([]byte, 0, spare+800))
+	}
+	for _, dst := range dsts {
 		d := newTestDecoder(t, WithDecoderConcurrency(1), WithDecoderDictRaw(0, raw))
 		_, err := d.DecodeAll(data, dst)
 		if err == nil {
 			t.Fatal("no error")
 		}
 		results[errClass(err)] = true
-	}
-	if len(results) != 1 {
-		t.Fatalf("results differ with spare capacity: %v", results)
+		if len(results) != 1 {
+			t.Fatalf("spare %d: results differ: %v", cap(dst), results)
+		}
 	}
 }
 

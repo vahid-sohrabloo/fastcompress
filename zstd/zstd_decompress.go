@@ -562,9 +562,10 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 				// is decoded twice (growth ends tryTight).
 				d.saveBlockState()
 				decodedSize, e = d.decompressBlockInternal(out[:op], cap(out)-op, block, notStreaming)
-				// Over bsMax is not accepted here: with literals placed in
-				// dst, the full room stops such a block earlier, with
-				// another error (FuzzDecodeAllCapacity seed ac1be36c).
+				// Over bsMax is not accepted here, so that such a block
+				// gets the full room's result (the check below names it
+				// the same way today; the guard keeps the tight path from
+				// deciding an invalid block's error on its own).
 				if e == 0 && decodedSize <= bsMax {
 					break
 				}
