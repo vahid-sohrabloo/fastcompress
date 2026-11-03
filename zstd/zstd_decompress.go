@@ -3,7 +3,7 @@ package zstd
 import (
 	"encoding/binary"
 	"math"
-	"slices"
+	"sync/atomic"
 )
 
 // Frame-level decoding. C: lib/decompress/zstd_decompress.c (v1.5.7),
@@ -474,16 +474,25 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 
 	// Go: makes room for min(n, oend-op) bytes at op. The offsets C keeps
 	// as pointers stay valid when the buffer moves; prevDst follows it.
-	reserve := func(n int) {
+	reserve := func(n int) dErr {
 		n = min(n, oend-op)
 		if cap(out)-op < n {
-			// grow by at least cap(out) (no overflow on 386), so honest
-			// frames copy their output O(1) times on average
-			n = min(max(n, cap(out)), oend-op)
-			out = slices.Grow(out[:op], n)
-			out = out[:0:min(cap(out), oend)]
+			// grow the capacity by at least cap(out) (no overflow on 386),
+			// so honest frames copy their output O(1) times on average;
+			// exactly, not with append's rounding (review M7), and to the
+			// whole space when that is at most 25% more
+			c := cap(out) + min(max(n, cap(out)), oend-cap(out))
+			if c >= oend-oend/5 {
+				c = oend
+			}
+			nb, e := d.growBuffer(out[:op], c-op)
+			if e != 0 {
+				return e
+			}
+			out = nb[:0:min(cap(nb), oend)]
 			d.prevDst = out[:cap(out)]
 		}
+		return 0
 	}
 
 	// check
@@ -537,7 +546,9 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 			// Go: room for a whole block and for literals placed after it
 			// (ZSTD_allocateLiteralsBuffer's in-dst test), so the
 			// placement and the checks are those of the full output space.
-			reserve(2*bsMax + 2*wildcopyOverlength + 1)
+			if e := reserve(2*bsMax + 2*wildcopyOverlength + 1); e != 0 {
+				return out[:op], ip, e
+			}
 			dstCap := min(oend, cap(out)) - op
 			decodedSize, e = d.decompressBlockInternal(out[:op], dstCap, block, notStreaming)
 			if e.cCode() == int(dErrDstSizeTooSmall) && dstCap < oend-op {
@@ -546,10 +557,14 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 				e = dErrDecodedBlockTooLarge
 			}
 		case btRaw:
-			reserve(cBlockSize)
+			if e := reserve(cBlockSize); e != 0 {
+				return out[:op], ip, e
+			}
 			decodedSize, e = copyRawBlock(out[op:min(oend, cap(out))], block)
 		case btRLE:
-			reserve(int(bp.origSize))
+			if e := reserve(int(bp.origSize)); e != 0 {
+				return out[:op], ip, e
+			}
 			decodedSize, e = setRLEBlock(out[op:min(oend, cap(out))], block[0], int(bp.origSize))
 		default: // btReserved: getcBlockSize has rejected it
 			return out[:op], ip, dErrCorruptionDetected
@@ -596,6 +611,61 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 		ip += 4
 	}
 	return out, ip, 0
+}
+
+// memBudget is a byte budget that concurrent decodes share (no C
+// counterpart): a 32-bit Decoder's DecodeAll calls charge it for every
+// buffer they allocate, so that together they cannot exhaust the address
+// space (see Decoder).
+type memBudget struct{ left atomic.Int64 }
+
+// newMemBudget returns a budget of n bytes.
+func newMemBudget(n int64) *memBudget {
+	b := &memBudget{}
+	b.left.Store(n)
+	return b
+}
+
+// take takes n bytes from b, or reports that fewer are left.
+func (b *memBudget) take(n int) bool {
+	for {
+		l := b.left.Load()
+		if int64(n) > l {
+			return false
+		}
+		if b.left.CompareAndSwap(l, l-int64(n)) {
+			return true
+		}
+	}
+}
+
+// growBuffer returns b with room for n more bytes after len(b): b itself
+// when it has it, else a copy of b[:len(b)] in an array of exactly
+// len(b)+n bytes. With a budget, that array is charged to it first (and
+// stays charged until releaseBudget, even once replaced):
+// dErrDecoderSizeExceeded when the budget is spent.
+func (d *dctx) growBuffer(b []byte, n int) ([]byte, dErr) {
+	if cap(b)-len(b) >= n {
+		return b, 0
+	}
+	c := len(b) + n
+	if d.budget != nil {
+		if !d.budget.take(c) {
+			return b, dErrDecoderSizeExceeded
+		}
+		d.charged += c
+	}
+	nb := make([]byte, len(b), c)
+	copy(nb, b)
+	return nb, 0
+}
+
+// releaseBudget gives back what the decode charged to the budget.
+func (d *dctx) releaseBudget() {
+	if d.budget != nil {
+		d.budget.left.Add(int64(d.charged))
+	}
+	d.charged = 0
 }
 
 // decompressMultiFrame decodes every frame of src (skipping skippable
@@ -665,7 +735,7 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 		// frameTrustMin. decompressFrame grows the buffer as blocks need it.
 		limit := min(d.maxMemory-min(d.maxMemory, uint64(len(dst)-start)), uint64(math.MaxInt-len(dst)))
 		var frameCap, reserve uint64
-		byFCS, byLimit := false, false
+		byFCS, byLimit, trusted := false, false, false
 		if headerOK && (zfh.dictID == 0 || zfh.dictID == d.dictID) &&
 			max(zfh.windowSize, 1<<windowLogAbsoluteMin) <= d.maxWindowSize {
 			fsi := findFrameSizeInfo(src)
@@ -689,14 +759,38 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 			}
 			reserve = min(frameCap, max(frameTrustMin, frameGuessRatio*compressedSize))
 			if byFCS && frameCap/frameTrustRatio <= compressedSize {
-				reserve = frameCap
+				reserve, trusted = frameCap, true
 			}
 		}
 		// Spare capacity dst already has is not an untrusted reservation:
 		// the frame decodes into it (up to its output space) before any
 		// growth.
-		reserve = max(reserve, min(frameCap, uint64(cap(dst)-len(dst))))
-		dst = slices.Grow(dst, int(reserve))
+		spare := min(frameCap, uint64(cap(dst)-len(dst)))
+		reserve = max(reserve, spare)
+		if !trusted && spare > 0 && spare < frameCap {
+			// Go: without a trusted content size, the frame is first
+			// decoded with the spare capacity as its whole output space (C
+			// one-shot's dstCapacity), so a dst the caller sized for the
+			// output is used without growth. On any error (a frame
+			// larger than the spare capacity among them) the frame is
+			// decoded again as below, from its start, and that result
+			// stands: the result never depends on dst's capacity.
+			cold := d.ddictIsCold
+			buf := dst[len(dst) : len(dst) : len(dst)+int(spare)]
+			d.checkContinuity(buf, int(spare))
+			out, consumed, e := d.decompressFrame(buf, int(spare), src)
+			if e == 0 {
+				dst = dst[:len(dst)+len(out)]
+				src = src[consumed:]
+				continue
+			}
+			d.decompressBeginUsingDDict(fdd)
+			d.ddictIsCold = cold // the trial does not warm the dictionary
+		}
+		ge := dErr(0)
+		if dst, ge = d.growBuffer(dst, int(reserve)); ge != 0 {
+			return dst, ge
+		}
 		buf := dst[len(dst) : len(dst) : len(dst)+int(reserve)]
 
 		// C passes dstCapacity, the frame's output space; the buffer's
@@ -709,10 +803,16 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 		} else if len(dst) == 0 {
 			dst = out // the frame outgrew its reservation: its buffer is the result
 		} else {
-			dst = append(dst, out...) // the frame outgrew its reservation
+			// The frame outgrew its reservation: append it, growing dst by
+			// at least a quarter (as append does) so frames after it
+			// append in amortized O(1).
+			if dst, ge = d.growBuffer(dst, max(len(out), len(dst)/4)); ge != 0 {
+				return dst, ge
+			}
+			dst = append(dst, out...)
 		}
 		if e != 0 {
-			if e.cCode() == int(dErrDstSizeTooSmall) {
+			if e.cCode() == int(dErrDstSizeTooSmall) && e != dErrDecoderSizeExceeded {
 				// Go: name what limited the output space.
 				switch {
 				case byLimit:

@@ -194,6 +194,11 @@ type dctx struct {
 	// maxMemory caps decompressMultiFrame's output (no C counterpart):
 	// WithDecoderMaxMemory, or the WithDecodeAllCapLimit capacity.
 	maxMemory uint64
+	// budget, when set, is charged for the buffers decompressFrames and
+	// decompressFrame allocate (Decoder: shared by a 32-bit Decoder's
+	// DecodeAll calls); charged is what this decode took from it.
+	budget  *memBudget
+	charged int
 
 	// streaming (C: ZSTD_d_stableOutBuffer, the static DCtx and legacy
 	// frames are not ported: the output is always buffered)

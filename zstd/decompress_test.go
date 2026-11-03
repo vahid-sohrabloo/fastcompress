@@ -522,19 +522,19 @@ func TestDecompressGrow(t *testing.T) {
 		want   []byte
 		ratio  float64 // allocation bound, × the output
 	}{
-		// Doubling from 1 MiB: about 2 × the output (2.04 measured); a
+		// Doubling from 1 MiB: about 2 × the output (1.95 measured); a
 		// reservation of only blockSizeMax per compressed block (2.65)
 		// or growth without doubling (5.5) is over the bound.
 		{"no FCS", nil, noFCS, in, 2.3},
 		{"untrusted FCS", nil, withFCS, in, 2.3},
 		// Plus the appends of frames that outgrew their reservation
-		// (4.36 measured; without doubling 7.9).
+		// (3.95 measured; without doubling 7.9).
 		{"multi-frame", []byte("prefix"), slices.Concat(small, noFCS, withFCS),
 			slices.Concat([]byte("prefix"), in[:1000], in, in), 5},
 		// Output already in dst: the frame decodes after it (in dst's
 		// spare capacity when there is room, then in its own grown
 		// buffer, appended); the prefix and the frame's history survive.
-		// Plus the append of the frame (3.01 and 3.25 measured).
+		// Plus the append of the frame (2.90 and 3.01 measured).
 		{"dst prefix", prefix, noFCS, slices.Concat(prefix, in), 4},
 		{"dst prefix, spare capacity", slices.Grow(slices.Clone(prefix), 3<<20), withFCS,
 			slices.Concat(prefix, in), 4},
