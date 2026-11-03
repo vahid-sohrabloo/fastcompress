@@ -477,11 +477,132 @@ func TestDecompressEmptyBlocks(t *testing.T) {
 				}
 				// + 256 KiB for the dctx and its tables
 				if max := bound + 256<<10; alloc > max {
-					t.Errorf("%s: %d input bytes allocated %d bytes (> %d)", name, len(in), alloc, max)
+					t.Fatalf("%s: %d input bytes allocated %d bytes (> %d)", name, len(in), alloc, max)
 				}
 			}
 		}
 	}
+}
+
+// growInput returns n bytes of a 200 KiB chunk of random letters repeated
+// with a byte changed every 4 KiB: literals Huffman-coded, matches 200 KiB
+// back, across each point where decompressFrame grows its buffer.
+func growInput(n int) []byte {
+	r := rand.New(rand.NewPCG(9, 9))
+	chunk := make([]byte, 200<<10)
+	for i := range chunk {
+		chunk[i] = 'a' + byte(r.IntN(26))
+	}
+	in := make([]byte, n)
+	for i := range in {
+		in[i] = chunk[i%len(chunk)]
+		if i%4096 == 0 {
+			in[i] = 'A' + byte(r.IntN(26))
+		}
+	}
+	return in
+}
+
+// TestDecompressGrow: DecodeAll of 16 MiB frames whose output space is not
+// reserved up front (no FCS, or an FCS over frameTrustRatio × the
+// compressed size), alone and after a frame and a prefix in dst: the buffer
+// grows several times with history in it, and must keep it (review N1).
+// The bytes allocated bound the growth to doubling (about 2 × the output).
+func TestDecompressGrow(t *testing.T) {
+	in := growInput(16 << 20)
+	noFCS := malEncodeNoFCS(t, in)
+	withFCS := malEncode(t, in, true)
+	var fh frameHeader
+	if _, e := getFrameHeaderAdvanced(&fh, withFCS); e != 0 || fh.frameContentSize != uint64(len(in)) || fh.frameContentSize/frameTrustRatio <= uint64(len(withFCS)) {
+		t.Fatalf("FCS frame: %d bytes, FCS %d: want an untrusted FCS", len(withFCS), fh.frameContentSize)
+	}
+	small := malEncode(t, in[:1000], false)
+	for _, c := range []struct {
+		name   string
+		prefix []byte
+		src    []byte
+		want   []byte
+		ratio  float64 // allocation bound, × the output
+	}{
+		// Doubling from 1 MiB: about 2 × the output (2.04 measured); a
+		// reservation of only blockSizeMax per compressed block (2.65)
+		// or growth without doubling (5.5) is over the bound.
+		{"no FCS", nil, noFCS, in, 2.3},
+		{"untrusted FCS", nil, withFCS, in, 2.3},
+		// Plus the appends of frames that outgrew their reservation
+		// (4.36 measured; without doubling 7.9).
+		{"multi-frame", []byte("prefix"), slices.Concat(small, noFCS, withFCS),
+			slices.Concat([]byte("prefix"), in[:1000], in, in), 5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			alloc := uint64(math.MaxUint64)
+			for range 2 {
+				var ms0, ms1 runtime.MemStats
+				runtime.ReadMemStats(&ms0)
+				got, err := newDCtx().decompressMultiFrame(c.prefix, c.src, nil)
+				runtime.ReadMemStats(&ms1)
+				if err != nil || !bytes.Equal(got, c.want) {
+					t.Fatalf("(%d bytes, %v), want %d bytes, equal %v", len(got), err, len(c.want), bytes.Equal(got, c.want))
+				}
+				alloc = min(alloc, ms1.TotalAlloc-ms0.TotalAlloc)
+			}
+			// + 1 MiB for the dctx and its tables
+			if max := uint64(c.ratio*float64(len(c.want))) + 1<<20; alloc > max {
+				t.Fatalf("allocated %d bytes for %d bytes of output (> %d)", alloc, len(c.want), max)
+			}
+			t.Logf("allocated %.2f × the output", float64(alloc)/float64(len(c.want)))
+		})
+	}
+}
+
+// TestDecompressGrowBlockOverflow pins review N2: a corrupt compressed block
+// regenerating about 13 MB (100 RLE-mode sequences of 131074 bytes each) in
+// a frame whose FCS (10 MiB) is not trusted, so only 1 MiB is reserved. C
+// one-shot runs out of the 10 MiB space (dstSize_tooSmall, which 01bf1a9
+// named ErrFrameSizeExceeded). The grown buffer runs out first, and whether
+// the block would have fit the space is not known, so the error is the
+// block's (over blockSizeMax either way): dErrDecodedBlockTooLarge,
+// ErrUnexpectedBlockSize.
+func TestDecompressGrowBlockOverflow(t *testing.T) {
+	frame := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x80, 7 << 3} // FCS 4 bytes, window 128 KiB
+	frame = binary.LittleEndian.AppendUint32(frame, 10<<20)
+	frame = append(frame, malBlockHeader(btRaw, 8, false)...)
+	frame = append(frame, "abcdefgh"...)
+	// Sequences: LL code 0, OF code 2 with 0 (offset 1), ML code 52 with
+	// 0xFFFF (65539+65535). Written as the encoder does (LL, ML, OF bits
+	// per sequence; RLE states take no bits), then the end mark.
+	var bits []byte
+	var acc uint64
+	var n uint
+	put := func(v uint64, nb uint) {
+		acc |= v << n
+		for n += nb; n >= 8; n -= 8 {
+			bits = append(bits, byte(acc))
+			acc >>= 8
+		}
+	}
+	const nbSeq = 100
+	for range nbSeq {
+		put(0xFFFF, 16) // ML
+		put(0, 2)       // OF
+	}
+	put(1, 1)
+	put(0, 7) // flush the partial byte
+	body := append([]byte{0x00, nbSeq, 0x54, 0, 2, 52}, bits...)
+	frame = append(frame, malCBlock(body, false).bytes()...)
+	for i := range 200 {
+		frame = append(frame, malBlockHeader(btRaw, 0, i == 199)...)
+	}
+
+	if _, cerr := creftest.DecodeCRef(t, frame); cerr == nil || cerr.Code != dErrDstSizeTooSmall.cCode() {
+		t.Fatalf("C one-shot: %v, want dstSize_tooSmall", cerr)
+	}
+	got, e := newDCtx().decompressFrames(nil, frame, nil)
+	if e != dErrDecodedBlockTooLarge || string(got) != "abcdefgh" {
+		t.Fatalf("Go: (%q, %d), want (\"abcdefgh\", dErrDecodedBlockTooLarge)", got, e)
+	}
+	_, err := dctxDecode(frame)
+	checkSentinel(t, "block overflow", err, ErrUnexpectedBlockSize)
 }
 
 // TestDecompressFrameGrowExtDict: a frame decoded after a raw-content

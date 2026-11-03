@@ -657,6 +657,10 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 			if frameCap > limit {
 				frameCap, byLimit = limit, true
 			}
+			// When the walk fails, the frame's end is unknown: the rest of
+			// the input (later frames, junk) stands in for its compressed
+			// size, so the reservation is still at most frameTrustRatio ×
+			// the input.
 			compressedSize := uint64(len(src))
 			if fsi.err == 0 {
 				compressedSize = uint64(fsi.compressedSize)
