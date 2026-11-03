@@ -329,6 +329,8 @@ func trainDegenerate(t testing.TB) []struct {
 		{"split-negative", gen[:20], 4096, CoverParams{D: 6, Steps: 2, SplitPoint: -3}},
 		{"accel-11", gen[:20], 4096, CoverParams{Accel: 11}},
 		{"f-32", gen[:20], 4096, CoverParams{K: 100, D: 8, F: 32}},
+		{"f-32-search", gen[:40], 4096, CoverParams{D: 8, Steps: 2, F: 32}},
+		{"f-32-search-d", gen[:40], 4096, CoverParams{K: 200, F: 32}},
 		{"d-7", gen[:20], 4096, CoverParams{K: 100, D: 7}},
 		{"d-huge", gen[:20], 4096, CoverParams{K: 1 << 30, D: 1 << 29}},
 		{"small-train", smallTrain, 4096, CoverParams{}},
@@ -354,7 +356,8 @@ func TestTrainDictDegenerate(t *testing.T) {
 }
 
 // checkTrainOrCrash is checkTrain, except that where C crashes (undefined
-// behaviour) Go must return an error.
+// behaviour) Go must return an error marked undefined, or C's malloc
+// failure code where Go guards it up front.
 func checkTrainOrCrash(t *testing.T, mode string, samples [][]byte, maxDict int, p CoverParams) {
 	t.Helper()
 	var args []string
@@ -371,8 +374,9 @@ func checkTrainOrCrash(t *testing.T, mode string, samples [][]byte, maxDict int,
 		default:
 			_, _, err = TrainDictFastCover(samples, maxDict, p)
 		}
-		if err == nil {
-			t.Fatalf("C crashes (%s), Go returned no error", cerr.Name)
+		var ce *buildDictError
+		if !errors.As(err, &ce) || !(ce.undefined || ce.code == cErrMemoryAllocation) {
+			t.Fatalf("C crashes (%s), Go returned %v, want an undefined-behaviour error", cerr.Name, err)
 		}
 		return
 	}
@@ -407,20 +411,22 @@ func TestTrainDictNegativeSize(t *testing.T) {
 }
 
 // FuzzTrainDict trains on arbitrary samples (split from blob at the cut
-// lengths in cuts) with a trainer and parameters picked by mode. Nothing
-// may panic; the dictionary and parameters, or the C error code, must
-// equal cref's (where C crashes, Go must return an error).
+// lengths in cuts) with a trainer and parameters picked by mode, and a
+// level and a maxDict above 64 KiB picked by sel. Nothing may panic; the
+// dictionary and parameters, or the C error code, must equal cref's
+// (where C crashes, Go must return an error; at levels 13 and up, Go may
+// refuse as not ported). F and K stay small: large ones take gigabytes.
 func FuzzTrainDict(f *testing.F) {
 	gen := buildDictSamples(f)
-	f.Add(uint8(0), uint16(4096), slices.Concat(gen[:20]...), []byte{64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64})
-	f.Add(uint8(1), uint16(300), bytes.Repeat([]byte{'x'}, 5000), []byte{5, 5, 5, 5, 5, 5, 5, 5})
-	f.Add(uint8(2), uint16(1024), []byte{}, []byte{0, 0, 0, 0, 0, 0})
-	f.Add(uint8(3), uint16(2000), []byte("abcdefghijklmnop"), []byte{0, 0, 0, 0, 0, 0, 0, 1})
-	f.Add(uint8(4), uint16(256), slices.Concat(gen[:3]...), []byte{1, 1, 1, 1, 1, 1, 1})
-	f.Add(uint8(5), uint16(9000), slices.Concat(gen[:6]...), []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
-	f.Add(uint8(6), uint16(255), []byte{}, []byte{})
-	f.Add(uint8(7), uint16(65535), slices.Concat(gen[:40]...), []byte{})
-	f.Fuzz(func(t *testing.T, mode uint8, maxDict uint16, blob, cuts []byte) {
+	f.Add(uint8(0), uint8(0), uint16(4096), slices.Concat(gen[:20]...), []byte{64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64})
+	f.Add(uint8(1), uint8(5), uint16(300), bytes.Repeat([]byte{'x'}, 5000), []byte{5, 5, 5, 5, 5, 5, 5, 5})
+	f.Add(uint8(2), uint8(0), uint16(1024), []byte{}, []byte{0, 0, 0, 0, 0, 0})
+	f.Add(uint8(3), uint8(9), uint16(2000), []byte("abcdefghijklmnop"), []byte{0, 0, 0, 0, 0, 0, 0, 1})
+	f.Add(uint8(4), uint8(24), uint16(256), slices.Concat(gen[:3]...), []byte{1, 1, 1, 1, 1, 1, 1})
+	f.Add(uint8(5), uint8(3), uint16(9000), slices.Concat(gen[:6]...), []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+	f.Add(uint8(6), uint8(6), uint16(255), []byte{}, []byte{})
+	f.Add(uint8(7), uint8(7), uint16(65535), slices.Concat(gen[:40]...), []byte{})
+	f.Fuzz(func(t *testing.T, mode, sel uint8, maxDict uint16, blob, cuts []byte) {
 		if len(blob) > 256<<10 || len(cuts) > 2048 {
 			return
 		}
@@ -446,9 +452,23 @@ func FuzzTrainDict(f *testing.F) {
 			p.F = 12
 			p.Accel = uint32(mode>>6) + 1
 		}
+		p.Level = []int{0, 1, 3, 7, 11, 13, 19, -2}[sel&7]
+		size := int(maxDict) + int(sel>>3&3)<<16
 		if trainer == "train" {
 			p = CoverParams{}
 		}
-		checkTrainOrCrash(t, trainer, samples, int(maxDict), p)
+		if p.Level >= 13 {
+			var err error
+			if trainer == "train-cover" {
+				_, _, err = TrainDictCover(samples, size, p)
+			} else {
+				_, _, err = TrainDictFastCover(samples, size, p)
+			}
+			var ce *buildDictError
+			if errors.As(err, &ce) && ce.notPorted {
+				return
+			}
+		}
+		checkTrainOrCrash(t, trainer, samples, size, p)
 	})
 }

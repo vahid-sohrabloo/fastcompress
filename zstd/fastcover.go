@@ -4,8 +4,6 @@
 
 package zstd
 
-import "strconv"
-
 const (
 	fastCoverMaxF               = 31   // C: FASTCOVER_MAX_F
 	fastCoverMaxAccel           = 10   // C: FASTCOVER_MAX_ACCEL
@@ -92,10 +90,12 @@ func fastCoverCheckParameters(p *CoverParams, maxDictSize uint64, f, accel uint3
 // newFastCoverCtx prepares the context for d: the frequency of each dmer
 // hash in the training samples. C: fastcover.c:FASTCOVER_ctx_init
 // (with FASTCOVER_computeFrequency). C allocates the 4 << f bytes table
-// even for an f its parameter check rejects later; from f 32 on that fails
-// or is not meaningful, and Go returns C's allocation error up front. So
-// it does on 32-bit platforms from f 27 on (6 << f bytes per search would
-// not fit; Go cannot recover from a failed allocation as C does).
+// even for an f its parameter check then rejects (in a search, for every
+// candidate): from f 32 on, Go returns the search's result, GENERIC,
+// without allocating. (C's calloc succeeds under overcommit up to about
+// f 35, then fails with memory_allocation: machine-dependent.) On 32-bit
+// platforms, tables (10 << f bytes with a worker's copies) and samples
+// beyond 1 GiB give memory_allocation (see trainSamples.fits32).
 func newFastCoverCtx(s *trainSamples, d uint32, splitPoint float64, f uint32, accelParams fastCoverAccel) (*fastCoverCtx, error) {
 	sp, err := s.split(d, splitPoint)
 	if err != nil {
@@ -103,9 +103,13 @@ func newFastCoverCtx(s *trainSamples, d uint32, splitPoint float64, f uint32, ac
 	}
 	ctx := &fastCoverCtx{s: s, sp: sp, d: d, f: f, accelParams: accelParams}
 	// Initialize frequency array of size 2^f
-	if f > fastCoverMaxF || (strconv.IntSize == 32 && f > 26) {
-		return nil, trainError(cErrMemoryAllocation, "frequency table of 2^f entries")
+	if f > fastCoverMaxF {
+		return nil, trainError(int(dErrGeneric), "f above 31: every candidate fails")
 	}
+	if !s.fits32(10 << f) {
+		return nil, trainError(cErrMemoryAllocation, "tables too large for a 32-bit platform")
+	}
+	s.concat()
 	ctx.freqs = make([]uint32, 1<<f)
 	// Computing frequencies
 	readLength := uint64(max(d, 8))

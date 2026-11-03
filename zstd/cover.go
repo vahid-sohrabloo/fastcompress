@@ -11,7 +11,6 @@ import (
 	"encoding/binary"
 	"slices"
 	"sort"
-	"strconv"
 )
 
 const coverDefaultSplitPoint = 1.0 // C: COVER_DEFAULT_SPLITPOINT
@@ -142,7 +141,10 @@ func coverCheckParameters(p *CoverParams, maxDictSize uint64) bool {
 // little-endian load for d <= 8), ties broken by position. Only the
 // grouping of equal dmers, positions ascending, reaches the output (a
 // dmerID merely names a group), and any sort by dmer then position gives
-// it.
+// it: the output is byte-identical to C on glibc's qsort_r mergesort path,
+// which is stable. Where C's qsort is not (glibc's quicksort fallback above
+// a quarter of physical memory, macOS, MSVC, musl), C's own output depends
+// on the platform.
 func newCoverCtx(s *trainSamples, d uint32, splitPoint float64) (*coverCtx, error) {
 	sp, err := s.split(d, splitPoint)
 	if err != nil {
@@ -156,12 +158,12 @@ func newCoverCtx(s *trainSamples, d uint32, splitPoint float64) (*coverCtx, erro
 		return nil, trainError(cErrMemoryAllocation, "training samples smaller than a dmer")
 	}
 	ctx.suffixSize = sp.trainSize + 1 - readLen
-	// Go guard: on 32-bit platforms C's mallocs fail long before 4 GiB;
-	// above 1 GiB of tables (8 bytes per dmer) Go returns C's error rather
-	// than an unrecoverable out-of-memory.
-	if strconv.IntSize == 32 && ctx.suffixSize > 1<<30/8 {
-		return nil, trainError(cErrMemoryAllocation, "suffix array too large for a 32-bit platform")
+	// Go guard (32-bit): suffix and dmerAt, and a worker's frequency copy,
+	// 12 bytes per dmer.
+	if !s.fits32(12 * ctx.suffixSize) {
+		return nil, trainError(cErrMemoryAllocation, "tables too large for a 32-bit platform")
 	}
+	s.concat()
 	suffix := make([]uint32, ctx.suffixSize)
 	ctx.dmerAt = make([]uint32, ctx.suffixSize)
 	for i := range suffix {

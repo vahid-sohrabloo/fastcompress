@@ -38,8 +38,9 @@ header (C writes none for raw content); everything after that field is C's.
 - `TrainDict`, `TrainDictCover`, `TrainDictFastCover` and `CoverParams`
   are extensions: C's dictionary trainers (`ZDICT_trainFromBuffer`, COVER
   and fastCover), byte-identical to C v1.5.7, parameters included. Levels
-  that would make C compress with btultra, btultra2 or long-distance
-  matching (not ported) return an error.
+  that would make C compress with btultra, btultra2, the btopt post-block
+  splitter or long-distance matching (not ported; C levels 13 and up)
+  return an error.
 - `EncoderLevelFromZstd` maps a zstd level to the highest `EncoderLevel`
   whose C level (1, 3, 7, 11) does not exceed it.
 

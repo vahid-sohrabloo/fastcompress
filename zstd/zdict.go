@@ -83,7 +83,7 @@ type buildDictError struct {
 	code int    // C: ZSTD_ErrorCode
 	err  string // the failing step's error, if it has a Go one
 	// notPorted: C would go on, through a path that is not ported (LDM,
-	// the btultra and btultra2 strategies)
+	// btultra, btultra2, the btopt post-block splitter)
 	notPorted bool
 	// undefined: C's behaviour is undefined here (it crashes)
 	undefined bool
@@ -207,8 +207,9 @@ func (c *cctx) compressBlockDeprecated(dst, src []byte) (int, error) {
 // cut to one; samples the context rejects as larger than its own block size
 // are skipped. C: zdict.c:ZDICT_countEStats
 //
-// It fails only for a strategy this port does not have (btultra and
-// btultra2, C levels 13 and up for small samples), where C would go on.
+// It fails only for what this port does not have (btultra, btultra2, and
+// btopt's post-block splitter with windowLog >= 17: C levels 13 and up),
+// where C would go on.
 func countEStats(c *cctx, cd *cdict, windowLog uint32, st *entropyStats, src, work []byte, debug io.Writer) error {
 	if maxSize := min(blockSizeMax, 1<<windowLog); len(src) > maxSize {
 		src = src[:maxSize] // protection vs large samples
@@ -475,7 +476,8 @@ func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [
 // Precondition: level must not select C's long-distance matcher (btopt or
 // above with windowLog >= 27, reachable from C level 22 with a 64 MiB
 // history): it is not ported, and analyzeEntropy returns an error instead.
-// So it does for levels that select btultra or btultra2 (not ported either)
+// So it does for levels that select btultra, btultra2 or the btopt
+// post-block splitter (not ported either)
 // when a sample is compressed.
 func finalizeDictionary(content []byte, samples [][]byte, level int, dictID uint32, reps [repNum]uint32, debug io.Writer) ([]byte, error) {
 	return finalizeDictionaryCap(content, samples, level, dictID, reps, uint64(len(content))+zdictCapacityExtra, debug)

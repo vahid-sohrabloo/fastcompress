@@ -23,7 +23,10 @@ type CoverParams struct {
 	K     uint32 // segment size; 0 with D 0 or set: search 50..2000
 	D     uint32 // dmer size; 0: search 6 and 8 (fastCover: 6 or 8 only)
 	Steps uint32 // number of k values searched (0: 40)
-	F     uint32 // fastCover: log2 of the frequency table size, 1..31 (0: 20)
+	// F is fastCover's log2 of the frequency table size, 1..31 (0: 20).
+	// Tables take 4 << F bytes, plus 6 << F per concurrently tried
+	// candidate, all written: 12 GiB per candidate at F 31 (as in C).
+	F     uint32
 	Accel uint32 // fastCover: acceleration, 1..10 (0: 1)
 	// SplitPoint is the share of samples trained on during the search, the
 	// rest being used to test (0: 1.0 for COVER, 0.75 for fastCover).
@@ -61,8 +64,10 @@ func TrainDict(samples [][]byte, maxDictSize int) ([]byte, error) {
 // Extension limits: levels that make C compress with what this port does
 // not have are refused with an error rather than giving other bytes than
 // C: the btultra and btultra2 strategies (C levels 13 and up for small
-// samples, 16 and up otherwise) and long-distance matching (C level 22
-// with a dictionary or test sample of 64 MiB or more).
+// samples, 16 and up otherwise), the btopt post-block splitter (btopt with
+// windowLog 17 or more: C levels 13 to 16 at some sizes) and long-distance
+// matching (C level 22 with a dictionary or test sample of 64 MiB or
+// more).
 func TrainDictCover(samples [][]byte, maxDictSize int, p CoverParams) ([]byte, CoverParams, error) {
 	s, err := newTrainSamples(samples, maxDictSize)
 	if err != nil {
@@ -86,8 +91,9 @@ func TrainDictCover(samples [][]byte, maxDictSize int, p CoverParams) ([]byte, C
 // ZDICT_optimizeTrainFromBuffer_fastCover when p.K or p.D is 0, otherwise
 // ZDICT_trainFromBuffer_fastCover.
 //
-// The frequency tables take 6 << F bytes per concurrent search (C: the
-// same per thread), 6 MiB at the default F.
+// The frequency tables take 4 << F bytes plus 6 << F per concurrently
+// tried candidate, which copies them (C: the same per thread): 10 MiB for
+// one candidate at the default F, 12 GiB per candidate at F 31.
 func TrainDictFastCover(samples [][]byte, maxDictSize int, p CoverParams) ([]byte, CoverParams, error) {
 	s, err := newTrainSamples(samples, maxDictSize)
 	if err != nil {
@@ -138,9 +144,8 @@ type trainSamples struct {
 	total   uint64   // C: COVER_sum of all samples
 }
 
-// newTrainSamples concatenates the samples, as C takes them, unless their
-// total is too large to train on (the trainers then fail before reading
-// them).
+// newTrainSamples sizes the samples; concat copies them later, once C's
+// checks before reading them have passed.
 func newTrainSamples(samples [][]byte, maxDictSize int) (*trainSamples, error) {
 	if maxDictSize < 0 {
 		return nil, errors.New("zstd: negative dictionary size")
@@ -150,16 +155,30 @@ func newTrainSamples(samples [][]byte, maxDictSize int) (*trainSamples, error) {
 		s.offsets[i+1] = s.offsets[i] + uint64(len(b))
 	}
 	s.total = s.offsets[len(samples)]
-	if s.total >= trainMaxSamplesSize {
-		return s, nil
+	return s, nil
+}
+
+// concat copies the samples into one buffer, as C takes them (once).
+func (s *trainSamples) concat() {
+	if s.buf != nil || s.total == 0 {
+		return
 	}
+	samples := s.list
 	s.buf = make([]byte, 0, s.total)
 	s.list = make([][]byte, len(samples))
 	for i, b := range samples {
 		s.buf = append(s.buf, b...)
 		s.list[i] = s.buf[s.offsets[i]:s.offsets[i+1]:s.offsets[i+1]]
 	}
-	return s, nil
+}
+
+// fits32 is the Go guard of 32-bit platforms, where C's mallocs fail long
+// before Go can allocate (and a failed Go allocation is fatal): the sample
+// copy plus tables of tableBytes must fit 1 GiB. The search runs one
+// candidate at a time there (trainWorkers), so tableBytes counts one
+// worker's copies.
+func (s *trainSamples) fits32(tableBytes uint64) bool {
+	return strconv.IntSize == 64 || s.total+tableBytes <= 1<<30
 }
 
 // sum is the total size of the first n samples. C: cover.c:COVER_sum
@@ -203,7 +222,8 @@ type coverEpochs struct{ num, size uint32 }
 
 // computeEpochs divides nbDmers dmers into epochs of at least 10 * k
 // dmers. C: cover.c:COVER_computeEpochs (U32 arithmetic). Where C divides
-// by zero (no dmers, or 10 * k wrapping to 0) it returns an error.
+// by zero (no dmers) it returns an error. (When 10 * k wraps to 0, C returns
+// before dividing, and so does this.)
 func computeEpochs(maxDictSize, nbDmers, k, passes uint32) (coverEpochs, error) {
 	minEpochSize := k * 10
 	var e coverEpochs
@@ -334,7 +354,7 @@ const (
 // ZSTD_compressBegin_usingCDict_internal, ZSTD_compressBegin_internal and
 // ZSTD_compressEnd_public. Parameters for which C enables long-distance
 // matching are refused (LDM is not ported), and so are the strategies this
-// port does not have (btultra, btultra2).
+// port does not have (btultra, btultra2, the btopt post-block splitter).
 func (c *cctx) compressUsingCDict(dst, src []byte, cd *cdict) (int, error) {
 	pledgedSrcSize := uint64(len(src))
 	useCDict := pledgedSrcSize < cdictParamsSrcSizeCutoff ||
@@ -381,7 +401,7 @@ func (c *cctx) compressUsingCDict(dst, src []byte, cd *cdict) (int, error) {
 		c.dictID = dictID
 	}
 	n, err := c.compressEnd(dst, src)
-	if errors.Is(err, errStrategyUnsupported) { // btultra and btultra2 are not ported
+	if errors.Is(err, errStrategyUnsupported) { // btultra, btultra2, the post-block splitter
 		return 0, &buildDictError{code: int(dErrGeneric), err: err.Error(), notPorted: true}
 	}
 	if err != nil {
@@ -476,13 +496,17 @@ func (t *trainSearch) result() ([]byte, CoverParams, error) {
 
 // trainWorkers is the number of goroutines a search may use when each
 // needs workerMemory bytes: GOMAXPROCS, within a budget of a quarter of
-// the Go memory limit (1 GiB without one), at least 1.
+// the Go memory limit (1 GiB without one), at least 1; 1 on 32-bit
+// platforms.
 func trainWorkers(workerMemory uint64) int {
 	budget := uint64(1 << 30)
 	if limit := debug.SetMemoryLimit(-1); limit != math.MaxInt64 {
 		budget = uint64(limit) / 4
 	}
 	n := runtime.GOMAXPROCS(0)
+	if strconv.IntSize == 32 {
+		return 1 // see trainSamples.fits32
+	}
 	if workerMemory > 0 {
 		n = min(n, int(min(budget/workerMemory, uint64(n))))
 	}
