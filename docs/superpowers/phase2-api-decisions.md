@@ -66,23 +66,43 @@ Tasks 4 and 9 must either mirror each of these or list it as a deliberate deviat
 
 #### Streaming decoding (Task 11): `decompressStream`
 
-`dctx.decompressStream` is C's `ZSTD_decompressStream` (buffered output only; `ZSTD_d_stableOutBuffer`, static contexts and legacy frames are not ported). `TestDecompressStreamErrorsCref` compares it with `cref dstream` byte for byte and C error code for error code. Go changes:
+`dctx.decompressStream` is C's `ZSTD_decompressStream` (buffered output only; `ZSTD_d_stableOutBuffer`, static contexts and legacy frames are not ported). `TestDecompressStreamErrorsCref` compares it with `cref dstream` byte for byte and C error code for error code, except for the deviations below, which it names.
 
-- **Buffers grow on demand.** C allocates `inBuff` and `outBuff` at the sizes the frame header implies (up to window + 2 × blockSizeMax + 64). Go keeps those sizes as limits and allocates as the data needs: the input buffer as a block is loaded, the round buffer as output is written (doubling). Before the round buffer wraps, it gets its full size, so the extDict stays in the same memory as in C. `TestStreamAllocBound` pins this: a 2^29 window or FCS 2^60 header with 50 bytes of a block allocates under 64 KiB.
+**Controller ruling (fix round 1): Review Focus 5/6 win over streaming C.** The stream's result must not depend on how the input is cut, and must equal `DecodeAll`'s: the same output before an error and the same error class. Streaming C fails both rules. With `cref dstream -out-size 4096`, a frame with FCS 48, a 10-byte raw block and an empty last block decodes to 10 bytes with no error at 1-byte chunks. At 1000-byte chunks, the single-pass shortcut runs one-shot C and returns corruption_detected. `TestDecompressStreamDecodeAll` pins these frames at chunks 1, 7, 1000 and whole input. `FuzzDecompressStream` requires `DecodeAll`'s result for any input, apart from its two exceptions below.
+
+Deliberate deviations from streaming C:
+
+- **(a) The FCS is checked at every frame end, and as blocks are decoded.**
+  - C checks the content size only after a non-empty last block. Any frame that ends with an empty last block skips the check, including one that delivered 10 of its declared 48 bytes. Go checks it there too, giving `ErrFrameSizeMismatch`.
+  - A block that takes the frame past its FCS fails before any of it is delivered, giving `ErrFrameSizeExceeded` as one-shot does. A raw block is checked before its first byte is written. C would stream such a block in pieces and fail only at the frame's end.
+  - When the last block leaves the frame short of its FCS, that block is delivered first, then `ErrFrameSizeMismatch` is returned (`dctx.endErr`), as `DecodeAll` delivers it.
+- **(b) A compressed block of size 0 is rejected** with `ErrBlockTooSmall`, as one-shot does. C skips it as empty.
+- **(c) A skippable frame of size 0xFFFFFFF8 or more is rejected once its header is read.** This is `readSkippableFrameSize`'s frameParameter_unsupported, the corrupt error `DecodeAll` gives. C waits for the content. The bufferless API does the same.
+- **(d) On an error, `in.pos` and `out.pos` report what was consumed and written.** C returns before updating them, so it drops what the failing call wrote; with the shortcut that is the whole frame.
+- **The single-pass shortcut** runs `DecodeAll`'s frame decoding (`decompressFrames`: its output space and checks, decoding in place in `out.dst`), so it gives the result the stream path gives. It runs only when the frame starts where the call's input starts. C also tries it from that point when the header began in an earlier call. From there C may decode the bytes as if they were a frame.
+- **An RLE block's header size (1) is not checked against blockSizeMax.** One-shot decoding checks the run length when it decodes the block. A run longer than blockSizeMax fails without memory being made for it (C writes it, then rejects it).
+
+Two cases remain where the stream cannot equal `DecodeAll`:
+
+- **Input cut short.** One-shot decoding fails first where a block runs past the input's end (`io.ErrUnexpectedEOF`). The stream fails the same way, or on what it checked before the cut, such as a block header. It also delivers the received part of a cut raw block.
+- **A block that regenerates too much.**
+  - `DecodeAll` stops it at its output space: the FCS, or block count × blockSizeMax, which a stream cannot know.
+  - The stream stops it at its room: 2 × blockSizeMax + 65, or its FCS-sized buffer.
+  - The two may name `ErrFrameSizeExceeded` and `ErrUnexpectedBlockSize` differently. Or the one with more room may go on and fail the block on another check.
+  - The output before that block is the same.
+
+A third case is chunk-dependent, but only for invalid frames:
+
+- **Match offsets beyond the frame's window** (not single segment). The round buffer holds the window plus 2 blocks; how much more history is left depends on where it wrapped. A raw block cut by the input moves that point, as in C, because C checks the wrap after every flush. Such an offset may fail (`ErrWindowSizeTooSmall`) in the stream, while `DecodeAll`, which keeps all output, or the shortcut, may accept it.
+
+Other Go changes:
+
+- **Buffers grow on demand.** C allocates `inBuff` and `outBuff` at the sizes the frame header implies (up to window + 2 × blockSizeMax + 64). Go keeps those sizes as limits and allocates as the data needs: the input buffer as a block is loaded, the round buffer as output is written (doubling). Before the round buffer wraps, it gets its full size, so the extDict stays in the same memory as in C. `TestStreamAllocBound` pins this: a 2^29 window or FCS 2^60 header with 50 bytes of a block allocates under 64 KiB, and so does a 2 MiB RLE run.
 - **Room for a compressed block** (`block-room`): Go makes room for 2 × blockSizeMax + 65 bytes, not C's whole remaining buffer. A block that runs past that room but would still fit C's buffer gets `dErrDecodedBlockTooLarge` (corruption_detected, as C's "Decompressed Block Size Exceeds Maximum"). C says dstSize_tooSmall when the block also runs past its own buffer. Both are `ErrUnexpectedBlockSize`.
-- **Single-pass shortcut.** C runs one-shot decoding when a whole frame with a content size is in the call's input and fits the output. Go does the same through `decompressFrame`, which adds the streaming checks: `window-limit` and `block-over-max`, as in the one-shot table above.
-- **Dictionary selection** happens at the frame header, as in `decompressFrames`, with the same deviations (a)–(c). `dctx.ddict` is the default dictionary (C's `ddict`, `ZSTD_use_indefinitely`).
+- **Dictionary selection** happens at the frame header, as in `decompressFrames`, with the same deviations (a)–(c). `dctx.ddict` is the default dictionary (C's `ddict`, `ZSTD_use_indefinitely`). `reset(false)` drops it and the set (`ddicts`), as C's `ZSTD_clearDict` and `refMultipleDDicts = ZSTD_rmd_refSingleDDict` do.
 - **Error names** (same C code, the sentinel `DecodeAll` gives):
-  - A "Block Size Exceeds Maximum" header for a compressed block is `dErrCBlockSizeTooLarge` (`ErrCompressedSizeTooBig`). For a raw or RLE block it is `dErrDecodedBlockTooLarge`.
-  - A frame whose round buffer is its FCS (no wrap) and that overflows it with less than blockSizeMax left is `dErrFrameSizeExceeded`.
-
-Streaming C behaviours that differ from one-shot C. Go follows streaming C; Task 12 must keep or list each of them:
-
-- **Output on error.** On an error, C returns before it updates `in.pos` and `out.pos`, so the bytes the failing call wrote are not delivered. Bytes from earlier calls are delivered.
-- **Skippable size 0xFFFFFFF8–0xFFFFFFFF.** Streaming C waits for the content, which ends in `io.ErrUnexpectedEOF`. One-shot C returns frameParameter_unsupported (corrupt).
-- **An empty last block skips the FCS check.** `ZSTD_decompressContinue` checks the content size only after a non-empty last block. A frame with FCS 48 and only an empty last block decodes to 0 bytes in streaming C. One-shot gives `ErrFrameSizeMismatch`.
-- **A compressed block of size 0** is skipped as empty. One-shot gives `ErrBlockTooSmall`.
-- **Input cut short.** The stream checks block sizes against blockSizeMax, and header fields, as they arrive. One-shot reports `io.ErrUnexpectedEOF` first.
+  - A "Block Size Exceeds Maximum" header for a compressed block is `dErrCBlockSizeTooLarge` (`ErrCompressedSizeTooBig`). For a raw block it is `dErrDecodedBlockTooLarge`.
+  - A frame whose buffer is its FCS (no wrap) and that overflows it with less than blockSizeMax left is `dErrFrameSizeExceeded`.
 
 ### Concurrency (`WithDecoderConcurrency`)
 

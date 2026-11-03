@@ -202,15 +202,18 @@ type dctx struct {
 	// inBuffSize and outBuffSize from the frame header. Go allocates them
 	// as the input and output need, up to those sizes (no memory is
 	// reserved from untrusted header fields).
-	inBuff            []byte
-	inBuffSize        int // C: size_t inBuffSize
-	inPos             uint
-	outBuff           []byte
-	outBuffSize       int // C: size_t outBuffSize
-	outStart          int
-	outEnd            int
-	lhSize            int
-	hostageByte       bool                     // C: U32 hostageByte
+	inBuff      []byte
+	inBuffSize  int // C: size_t inBuffSize
+	inPos       uint
+	outBuff     []byte
+	outBuffSize int // C: size_t outBuffSize
+	outStart    int
+	outEnd      int
+	lhSize      int
+	hostageByte bool // C: U32 hostageByte
+	// endErr (Go) is an error found after a frame's last block, reported
+	// once that block's output is flushed (as DecodeAll delivers it).
+	endErr            dErr
 	noForwardProgress int                      // C: int noForwardProgress
 	oversizedDuration int                      // C: size_t oversizedDuration
 	headerBuffer      [frameHeaderSizeMax]byte // tmp buffer to store frame header

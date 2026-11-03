@@ -329,6 +329,61 @@ func TestDecompressStreamBlockRoomCref(t *testing.T) {
 	}
 }
 
+// TestDecompressStreamDecodeAll pins the deliberate deviations from
+// streaming C (docs/superpowers/phase2-api-decisions.md, "Streaming
+// decoding"), with the frames that showed C's result depends on how the
+// input is cut (cref dstream accepts some at 1-byte chunks and rejects
+// them at 1000, where its single-pass shortcut runs one-shot C): at every
+// chunking and output size, the stream gives DecodeAll's output and error.
+func TestDecompressStreamDecodeAll(t *testing.T) {
+	raw := func(n int, last bool) malBlock {
+		return malBlock{typ: btRaw, last: last, size: n, body: bytes.Repeat([]byte{'a'}, n)}
+	}
+	frame := func(h malFHdr, blocks ...malBlock) []byte { return malFrame{hdr: h.bytes(), blocks: blocks}.bytes() }
+	single := func(fcs uint64) malFHdr { return malFHdr{single: true, fcsSize: 1, fcs: fcs} }
+	fcs2000 := malFHdr{winDesc: 0, fcsSize: 2, fcs: 2000}  // 1 KiB window: buffer 2000 bytes, no wrap
+	ring4000 := malFHdr{winDesc: 0, fcsSize: 2, fcs: 4000} // round buffer 3136 bytes
+	rle := func(n int, last bool) malBlock { return malBlock{typ: btRLE, last: last, size: n, body: []byte{'r'}} }
+	for _, c := range []struct {
+		name string
+		in   []byte
+		want error // DecodeAll's (nil: *corruptError; io.EOF: none)
+	}{
+		// blockSizeMax 0: streaming C rejects the RLE block's 1-byte size
+		{"fcs0-rle0", frame(single(0), rle(0, true)), io.EOF},
+		{"fcs48-empty-last", frame(single(48), raw(0, true)), ErrFrameSizeMismatch},
+		{"fcs48-raw10-empty-last", frame(single(48), raw(10, false), raw(0, true)), ErrFrameSizeMismatch},
+		{"fcs3-compressed-size0", frame(single(3), malCBlock(nil, false), raw(3, true)), ErrBlockTooSmall},
+		{"skippable-fffffff8", []byte{0x50, 0x2A, 0x4D, 0x18, 0xF8, 0xFF, 0xFF, 0xFF, 1, 2, 3}, nil},
+		{"fcs-exceeded", frame(fcs2000, raw(1024, false), raw(1024, true)), ErrFrameSizeExceeded},
+		{"fcs-short", frame(fcs2000, raw(1024, false), raw(500, true)), ErrFrameSizeMismatch},
+		{"ring-fcs-exceeded", frame(ring4000, raw(1024, false), raw(1024, false), raw(1024, false), raw(1024, true)), ErrFrameSizeExceeded},
+		{"ring-fcs-exceeded-rle", frame(ring4000, rle(1024, false), rle(1024, false), rle(1024, false), rle(1024, true)), ErrFrameSizeExceeded},
+		{"ring-fcs-short", frame(ring4000, raw(1024, false), raw(1024, false), raw(1024, false), raw(500, true)), ErrFrameSizeMismatch},
+	} {
+		want, werr := dctxDecode(c.in)
+		if c.want == io.EOF {
+			if werr != nil {
+				t.Fatalf("%s: DecodeAll: %v", c.name, werr)
+			}
+		} else {
+			checkSentinel(t, c.name+" DecodeAll", werr, c.want)
+		}
+		for _, chunk := range []int{1, 7, 1000, len(c.in)} {
+			for _, outSize := range []int{4096, 1 << 20} {
+				got, e, last := dstreamRun(t, newDCtx(), c.in, fixedChunks(chunk), outSize, 0)
+				what := fmt.Sprintf("%s chunk %d out %d", c.name, chunk, outSize)
+				if sc := streamClass(e, last); (sc == nil) != (werr == nil) || sc != nil && errClass(sc) != errClass(werr) {
+					t.Errorf("%s: %v (err %d), DecodeAll %v", what, sc, e, werr)
+				}
+				if !bytes.Equal(got, want) {
+					t.Errorf("%s: %d bytes, DecodeAll %d", what, len(got), len(want))
+				}
+			}
+		}
+	}
+}
+
 // TestDecompressStreamResetDicts: reset(false) drops the dictionaries,
 // the default one (C: ZSTD_clearDict) and the set (C: refMultipleDDicts
 // back to ZSTD_rmd_refSingleDDict); reset(true) keeps them.
@@ -423,27 +478,31 @@ func TestDecompressContinueCref(t *testing.T) {
 
 // streamCref compares decompressStream with `cref dstream` on data, with
 // input chunks of chunk bytes and outSize-byte output buffers, the
-// dictionary dd (cargs loads it into cref): the same output bytes, and
-// both accept, both end incomplete or both fail with the same C error
-// code. It returns the outcome's name and the Go error (streamClass).
-// When a whole frame is in one call
-// and the output buffer holds its content size, C takes
-// ZSTD_decompressStream's single-pass shortcut (one-shot decoding) and so
-// does Go, which applies the streaming checks there (the deviations of
-// docs/superpowers/phase2-api-decisions.md, counted by name):
+// dictionary dd (cargs loads it into cref). It returns the outcome's name
+// and the Go error (streamClass). Both accept or both end incomplete with
+// the same output; or both fail with the same C error code, or Go fails
+// where C does not or with another code as one of the deliberate
+// deviations from streaming C says (docs/superpowers/phase2-api-decisions.md,
+// "Streaming decoding"), named by Go's error:
 //
-//   - window-limit: a window above the maximum, which C one-shot does not
-//     check.
-//   - block-over-max: a block regenerating more than blockSizeMax, which
-//     C one-shot accepts when its output space has room.
-//
-// And one that needs no shortcut:
-//
+//   - window-limit, block-over-max: C's single-pass shortcut runs one-shot
+//     C, which checks neither; Go's runs DecodeAll's frame decoding.
 //   - block-room: a compressed block regenerating more than the room Go
-//     makes for it in the round buffer (2 × blockSizeMax and more), less
-//     than C's whole buffer: Go fails it with dErrDecodedBlockTooLarge
-//     (corruption_detected), C with dstSize_tooSmall when it also runs out
-//     of its buffer (both ErrUnexpectedBlockSize).
+//     makes for it, less than C's whole buffer: Go dErrDecodedBlockTooLarge
+//     (corruption_detected), C dstSize_tooSmall when it also runs out of
+//     its buffer.
+//   - fcs: Go checks the frame content size at every block and at an empty
+//     last block (ErrFrameSizeExceeded, ErrFrameSizeMismatch); C only after
+//     a non-empty last block, or one-shot C against its own output space.
+//   - output-space: the shortcut's output space, DecodeAll's (Go) or the
+//     output buffer (C), ran out at different points.
+//   - zero-block: Go rejects a compressed block of size 0, which C skips.
+//   - skip-overflow: Go rejects a skippable size that overflows with its
+//     header, for which C waits.
+//
+// When an error ends either, the outputs need only be one a prefix of the
+// other: Go reports the output written before an error (C drops what the
+// failing call wrote) and rejects a block before writing any of it.
 func streamCref(t *testing.T, data []byte, dd *ddict, cargs []string, chunk, outSize int) (string, error) {
 	t.Helper()
 	d := newDCtx()
@@ -451,6 +510,7 @@ func streamCref(t *testing.T, data []byte, dd *ddict, cargs []string, chunk, out
 	got, e, last := dstreamRun(t, d, data, fixedChunks(chunk), outSize, 0)
 	args := append(slices.Clone(cargs), "-max-window-log", "29", "-chunk-size", strconv.Itoa(chunk), "-out-size", strconv.Itoa(outSize))
 	want, cerr := creftest.DStreamCRef(t, data, args...)
+	cOK := cerr == nil || cerr.Code == -1 // accepted or incomplete
 	outcome := ""
 	switch {
 	case cerr == nil && e == 0 && last == 0:
@@ -459,34 +519,45 @@ func streamCref(t *testing.T, data []byte, dd *ddict, cargs []string, chunk, out
 		outcome = "incomplete"
 	case cerr != nil && e != 0 && e.cCode() == cerr.Code:
 		outcome = "reject"
-	case (cerr == nil || cerr.Code == -1) && e == dErrFrameParameterWindowTooLarge:
+	case e == 0:
+		// Go accepts or waits where C fails: no deviation allows it
+	case cOK && e == dErrFrameParameterWindowTooLarge:
 		outcome = "window-limit"
-	case (cerr == nil || cerr.Code == -1) && e == dErrDecodedBlockTooLarge:
+	case cOK && e == dErrDecodedBlockTooLarge:
 		outcome = "block-over-max"
 	case cerr != nil && cerr.Code == int(dErrDstSizeTooSmall) && e == dErrDecodedBlockTooLarge:
 		outcome = "block-room"
-	default:
+	case e == dErrFrameSizeExceeded || e == dErrFrameSizeMismatch:
+		outcome = "fcs"
+	case e.cCode() == int(dErrDstSizeTooSmall) || cerr != nil && cerr.Code == int(dErrDstSizeTooSmall):
+		outcome = "output-space"
+	case cOK && e == dErrBlockTooSmall:
+		outcome = "zero-block"
+	case cOK && e == dErrFrameParameterUnsupported:
+		outcome = "skip-overflow"
+	}
+	if outcome == "" {
 		t.Errorf("C %v, Go err %d hint %d", cerr, e, last)
 		return "", nil
 	}
-	if outcome == "window-limit" || outcome == "block-over-max" {
-		if !bytes.HasPrefix(want, got) {
-			t.Errorf("%s: Go output is not a prefix of C's", outcome)
+	if outcome == "accept" || outcome == "incomplete" {
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s: output differs (%d bytes, C %d)", outcome, len(got), len(want))
 		}
-	} else if !bytes.Equal(got, want) {
-		t.Errorf("%s: output differs (%d bytes, C %d)", outcome, len(got), len(want))
+	} else if !bytes.HasPrefix(want, got) && !bytes.HasPrefix(got, want) {
+		t.Errorf("%s: outputs diverge (%d bytes, C %d)", outcome, len(got), len(want))
 	}
 	return outcome, streamClass(e, last)
 }
 
 // TestDecompressStreamErrorsCref compares decompressStream with cref
-// dstream (see streamCref) on the malicious corpus (7-byte input chunks,
-// 4096-byte output: C never takes the single-pass shortcut, so only
-// block-room is allowed; the error is the sentinel MANIFEST.txt records
-// for DecodeAll, incomplete input io.ErrUnexpectedEOF) and on 2,000 seeded mutations of the decoder seeds
-// plus splitSeed (whose literals take the split placement in streaming),
-// both with 7-byte chunks and with the whole input in one chunk and a
-// 1 MiB output buffer (the shortcut).
+// dstream (see streamCref, which names the deliberate deviations) on the
+// malicious corpus (7-byte input chunks, 4096-byte output; the error must
+// also be the sentinel MANIFEST.txt records for DecodeAll, incomplete
+// input io.ErrUnexpectedEOF) and on 2,000 seeded mutations of the decoder
+// seeds plus splitSeed (whose literals take the split placement in
+// streaming), both with 7-byte chunks and with the whole input in one
+// chunk and a 1 MiB output buffer (the shortcut).
 func TestDecompressStreamErrorsCref(t *testing.T) {
 	creftest.Bin(t)
 	lines, _ := readManifest(t)
@@ -521,13 +592,8 @@ func TestDecompressStreamErrorsCref(t *testing.T) {
 				cargs = dc.crefArgs(t)
 			}
 			k, err := streamCref(t, data, dd, cargs, 7, 4096)
-			if k != "accept" && k != "incomplete" && k != "reject" && k != "block-room" {
-				t.Errorf("%s: %s", c.name, k)
-			}
-			if c.name == "skip-size-ffffffff" {
-				// One-shot C rejects the skippable size that overflows with
-				// its header; streaming C waits for the content.
-				want = io.ErrUnexpectedEOF
+			if k == "" {
+				t.Errorf("%s: no outcome", c.name)
 			}
 			checkSentinel(t, c.name, err, want)
 			if c.control != nil {
@@ -583,9 +649,6 @@ func TestDecompressStreamErrorsCref(t *testing.T) {
 				data := mutate(r, seeds)
 				k1, _ := streamCref(t, data, nil, nil, 7, 4096)
 				k2, _ := streamCref(t, data, nil, nil, max(len(data), 1), 1<<20)
-				if k1 != "accept" && k1 != "incomplete" && k1 != "reject" && k1 != "block-room" {
-					t.Errorf("7-byte chunks: %s", k1)
-				}
 				mu.Lock()
 				stats["chunk7/"+k1]++
 				stats["whole/"+k2]++
@@ -602,7 +665,9 @@ func TestDecompressStreamErrorsCref(t *testing.T) {
 // TestStreamAllocBound feeds frames whose header claims a 2^29 window (and
 // FCS 2^60, or a 4 GiB skippable frame) followed by 50 bytes of a block
 // that is cut short: decompressStream waits for more input and allocates
-// less than 64 KiB, with 1-byte and whole-input chunks.
+// less than 64 KiB, with 1-byte and whole-input chunks. So does an RLE
+// block claiming a 2 MiB run, which fails (over blockSizeMax) without
+// being written.
 func TestStreamAllocBound(t *testing.T) {
 	body := make([]byte, 50)
 	for i := range body {
@@ -615,11 +680,13 @@ func TestStreamAllocBound(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		in   []byte
+		want dErr
 	}{
-		{"compressed", cat(win, malBlockHeader(btCompressed, 100000, true), body)},
-		{"raw", cat(win, malBlockHeader(btRaw, 100000, true), body)},
-		{"fcs-2^60", cat(winFCS, malBlockHeader(btCompressed, 100000, true), body)},
-		{"skippable-4GiB", cat([]byte{0x50, 0x2A, 0x4D, 0x18, 0xFF, 0xFF, 0xFF, 0xFF}, body)},
+		{"compressed", cat(win, malBlockHeader(btCompressed, 100000, true), body), 0},
+		{"raw", cat(win, malBlockHeader(btRaw, 100000, true), body), 0},
+		{"fcs-2^60", cat(winFCS, malBlockHeader(btCompressed, 100000, true), body), 0},
+		{"skippable-4GiB", cat([]byte{0x50, 0x2A, 0x4D, 0x18, 0xF7, 0xFF, 0xFF, 0xFF}, body), 0},
+		{"rle-2MiB", cat(win, malBlockHeader(btRLE, 1<<21-1, true), []byte{'r'}), dErrDecodedBlockTooLarge},
 	} {
 		for _, chunk := range []int{1, len(c.in)} {
 			d := newDCtx()
@@ -628,8 +695,8 @@ func TestStreamAllocBound(t *testing.T) {
 			runtime.ReadMemStats(&m0)
 			out, e, last := dstreamRun(t, d, c.in, fixedChunks(chunk), 4096, 0)
 			runtime.ReadMemStats(&m1)
-			if e != 0 || last == 0 {
-				t.Errorf("%s/%d: err %d, hint %d: want incomplete", c.name, chunk, e, last)
+			if c.want != 0 && e != c.want || c.want == 0 && (e != 0 || last == 0) {
+				t.Errorf("%s/%d: err %d, hint %d: want err %d (0: incomplete)", c.name, chunk, e, last, c.want)
 			}
 			if c.name == "raw" && !bytes.Equal(out, body) {
 				t.Errorf("%s/%d: output %d bytes", c.name, chunk, len(out))
@@ -664,38 +731,31 @@ func errClass(err error) string {
 	return err.Error()
 }
 
-// sizeClass reports whether err is an output-size error, on which the
-// one-shot allocation rule and the stream's buffer may disagree (see
-// FuzzDecompressStream).
-func sizeClass(err error) bool {
-	return errors.Is(err, ErrFrameSizeExceeded) || errors.Is(err, ErrUnexpectedBlockSize) ||
-		errors.Is(err, ErrFrameSizeMismatch) || errors.Is(err, ErrDecoderSizeExceeded)
-}
-
 // FuzzDecompressStream decodes arbitrary input through decompressStream
-// with chunks and output buffers chosen by chunkSeed: no panic. When
-// one-shot decoding (max window and memory 64 MiB) succeeds, the stream
-// gives the same output and ends at a frame end; when it fails (other than
-// on the memory limit), the stream fails too, with the same error class,
-// and one output is a prefix of the other. Exceptions: the output-size
-// errors (one-shot's output space and the stream's buffer differ, so one
-// may fail a block on its size where the other, with more room, decodes
-// further and fails it on another check, or stops at the input's end),
-// and an RLE block in a frame with
-// blockSizeMax 0 (streaming C rejects its 1-byte size, one-shot C accepts
-// it when it regenerates nothing), a skippable frame whose size
-// overflows 32 bits with its header (one-shot C rejects it,
-// frameParameter_unsupported; streaming C waits for its content), and
-// input cut short: one-shot decoding stops where a frame or block runs
-// past the input's end (io.ErrUnexpectedEOF) without checking what the
-// stream checks as the data arrives (a block size above blockSizeMax, a
-// frame header field), so the stream may fail with any error there. And
-// streaming C does not check the frame content size when a frame ends
-// with an empty last block (ZSTD_decompressContinue checks it only after
-// a non-empty one): the stream accepts what one-shot decoding rejects with
-// ErrFrameSizeMismatch. Likewise it skips a compressed block of size 0
-// as empty, which one-shot decoding rejects (ErrBlockTooSmall). After
-// either, the stream goes on and may end any way.
+// with chunks and output buffers chosen by chunkSeed (no panic), and
+// requires DecodeAll's result (decompressFrames, max window and memory
+// 64 MiB; inputs over the memory limit are skipped): the same output and
+// error class, whatever the chunking. Two exceptions, which a stream cannot
+// avoid:
+//
+//   - Input cut short: one-shot decoding fails first where a block runs past
+//     the input's end (io.ErrUnexpectedEOF); the stream fails the same way
+//     or on what it checked before the cut (a block header), and has
+//     delivered the part of a cut raw block that arrived.
+//   - A block that regenerates too much: DecodeAll stops it at the end of
+//     its output space (the content size, or the frame's block count ×
+//     blockSizeMax, which a stream does not know) with ErrFrameSizeExceeded
+//     or ErrUnexpectedBlockSize; the stream stops it at the end of its room
+//     (2 × blockSizeMax and more, or the content size). Either may name the
+//     other of those two errors, or, having decoded further than the
+//     other, fail the block on another check. The output (the blocks
+//     before it) is the same.
+//   - A match offset beyond the frame's window (invalid): the stream keeps
+//     a round buffer of the window plus 2 blocks, so how much history
+//     there is beyond the window depends on where the buffer wrapped
+//     (which raw blocks cut by the input can move); DecodeAll keeps all
+//     output and only fails offsets beyond it. The stream may fail such an
+//     offset (ErrWindowSizeTooSmall) where DecodeAll goes on.
 func FuzzDecompressStream(f *testing.F) {
 	for _, dir := range []string{seedsDir, malDir} {
 		ents, _ := os.ReadDir(dir)
@@ -724,31 +784,31 @@ func FuzzDecompressStream(f *testing.F) {
 			t.Fatalf("stream output %d bytes, one-shot %d (err %d)", len(got), len(want), oe)
 		}
 		sc := streamClass(e, last)
-		if oe == 0 {
-			if sc != nil && !(e == dErrDecodedBlockTooLarge && d.fParams.blockSizeMax == 0) {
-				t.Fatalf("one-shot accepts, stream: %v (err %d)", sc, e)
-			}
-			if sc == nil && !bytes.Equal(got, want) {
-				t.Fatalf("outputs differ: stream %d bytes, one-shot %d", len(got), len(want))
-			}
-			return
+		var oc error
+		if oe != 0 {
+			oc = oe.toError("decompress")
 		}
-		oc := oe.toError("decompress")
-		if oe == dErrFrameParameterUnsupported && sc == io.ErrUnexpectedEOF ||
-			oe == dErrFrameSizeMismatch || oe == dErrBlockTooSmall {
-			if !bytes.HasPrefix(got, want) && !bytes.HasPrefix(want, got) {
-				t.Fatalf("outputs diverge: stream %d bytes, one-shot %d", len(got), len(want))
+		if oc == io.ErrUnexpectedEOF {
+			if sc == nil || !bytes.HasPrefix(got, want) {
+				t.Fatalf("one-shot %v, stream %v (err %d), %d bytes (one-shot %d)", oc, sc, e, len(got), len(want))
 			}
 			return
 		}
-		if sc == nil {
-			t.Fatalf("one-shot %v (err %d), stream accepts", oc, oe)
+		if e == dErrOffsetBeyondHistory && !d.fParams.singleSegment {
+			if !bytes.HasPrefix(want, got) {
+				t.Fatalf("offset beyond history: stream output is not a prefix of one-shot's")
+			}
+			return
 		}
-		if !bytes.HasPrefix(got, want) && !bytes.HasPrefix(want, got) {
-			t.Fatalf("outputs diverge: stream %d bytes, one-shot %d", len(got), len(want))
+		sameClass := oc == nil && sc == nil || oc != nil && sc != nil && errClass(oc) == errClass(sc)
+		blockOrFrame := func(err error) bool {
+			return errors.Is(err, ErrFrameSizeExceeded) || errors.Is(err, ErrUnexpectedBlockSize)
 		}
-		if errClass(sc) != errClass(oc) && oc != io.ErrUnexpectedEOF && !sizeClass(oc) && !sizeClass(sc) {
+		if !sameClass && !(oc != nil && sc != nil && (blockOrFrame(oc) || blockOrFrame(sc))) {
 			t.Fatalf("one-shot %v (err %d), stream %v (err %d)", oc, oe, sc, e)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("outputs differ: stream %d bytes, one-shot %d (%v)", len(got), len(want), oc)
 		}
 	})
 }
