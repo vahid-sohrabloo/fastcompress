@@ -19,11 +19,11 @@ import (
 // DecodeAll is C's ZSTD_decompressDCtx (ZSTD_decompressMultiFrame) on one
 // of the Decoder's decompression contexts; Read and WriteTo drive C's
 // ZSTD_decompressStream on the stream's own context, with input read from
-// the io.Reader in ZSTD_DStreamInSize() chunks (with
-// WithDecoderConcurrency > 1, through a pipeline that decodes the blocks'
-// entropy ahead on another goroutine, see decoder_mt.go). Both apply the
-// options'
-// C parameters (see DOption) and the deviations from C listed in
+// the io.Reader in ZSTD_DStreamInSize() chunks (with an explicit
+// WithDecoderConcurrency(n > 1), through a pipeline that reads ahead and
+// decodes the blocks' entropy on two goroutines, see decoder_mt.go). Both
+// apply the options' C parameters (see DOption) and the deviations from C
+// listed in
 // docs/superpowers/phase2-api-decisions.md: in particular, a stream gives
 // DecodeAll's output and error for the same input, however it is cut, and
 // delivers the output decoded before an error, then the error.
@@ -38,6 +38,11 @@ import (
 // stream methods (Read, WriteTo, Reset, ResetWithOptions) and Close must
 // not run concurrently with each other, as for any io.Reader. The zero
 // value is not usable: its methods return an error.
+//
+// A pipelined stream's goroutines (WithDecoderConcurrency) end with the
+// stream, at Reset and at Close; as the doc says, Close must be called to
+// release the resources. A panic of the io.Reader's Read is raised in the
+// Read or WriteTo call that needs its input, as without a pipeline.
 //
 // On 32-bit platforms the DecodeAll calls of a Decoder share one memory
 // budget of 1 GiB (maxMemoryCap), charged for every buffer they allocate
@@ -85,13 +90,12 @@ type decStream struct {
 	buf      []byte
 	bufPos   int
 	bufErr   error
-	// WithDecoderConcurrency > 1: the pipeline (decoder_mt.go) while it
-	// runs, with in holding its units' input; S2's context and scratch,
-	// kept for the next pipeline; join holds input left before a unit.
+	// An explicit WithDecoderConcurrency(n) with n > 1: the pipeline
+	// (decoder_mt.go) while it runs, with in holding its units' input; S2's
+	// context and scratch, kept for the next pipeline.
 	pipe     *pipeline
 	edc      *dctx
 	escratch []byte
-	join     []byte
 }
 
 // errDecoderZero is returned when a Decoder was not created by NewReader.
@@ -199,6 +203,11 @@ func (d *Decoder) DecodeAll(input, dst []byte) ([]byte, error) {
 // After being called with a nil reader, no other operations than Reset or DecodeAll or Close
 // should be used.
 //
+// A pipelined stream (WithDecoderConcurrency) is stopped without waiting
+// for the previous reader: a Read of it in progress (or starting) when the
+// stream stops finishes in the background, its bytes are dropped, and no
+// further Read is made.
+//
 // C: ZSTD_DCtx_reset(ZSTD_reset_session_only), as a stream can be reused
 // after an error. A reader with Bytes and Len (see WithDecodeBuffersBelow)
 // may be decoded here; its error, if any, is returned by Read and WriteTo
@@ -212,7 +221,7 @@ func (d *Decoder) Reset(r io.Reader) error {
 	}
 	d.stopPipeline()
 	s := &d.s
-	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0], edc: s.edc, escratch: s.escratch, join: s.join[:0]}
+	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0], edc: s.edc, escratch: s.escratch}
 	if r == nil {
 		return nil
 	}
@@ -355,14 +364,14 @@ func (d *Decoder) check() error {
 // fill decodes into p until it is full, or more input is needed and some
 // output is in p, or the stream ends (io.EOF) or fails. It returns the
 // bytes written to p and the stream's sticky error, if it has one now.
-// With WithDecoderConcurrency > 1 the input comes from the pipeline
-// (decoder_mt.go), which ends with the stream.
+// With an explicit WithDecoderConcurrency(n > 1) the input comes from the
+// pipeline (decoder_mt.go), which ends with the stream.
 func (d *Decoder) fill(p []byte) (n int, err error) {
 	s := &d.s
 	if s.err != nil {
 		return 0, s.err
 	}
-	if !s.buffered && s.pipe == nil && d.o.concurrent > 1 {
+	if !s.buffered && s.pipe == nil && d.o.pipelined() {
 		d.startPipeline()
 	}
 	if s.pipe != nil {
@@ -502,6 +511,11 @@ func (c closeWrapper) Close() error {
 
 // Close will release all resources.
 // It is NOT possible to reuse the decoder after this.
+//
+// Close must be called to release a pipelined stream's goroutines
+// (WithDecoderConcurrency) when the stream is not read to its end or
+// error. It does not wait for a Read of the reader in progress (see
+// Reset).
 //
 // DecodeAll calls already running finish normally. The idle DecodeAll
 // contexts are dropped; Close must not run concurrently with the stream

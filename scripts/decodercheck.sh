@@ -3,7 +3,10 @@
 #
 # Decoder safety rules (Phase 2 plan, Global Constraints). Fails when:
 #   1. a decoder Go file (non-test) imports "unsafe" or calls recover(
-#      (comments and string contents are ignored; needs perl).
+#      (comments and string contents are ignored; needs perl). One
+#      exception: zstd/decoder_mt.go may call recover() once, in the
+#      pipeline's reader goroutine, to raise an io.Reader panic again on
+#      the caller's goroutine (Task 13 fix round 1); a second call fails.
 #      Decoder files: zstd/zstd_decompress*.go, zstd/zstd_ddict.go,
 #      zstd/decoder*.go, zstd/header.go, zstd/snappy.go,
 #      internal/huf/huf_decompress*.go.
@@ -58,7 +61,8 @@ scan() {
     while ($code =~ /\bimport\s*\((.*?)\)/gs) { push @specs, $1 }
     while ($code =~ /\bimport\s+((?:[\w.]+\s+)?(?:"[^"]*"|`[^`]*`))/g) { push @specs, $1 }
     for (@specs) { if (/(?:"unsafe"|`unsafe`)/) { print "unsafe\n"; last } }
-    print "recover\n" if $blank =~ /(?<![\w.])recover\s*\(/;
+    my $nrec = () = $blank =~ /(?<![\w.])recover\s*\(/g;
+    print "recover\n" for 1..$nrec;
     while ($code =~ /\bcpu\s*\.\s*RegisterAsm\s*\(\s*(?:"([^"]+)"|`([^`]+)`)/g) { print "asm ", $1 // $2, "\n" }
   ' "$1"
 }
@@ -69,8 +73,11 @@ for f in ${decoder[@]+"${decoder[@]}"}; do
   if grep -qx unsafe <<<"$findings"; then
     err "$f imports \"unsafe\""
   fi
-  if grep -qx recover <<<"$findings"; then
-    err "$f calls recover()"
+  nrec=$(grep -cx recover <<<"$findings" || true)
+  allowed=0
+  [[ $f == zstd/decoder_mt.go ]] && allowed=1
+  if ((nrec > allowed)); then
+    err "$f calls recover() $nrec time(s) (allowed: $allowed)"
   fi
 done
 

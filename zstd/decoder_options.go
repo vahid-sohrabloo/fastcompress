@@ -26,7 +26,8 @@ import (
 //	                        gets the given ID (C gives raw content ID 0)
 //	WithDecoderDictDelete   removes dictionaries (no C call)
 //	WithDecoderConcurrency  none; caps concurrent DecodeAll calls (one
-//	                        DCtx each); n > 1 pipelines streams
+//	                        DCtx each); given explicitly with n > 1,
+//	                        pipelines streams
 //	WithDecodeBuffersBelow  none; such readers are decoded with DecodeAll
 //	WithDecoderLowmem       none; stream buffers over 1 MiB are freed at
 //	                        frame ends
@@ -56,6 +57,12 @@ func (o *decoderOptions) defaults() {
 		maxWindow:     defaultMaxWindowSize,
 		buffersBelow:  128 << 10,
 	}
+}
+
+// pipelined reports whether streams are pipelined: WithDecoderConcurrency
+// was given and resolves to more than 1.
+func (o *decoderOptions) pipelined() bool {
+	return o.concurrentReq >= 0 && o.concurrent > 1
 }
 
 // addDict registers dd under its ID, replacing one with the same ID.
@@ -130,10 +137,18 @@ func WithDecodeBuffersBelow(size int) DOption {
 //
 // Each DecodeAll call holds one decompression context and runs on its
 // caller's goroutine; at most n calls hold one at once, and further calls
-// wait. With n > 1 a stream is decoded by a pipeline: one goroutine reads
-// the io.Reader ahead (at most n blocks) and one decodes the blocks'
-// literals and sequences ahead of Read or WriteTo, which execute them. The
-// value never changes the output or the error.
+// wait.
+//
+// Given explicitly with a value that resolves to n > 1, it also decodes
+// streams with a pipeline: one goroutine reads the io.Reader ahead (at
+// most min(n, 4) blocks) and one decodes the blocks' literals and
+// sequences ahead of Read or WriteTo, which execute them. Without this
+// option, streams are decoded synchronously, whatever the default n:
+// until the pipeline is faster than the synchronous stream, the default
+// keeps the synchronous one. The value never changes the output or the
+// error. A pipelined stream's goroutines end with the stream (EOF or an
+// error), at Reset and at Close; a Decoder dropped in the middle of a
+// pipelined stream without Close keeps them (see Decoder).
 func WithDecoderConcurrency(n int) DOption {
 	return func(o *decoderOptions) error {
 		if n < 0 {

@@ -1412,7 +1412,12 @@ func (d *dctx) decompressStreamCode(out *outBuffer, in *inBuffer) (int, dErr) {
 			// (deviation: the result must not depend on how the input is
 			// cut).
 			// Go: not when a pipeline feeds the stream (its compressed
-			// blocks are S2's to decode); the result is the same.
+			// blocks are S2's to decode). The result is the stream's
+			// without the shortcut, which differs from the shortcut's in
+			// the documented size pair only: a block regenerating too much
+			// is ErrUnexpectedBlockSize here, where the shortcut can name
+			// it ErrFrameSizeExceeded (phase2-api-decisions.md, "Pipelined
+			// streams").
 			if d.pipe == nil && d.fParams.frameContentSize != contentSizeUnknown &&
 				d.fParams.frameType != zstdSkippableFrame &&
 				uint64(oend-op) >= d.fParams.frameContentSize && ip-istart == d.lhSize {

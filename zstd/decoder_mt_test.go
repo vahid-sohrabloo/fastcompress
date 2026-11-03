@@ -460,6 +460,186 @@ func TestStreamReaderErrors(t *testing.T) {
 	}
 }
 
+// TestStreamPipelineOptIn checks when streams are pipelined (controller
+// ruling, Task 13 fix round 1): only with an explicit
+// WithDecoderConcurrency that resolves to more than 1. The default
+// (min(4, GOMAXPROCS) DecodeAll contexts) streams synchronously, as does
+// WithDecoderConcurrency(1); WithDecoderConcurrency(0) is GOMAXPROCS.
+func TestStreamPipelineOptIn(t *testing.T) {
+	frame, _ := mtTestStream(t, 2<<20, 1<<20)
+	base := runtime.NumGoroutine()
+	for _, c := range []struct {
+		name string
+		opts []DOption
+		pipe bool
+	}{
+		{"default", nil, false},
+		{"n=1", []DOption{WithDecoderConcurrency(1)}, false},
+		{"n=2", []DOption{WithDecoderConcurrency(2)}, true},
+		{"n=0", []DOption{WithDecoderConcurrency(0)}, runtime.GOMAXPROCS(0) > 1},
+	} {
+		d := newTestDecoder(t, c.opts...)
+		if err := d.Reset(bytes.NewReader(frame)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.Read(make([]byte, 1)); err != nil {
+			t.Fatal(err)
+		}
+		if got := d.s.pipe != nil; got != c.pipe {
+			t.Fatalf("%s: pipelined %v, want %v", c.name, got, c.pipe)
+		}
+		if c.pipe && cap(d.s.pipe.units) != min(d.o.concurrent, maxReadAhead) {
+			t.Fatalf("%s: read-ahead of %d units", c.name, cap(d.s.pipe.units))
+		}
+		d.Close()
+		waitGoroutines(t, c.name, base)
+	}
+}
+
+// blockingReader returns first bytes of its data, then blocks in Read
+// until release is closed, then returns the rest.
+type blockingReader struct {
+	b       []byte
+	first   int
+	pos     int
+	release chan struct{}
+	blocked chan struct{} // closed when Read first blocks
+	once    sync.Once
+}
+
+func (r *blockingReader) Read(p []byte) (int, error) {
+	if r.pos >= r.first {
+		r.once.Do(func() { close(r.blocked) })
+		<-r.release
+	}
+	end := len(r.b)
+	if r.pos < r.first {
+		end = r.first
+	}
+	n := copy(p, r.b[r.pos:end])
+	r.pos += n
+	if n == 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+// TestStreamStopBlockedReader pins review I4: a pipelined stream whose
+// reader blocks in a read-ahead (S1 in Read) is closed, or reset to
+// another stream (which then decodes), promptly; S1 exits once the reader
+// is released, and the goroutines return to the baseline.
+func TestStreamStopBlockedReader(t *testing.T) {
+	frame, text := mtTestStream(t, 1<<20, 1<<20)
+	base := runtime.NumGoroutine()
+	for _, end := range []string{"close", "reset", "reset-nil"} {
+		r := &blockingReader{b: frame, first: len(frame) / 2, release: make(chan struct{}), blocked: make(chan struct{})}
+		d, err := NewReader(r, WithDecoderConcurrency(4))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.Read(make([]byte, 100)); err != nil {
+			t.Fatal(err)
+		}
+		<-r.blocked
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			switch end {
+			case "close":
+				d.Close()
+			case "reset":
+				got, err := readAll(t, d, bytes.NewReader(frame), fixedSize(1<<16), 0)
+				if err != nil || !bytes.Equal(got, text) {
+					t.Errorf("reset: the new stream gave %d bytes, %v", len(got), err)
+				}
+			case "reset-nil":
+				if err := d.Reset(nil); err != nil {
+					t.Error(err)
+				}
+			}
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: blocked on the reader", end)
+		}
+		close(r.release)
+		d.Close()
+		waitGoroutines(t, end, base)
+	}
+}
+
+// panicReader returns its data in reads of up to step bytes and panics
+// with its value once at bytes have been read.
+type panicReader struct {
+	b        []byte
+	step, at int
+	pos      int
+}
+
+func (r *panicReader) Read(p []byte) (int, error) {
+	if r.pos >= r.at {
+		panic(fmt.Sprintf("reader panic at %d", r.at))
+	}
+	n := copy(p[:min(len(p), r.step, r.at-r.pos)], r.b[r.pos:])
+	r.pos += n
+	if n == 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+// TestStreamReaderPanic pins review M1: a panic of the io.Reader's Read
+// reaches the caller of Read, after the same output, with concurrency 1
+// and 4; the pipelined stream has then failed (a further Read returns an
+// error) and its goroutines end.
+func TestStreamReaderPanic(t *testing.T) {
+	frame, _ := mtTestStream(t, 1<<20, 1<<20)
+	base := runtime.NumGoroutine()
+	for _, at := range []int{0, 10, len(frame) / 2} {
+		var outs [][]byte
+		var vals []any
+		for _, n := range []int{1, 4} {
+			d := newTestDecoder(t, WithDecoderConcurrency(n))
+			if err := d.Reset(&panicReader{b: frame, step: 5000, at: at}); err != nil {
+				t.Fatal(err)
+			}
+			var out []byte
+			p := make([]byte, 4096)
+			func() {
+				defer func() { vals = append(vals, recover()) }()
+				for {
+					m, err := d.Read(p)
+					out = append(out, p[:m]...)
+					if err != nil {
+						t.Fatalf("at %d n=%d: %v", at, n, err)
+					}
+				}
+			}()
+			outs = append(outs, out)
+			if n > 1 {
+				// The stream has failed: a further Read returns an error
+				// (it does not wait for a pipeline that has ended).
+				res := make(chan error, 1)
+				go func() { _, err := d.Read(p); res <- err }()
+				select {
+				case err := <-res:
+					if err == nil {
+						t.Fatalf("at %d: Read after the panic: no error", at)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatalf("at %d: Read after the panic blocks", at)
+				}
+			}
+			d.Close()
+		}
+		if vals[0] == nil || vals[0] != vals[1] || !bytes.Equal(outs[0], outs[1]) {
+			t.Fatalf("at %d: n=1 %d bytes, panic %v; n=4 %d bytes, panic %v", at, len(outs[0]), vals[0], len(outs[1]), vals[1])
+		}
+		waitGoroutines(t, fmt.Sprint("panic at ", at), base)
+	}
+}
+
 // TestStreamPipelineFast streams valid frames (several frames, raw and
 // compressed blocks, checksums, a skippable frame, a dictionary) with
 // concurrency 4: S2 decodes every compressed block (none is left to S3).
@@ -873,9 +1053,10 @@ func TestStreamMemoryBoundHostile(t *testing.T) {
 }
 
 // TestStreamConcurrent32 decodes hostile streams (the most sequences a
-// block may have, an RLE bomb) with concurrency 8 from 4 goroutines at
+// block may have, an RLE bomb) with concurrency 64 from 4 goroutines at
 // once, on 32-bit platforms (a fatal out-of-memory error fails it): the
-// pipelines' buffers are bounded by pipelineMemBound whatever the input.
+// pipelines' buffers are bounded by pipelineMemBound whatever the input,
+// and whatever n (the read-ahead is at most maxReadAhead units).
 func TestStreamConcurrent32(t *testing.T) {
 	if maxMemoryCap >= 64<<30 {
 		t.Skip("32-bit platforms only")
@@ -884,7 +1065,7 @@ func TestStreamConcurrent32(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Go(func() {
-			d, err := NewReader(nil, WithDecoderConcurrency(8), WithDecoderMaxWindow(1<<20))
+			d, err := NewReader(nil, WithDecoderConcurrency(64), WithDecoderMaxWindow(1<<20))
 			if err != nil {
 				t.Error(err)
 				return

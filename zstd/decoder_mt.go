@@ -30,16 +30,28 @@ import (
 //     buffer and the errors, is the n == 1 stream's own code.
 //
 // So the output and the error are the n == 1 stream's, delivered the same
-// way, for any input. units holds at most n units between S1 and S2;
-// S2 hands each unit to S3 directly (blocks is unbuffered), so at most two
-// decoded blocks exist: S3's and S2's next.
+// way, for any input. units holds at most min(n, maxReadAhead) units
+// between S1 and S2; S2 hands each unit to S3 directly (blocks is
+// unbuffered), so at most two decoded blocks exist: S3's and S2's next.
+//
+// Each pipeline is one generation: stopping it closes done and waits for
+// S2 only. S1 may be inside the io.Reader's Read, which cannot be
+// interrupted: it is left to finish that read, then sees done and exits,
+// touching nothing but its own generation's channels, its own input
+// buffer and pooled units. So Reset and Close never block on the reader,
+// and S1 outlives them only until that Read returns.
 type pipeline struct {
 	done   chan struct{}
 	units  chan *blockUnit // S1 → S2
 	blocks chan *blockUnit // S2 → S3
-	wg     sync.WaitGroup
-	cur    *blockUnit // S3: the unit s.in holds
+	wg     sync.WaitGroup  // S2
+	cur    *blockUnit      // S3: the unit s.in holds
 }
+
+// maxReadAhead caps the units queued between S1 and S2: with two compute
+// stages a deeper queue buys nothing, and the pipeline's memory then does
+// not grow with n.
+const maxReadAhead = 4
 
 // unitKind is what a blockUnit holds.
 type unitKind uint8
@@ -61,6 +73,10 @@ type blockUnit struct {
 	dd  *ddict
 	blk *decodedBlock // unitBlock, set by S2
 	err error         // unitEnd
+	// unitEnd: the io.Reader's Read panicked with panicVal (re-raised on
+	// the caller's goroutine by readUnit, as with n == 1)
+	panicked bool
+	panicVal any
 }
 
 // The pipeline's buffers come from pools: units hold up to dStreamInSize
@@ -98,16 +114,18 @@ func putBlock(b *decodedBlock) {
 
 // pipelineMemBound is the most memory a pipeline of concurrency n holds in
 // its buffers, whatever the input (the stream's context and its window
-// buffers, as with n == 1, aside): the units (n queued, one S1 is sending,
-// S2's, S3's and S3's copy of input left before a unit), S1's input
-// buffer, S2's context and literal scratch, and the two decoded blocks
-// (S2's and S3's), each with at most blockSizeMax literals and
-// blockSizeMax/3 sequences (a block with more goes to S3 undecoded).
+// buffers, as with n == 1, aside): the units (min(n, maxReadAhead)
+// queued, one S1 is sending, S2's and S3's: readUnit gives S3's back
+// before it takes the next), S1's input buffer, S2's context and literal
+// scratch, and the two decoded blocks (S2's and S3's), each with at most
+// blockSizeMax literals and blockSizeMax/3 sequences (a block with more
+// goes to S3 undecoded). A stopped generation's S1, until its Read
+// returns, adds its input buffer and one unit.
 func pipelineMemBound(n int) int {
 	const pseqSize = 8 + intSize/8
 	const block = blockSizeMax + wildcopyOverlength + blockSizeMax/3*pseqSize
 	const dctxSize = 160 << 10 // entropy tables and litExtraBuffer: about 100 KiB
-	return (n+3)*dStreamInSize + 2*dStreamInSize + 2*dStreamInSize + dctxSize + blockSizeMax + 2*block
+	return (min(n, maxReadAhead)+3)*dStreamInSize + 2*dStreamInSize + dctxSize + blockSizeMax + 2*block
 }
 
 const intSize = 32 << (^uint(0) >> 63)
@@ -117,7 +135,7 @@ func (d *Decoder) startPipeline() {
 	s := &d.s
 	p := &pipeline{
 		done:   make(chan struct{}),
-		units:  make(chan *blockUnit, d.o.concurrent),
+		units:  make(chan *blockUnit, min(d.o.concurrent, maxReadAhead)),
 		blocks: make(chan *blockUnit),
 	}
 	if s.edc == nil {
@@ -125,7 +143,7 @@ func (d *Decoder) startPipeline() {
 		s.escratch = make([]byte, blockSizeMax)
 	}
 	f := &framer{p: p, r: s.r, dd: s.dc.ddict, dds: s.dc.ddicts}
-	p.wg.Add(2)
+	p.wg.Add(1)
 	go f.run()
 	go p.entropy(s.edc, s.escratch)
 	s.pipe = p
@@ -133,9 +151,8 @@ func (d *Decoder) startPipeline() {
 	s.dc.pipe = &pipeExec{}
 }
 
-// stopPipeline stops the stream's pipeline, if it runs, and waits for S1
-// and S2 to return (S1 may be in a Read of the io.Reader: that Read
-// returns first).
+// stopPipeline stops the stream's pipeline, if it runs: it waits for S2
+// to return, not for S1 (see pipeline).
 func (d *Decoder) stopPipeline() {
 	s := &d.s
 	p := s.pipe
@@ -144,9 +161,11 @@ func (d *Decoder) stopPipeline() {
 	}
 	close(p.done)
 	p.wg.Wait()
-	for _, ch := range []chan *blockUnit{p.units, p.blocks} {
-		for len(ch) > 0 {
-			putUnit(<-ch)
+	for n := len(p.units); n > 0; n-- {
+		select {
+		case u := <-p.units:
+			putUnit(u)
+		default:
 		}
 	}
 	if p.cur != nil {
@@ -162,15 +181,31 @@ func (d *Decoder) stopPipeline() {
 	s.in, s.inPos, s.inEnd = nil, 0, 0
 }
 
-// readUnit is readInput for a pipelined stream: it appends the next unit
-// to the unconsumed input, or sets eof, or returns the io.Reader's error
-// (S1 read it as readInput does).
+// errPipelineInput is readUnit's error for input left unconsumed before a
+// unit: impossible, since decompressStream makes progress (and so is not
+// asked for input) whenever it has input and room for output.
+var errPipelineInput = errors.New("zstd: internal error: stream input left before a pipeline unit")
+
+// readUnit is readInput for a pipelined stream: it makes the next unit
+// the input, or sets eof, or returns the io.Reader's error (S1 read it as
+// readInput does). A panic of the io.Reader's Read is raised again here.
 func (s *decStream) readUnit() error {
 	p := s.pipe
+	if s.inPos < s.inEnd {
+		return errPipelineInput
+	}
+	if p.cur != nil {
+		putUnit(p.cur)
+		p.cur, s.in, s.inPos, s.inEnd = nil, nil, 0, 0
+	}
 	u := <-p.blocks
 	if u.kind == unitEnd {
-		err := u.err
+		err, panicked, pv := u.err, u.panicked, u.panicVal
 		putUnit(u)
+		if panicked {
+			s.err = errReaderPanicked // sticky; fill stops the pipeline
+			panic(pv)
+		}
 		if err == nil {
 			s.eof = true
 		}
@@ -180,23 +215,14 @@ func (s *decStream) readUnit() error {
 		s.dc.pipe.blocks = append(s.dc.pipe.blocks, u.blk)
 		u.blk = nil
 	}
-	if s.inPos < s.inEnd {
-		// Go: input left in the unit before (rare: decompressStream takes
-		// all the input it is given when it makes progress) is joined to
-		// the unit's, as readInput keeps it before new input.
-		s.join = append(append(s.join[:0], s.in[s.inPos:s.inEnd]...), u.data...)
-		s.in = s.join
-		putUnit(u)
-	} else {
-		s.in = u.data
-		if p.cur != nil {
-			putUnit(p.cur)
-		}
-		p.cur = u
-	}
+	p.cur, s.in = u, u.data
 	s.inPos, s.inEnd = 0, len(s.in)
 	return nil
 }
+
+// errReaderPanicked is the sticky error of a stream whose io.Reader
+// panicked (the panic itself goes to the caller of Read or WriteTo).
+var errReaderPanicked = errors.New("zstd: io.Reader panicked")
 
 // pipeExec is the S3 state of a stream context a pipeline feeds.
 type pipeExec struct {
@@ -338,7 +364,18 @@ const (
 
 // run cuts the input into units and sends them to S2, then a unitEnd.
 func (f *framer) run() {
-	defer f.p.wg.Done()
+	defer func() {
+		// Go: a panic of the io.Reader's Read (the only code here that is
+		// not the decoder's) is carried to S3, which raises it on the
+		// caller's goroutine, where n == 1 raises it. The one recover() of
+		// the decoder files (scripts/decodercheck.sh allows it here only);
+		// a decoder bug panicking in cut() is raised there too, not hidden.
+		if r := recover(); r != nil {
+			end := getUnit(unitEnd, nil)
+			end.panicked, end.panicVal = true, r
+			f.send(end)
+		}
+	}()
 	f.buf = make([]byte, 0, 2*dStreamInSize)
 	for {
 		for {
