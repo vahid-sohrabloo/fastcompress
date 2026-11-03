@@ -534,7 +534,7 @@ func TestDecompressGrow(t *testing.T) {
 		// Output already in dst: the frame decodes after it (in dst's
 		// spare capacity when there is room, then in its own grown
 		// buffer, appended); the prefix and the frame's history survive.
-		// Plus the append of the frame (3.01 and 2.87 measured).
+		// Plus the append of the frame (3.01 and 3.25 measured).
 		{"dst prefix", prefix, noFCS, slices.Concat(prefix, in), 4},
 		{"dst prefix, spare capacity", slices.Grow(slices.Clone(prefix), 3<<20), withFCS,
 			slices.Concat(prefix, in), 4},
