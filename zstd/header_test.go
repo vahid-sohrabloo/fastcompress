@@ -414,10 +414,10 @@ var decoderSentinels = []error{
 	ErrWindowSizeTooSmall, io.ErrUnexpectedEOF,
 }
 
-// TestErrorsIs pins the error-mapping table rows reachable so far (through
-// Header.Decode), checking the sentinels directly. want nil means an error
+// TestHeaderErrorsIs pins the error-mapping table rows reachable through
+// Header.Decode, checking the sentinels directly. want nil means an error
 // that matches none of them (*corruptError).
-func TestErrorsIs(t *testing.T) {
+func TestHeaderErrorsIs(t *testing.T) {
 	zhdr := func(b ...byte) []byte { return append([]byte{0x28, 0xB5, 0x2F, 0xFD}, b...) }
 	for _, c := range []struct {
 		name string

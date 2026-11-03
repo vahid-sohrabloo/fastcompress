@@ -130,6 +130,30 @@ C's decoder is single-threaded. The design adds threads only at points C's own s
 - **`WithDecodeBuffersBelow(size)`:** on `Reset(r)`, if `r` has `Bytes() []byte` and `Len() int` and `Len() < size`, the decoder runs `DecodeAll` into an internal buffer and serves `Read`/`WriteTo` from it (doc semantics).
 - **`WithDecoderLowmem(true)`:** releases `dctx` and stream buffers above 1 MiB after each `DecodeAll` or frame, instead of keeping them.
 
+### The public `Decoder` (Task 12)
+
+- **Max memory on 32-bit platforms.** The memory limit in effect is `min(WithDecoderMaxMemory, maxMemoryCap)`, where `maxMemoryCap = math.MaxInt/2 + 1`: 1 GiB on 32-bit platforms, 2^62 on 64-bit ones (no cap in practice). The 32-bit default is therefore 1 GiB, not 64 GiB, and restic's explicit 16 GiB is 1 GiB there too.
+  - Why: `DecodeAll` reserves a trusted frame content size (at most 64 × the frame's compressed size) up front (Task 9 re-review N3). Without the cap, about 32 MiB of hostile input could ask a 32-bit process for about 2 GiB, which is a fatal runtime error, not an error value. With it, the largest reservation is 1 GiB, which needs 16 MiB of input (`TestDecodeAllAllocBound32` makes it under `GOARCH=386`). 1 GiB is also `DecodeTo`'s limit.
+  - Cost if wrong: on 32-bit platforms, `DecodeAll` of more than 1 GiB of output fails with `ErrDecoderSizeExceeded`, whatever `WithDecoderMaxMemory` says. Streams are not affected, apart from the window limit (min(max window, 1 GiB), already above the 512 MiB default window).
+  - On 64-bit platforms the 64× transient amplification for a trusted FCS stays as Task 9 accepted it (linear in the input).
+- **Window limit** for `DecodeAll` and streams: min(`WithDecoderMaxWindow`, the memory limit in effect), as the doc text says. A single-segment frame's window is its content size, so such a frame over the memory limit fails with `ErrWindowSizeExceeded` before any `ErrDecoderSizeExceeded`.
+- **Output limit.** `DecodeAll`: the memory limit in effect, or under `WithDecodeAllCapLimit` the smaller of it and `cap(dst)-len(dst)`. Streams: none; the doc text says the memory limit is a stream's maximum window. The stream's context gets `maxMemory = math.MaxUint64`. Its single-pass shortcut runs only when the caller's buffer holds the whole frame content, and it decodes in that buffer (Task 11 fix R1), so it reserves no memory. With the option's value instead, the shortcut would fail a frame over the limit that the same stream, cut differently, decodes.
+- **Dictionaries.** Every context gets `ddict = nil` and `ddicts` = the Decoder's set, built only with `newDDictSet` and `add`, and never empty. So each frame picks its dictionary by its ID (`selectFrameDDict`). A frame with an ID that is not registered fails with `ErrUnknownDictionary`; a frame without one uses the ID-0 dictionary, or none.
+  - `WithDecoderDictRaw(id, content)` sets the DDict's ID to `id` (C gives raw content ID 0). Empty content is accepted.
+  - `WithDecoderDicts` rejects content without the dictionary magic number (`errDictionaryWrong`), as `WithEncoderDict` does. C would take it as raw content; the doc text requires the `zstd --train` format. Corrupted tables give `errDictionaryCorrupted`. A zstd dictionary whose header ID is 0 is registered as ID 0.
+  - The last registration of an ID wins, whichever option made it. `ResetWithOptions` copies the map and builds a new set, so a set a running `DecodeAll` holds is never changed.
+- **`WithDecodeBuffersBelow`.** `Reset` decodes such a reader (`Len() < size`, no cap limit) with `decompressMultiFrame` on the stream's context, at the `DecodeAll` output limit. The reader is not read. `Read` and `WriteTo` then serve the output, then its error, so `Reset` itself never returns a decoding error. When that decode fails with `ErrDecoderSizeExceeded`, the reader is streamed instead, since a stream has no output limit.
+- **Streams.**
+  - `Read` returns when `p` is full, or when more input is needed and some output is ready, so it does not wait on the reader with output in hand.
+  - Errors are sticky until `Reset`: decoding errors, the reader's errors and `WriteTo`'s writer errors. A `Read` that produced bytes returns them with a nil error, and the next `Read` returns the error. The output decoded before an error is always delivered (Task 11 deviation (d)).
+  - Input that ends where the last `decompressStream` hint is not 0 (inside a frame) gives `io.ErrUnexpectedEOF`; at hint 0, `io.EOF`. 100 reads of nothing give `io.ErrNoProgress`, as with `bufio`.
+  - Input is read in `ZSTD_DStreamInSize()` chunks; `WriteTo` writes in `ZSTD_DStreamOutSize()` chunks.
+- **`WithDecoderLowmem`** frees the stream context's `inBuff`/`outBuff` at a frame end (`streamStage == zdssInit`) and at `Reset` when they hold more than 1 MiB, and the buffered output once it has been served. `DecodeAll`'s contexts keep no output buffers, so there is nothing to free there.
+- **`ResetWithOptions`** rejects a change of `WithDecoderConcurrency`, `WithDecodeBuffersBelow` or `WithDecoderLowmem` (passing the same value is allowed), as the doc text says. On an error nothing is reset.
+- **Option bounds.** `WithDecoderMaxMemory(0)` and values above 1<<63 are errors. `WithDecoderMaxWindow` must be between `MinWindowSize` and the format's largest window, (1<<41) + 7×(1<<38) ≈ 3.75 TiB (doc text). `WithDecoderConcurrency(n < 0)` is an error.
+- **`Close`** marks the Decoder closed and drops the stream state. Later calls (`DecodeAll`, `Read`, `WriteTo`, `Reset`, `ResetWithOptions`) return `ErrDecoderClosed`, and `DecodeAll` calls already running finish. `IOReadCloser().Close()` closes the Decoder.
+- **Zero value.** A `Decoder` not made by `NewReader` returns an error from every method (`Close` is a no-op), never blocks or panics.
+
 ### Other decisions
 
 - **`DecodeAll` per frame** follows C's `ZSTD_decompressMultiFrame`:
@@ -149,7 +173,7 @@ C's decoder is single-threaded. The design adds threads only at points C's own s
     - (b) **ID-0 shadowing.** C's `ZSTD_DDictHashSet_getDDict` stops at the first entry with ID 0 and returns it; C then sets `dctx->dictID` to the frame's ID, so a frame for X decodes with an ID-0 dictionary on X's probe path (wrong content, no entropy), and an X registered after that entry is never found. Go's lookup stops only at an empty slot or the exact ID: X is found, and an ID-0 dictionary is used only for dictID-0 frames.
     - (c) **One-shot C uses the wrong DDict.** `ZSTD_decompressMultiFrame` begins every frame with the DDict referenced last (`ZSTD_getDDict`) and only re-points `dctx->ddict` in `ZSTD_decodeFrameHeader`, so a frame for Y decodes with X's content and tables while the ID check passes. Go selects first and then begins the frame with the selected dictionary, as streaming C does.
     - C's probe `idx &= mask; idx++` reads one slot past the table (undefined behaviour); Go wraps to slot 0 (Task 10 ruling 2). Only the slot order differs; with (b) fixed it is not observable.
-- **Defaults** come from the doc text: max window = `MaxWindowSize` (1<<29), not C's windowLogMax 27, and max memory 64 GiB. Differential tests run cref with `-max-window-log 29`. Exception (controller ruling): `ZipDecompressor` defaults to a 128 MB max window (doc:138-140), overridable by options.
+- **Defaults** come from the doc text: max window = `MaxWindowSize` (1<<29), not C's windowLogMax 27, and max memory 64 GiB. On 32-bit platforms the max memory default is 1 GiB, and an explicit `WithDecoderMaxMemory` is capped there too (see The public `Decoder` below). Differential tests run cref with `-max-window-log 29`. Exception (controller ruling): `ZipDecompressor` defaults to a 128 MB max window (doc:138-140), overridable by options.
 - **`BuildDict`:**
   - ID 0 → C's XXH64-derived compliant ID.
   - Zero `Offsets` → C's `repStartValue` {1,4,8}, giving byte-identical output.

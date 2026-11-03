@@ -1,7 +1,7 @@
 # restic encoder-option check
 
 Source: restic 0.19.1 (latest release at 2026-11-02), source tarball read only, nothing built or run.
-All encoder construction is in `internal/repository/repository.go` (`getZstdEncoder`, line 320); both call sites use `EncodeAll` (lines 391 and 456, the latter with a 1-byte version prefix already in `dst`). The decoder (`NewReader`, `DecodeAll`, `WithDecoderConcurrency`, `WithDecoderMaxMemory`) is Phase 2 and out of scope here.
+All encoder construction is in `internal/repository/repository.go` (`getZstdEncoder`, line 320); both call sites use `EncodeAll` (lines 391 and 456, the latter with a 1-byte version prefix already in `dst`). The decoder is checked in the Decoder section below (Phase 2 Task 12).
 
 ## Options restic passes
 
@@ -41,4 +41,29 @@ All of restic's levels (1, 3, 7, 11) are in the Task 22 table, so `bench/compare
 
 ## Caveat
 
-The benchmark rows use each level's default window; restic forces windowLog=19. Blobs in restic are at most a few MB and the window is clamped to the input size as in C, so the effect is expected to be small, but no window-19 cell was benchmarked. Restic cannot swap imports until Phase 2 (decoder).
+The benchmark rows use each level's default window; restic forces windowLog=19. Blobs in restic are at most a few MB and the window is clamped to the input size as in C, so the effect is expected to be small, but no window-19 cell was benchmarked. Restic cannot swap imports until Phase 2 (decoder) is complete.
+
+## Decoder (Phase 2 Task 12)
+
+Source: the same restic 0.19.1 tarball, read only, nothing built or run. restic 0.19.1 pins `github.com/klauspost/compress v1.18.6` (`go.mod:25`). It uses only `DecodeAll`, never a decoder stream.
+
+### Construction
+
+| restic call site | construction | use |
+|---|---|---|
+| `internal/repository/repository.go:355-372` (`getZstdDecoder`, once per repository) | `zstd.NewReader(nil, zstd.WithDecoderConcurrency(0), zstd.WithDecoderMaxMemory(16 * 1024 * 1024 * 1024))` | `DecodeAll(plaintext, nil)` (line 436, unpacked files), `DecodeAll(p[1:], nil)` (line 479, versioned JSON), and through `streamPack` |
+| `internal/repository/repository.go:1282` (`packBlobIterator`) | the decoder passed in | `DecodeAll(plaintext, b.decode[:0])`: a reused buffer |
+| `internal/repository/checker.go:254` (one per check worker, `defer dec.Close()`) | `zstd.NewReader(nil)` | `CheckPack` → `packBlobIterator` |
+| `cmd/restic/cmd_debug.go:343` (`loadBlobs`) | `zstd.NewReader(nil)` | `DecodeAll(plaintext, nil)` (line 387) |
+
+### Options restic passes
+
+| restic option | fastzstd | supported |
+|---|---|---|
+| `NewReader(nil, …)` | `NewReader` (decoder.go): nil reader, DecodeAll only | yes |
+| `WithDecoderConcurrency(0)` | GOMAXPROCS decompression contexts, one per concurrent `DecodeAll` (decoder_options.go) | yes |
+| `WithDecoderMaxMemory(16 GiB)` | `DecodeAll` output limit 16 GiB, window limit min(512 MiB, 16 GiB). On 32-bit platforms the limit in effect is 1 GiB (see the decisions doc) | yes |
+| `DecodeAll(src, nil)` / `DecodeAll(src, buf[:0])` | appends to dst; a frame with a content size (restic's `EncodeAll` frames always have one) decodes in dst's spare capacity, or into one allocation of its size | yes |
+| `Close()` | releases the stream state; later calls return `ErrDecoderClosed` | yes |
+
+`TestResticDecoderOptions` (zstd/decoder_test.go) builds both constructions exactly as above and decodes 1 MiB and 4 MiB blobs written with restic's encoder options (CRC off, 512 KiB window) at levels 1/3/7/11, into nil and into a reused buffer. `scripts/apicheck.sh --subset` passes.

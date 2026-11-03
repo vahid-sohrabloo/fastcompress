@@ -364,8 +364,16 @@ const (
 	// counterpart is ZSTD_MAXWINDOWSIZE_DEFAULT ((1<<27)+1); the doc text
 	// sets MaxWindowSize (1<<29).
 	defaultMaxWindowSize = MaxWindowSize
-	// defaultMaxMemory is WithDecoderMaxMemory's default, 64 GiB.
-	defaultMaxMemory = 64 << 30
+	// maxMemoryCap caps the memory limit in effect (Decoder.memLimit):
+	// 1 GiB on 32-bit platforms, half of the int range, so that hostile
+	// input cannot make DecodeAll reserve more than the address space can
+	// give (a fatal runtime error, not an error value: a trusted frame
+	// content size is reserved up front, see decompressFrames). On 64-bit
+	// platforms it is 2^62 bytes, no cap in practice.
+	maxMemoryCap = math.MaxInt/2 + 1
+	// defaultMaxMemory is WithDecoderMaxMemory's default: 64 GiB as the
+	// doc text says, 1 GiB (maxMemoryCap) on 32-bit platforms.
+	defaultMaxMemory = min(64<<30, maxMemoryCap)
 	// frameHeaderSizeMin. C: ZSTD_FRAMEHEADERSIZE_MIN(ZSTD_f_zstd1)
 	frameHeaderSizeMin = 6
 	// frameTrustMin and frameTrustRatio bound the output space
