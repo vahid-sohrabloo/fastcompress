@@ -35,6 +35,7 @@ type DOption func(*decoderOptions) error
 // decoderOptions holds the options a Decoder was created with.
 type decoderOptions struct {
 	concurrent     int    // DecodeAll contexts
+	concurrentReq  int    // WithDecoderConcurrency's n as given; -1: not given
 	maxMemory      uint64 // WithDecoderMaxMemory, as given (see Decoder.memLimit)
 	maxWindow      uint64
 	capLimit       bool
@@ -49,10 +50,11 @@ type decoderOptions struct {
 
 func (o *decoderOptions) defaults() {
 	*o = decoderOptions{
-		concurrent:   min(4, runtime.GOMAXPROCS(0)),
-		maxMemory:    defaultMaxMemory,
-		maxWindow:    defaultMaxWindowSize,
-		buffersBelow: 128 << 10,
+		concurrent:    min(4, runtime.GOMAXPROCS(0)),
+		concurrentReq: -1,
+		maxMemory:     defaultMaxMemory,
+		maxWindow:     defaultMaxWindowSize,
+		buffersBelow:  128 << 10,
 	}
 }
 
@@ -135,6 +137,7 @@ func WithDecoderConcurrency(n int) DOption {
 		if n < 0 {
 			return fmt.Errorf("zstd: concurrency must be at least 0, got %d", n)
 		}
+		o.concurrentReq = n
 		if n == 0 {
 			n = runtime.GOMAXPROCS(0)
 		}

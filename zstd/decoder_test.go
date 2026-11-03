@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
 )
@@ -198,8 +199,10 @@ func TestDecoderWriteToCref(t *testing.T) {
 
 // TestDecodeAllConcurrent runs 16 goroutines decoding the corpus (entries
 // up to 8 MiB, without raw-content dictionaries) with DecodeAll on one
-// Decoder of concurrency 4 that has every zstd-format dictionary, while a
-// stream is decoded on it too. Run it with -race.
+// Decoder of concurrency 4 that has every zstd-format dictionary, plus
+// frames made with a raw-content dictionary registered as ID 77 (so
+// contexts switch between cold and hot dictionaries), while a stream is
+// decoded on it too. Run it with -race.
 func TestDecodeAllConcurrent(t *testing.T) {
 	var frames []creftest.Frame
 	var dicts [][]byte
@@ -216,7 +219,13 @@ func TestDecodeAllConcurrent(t *testing.T) {
 	if len(frames) == 0 || len(dicts) < 2 {
 		t.Fatalf("%d frames, %d dictionaries", len(frames), len(dicts))
 	}
-	d := newTestDecoder(t, WithDecoderConcurrency(4), WithDecoderDicts(dicts...))
+	raw := readTestdata(t, "dickens-32k.raw")
+	re := newTestEncoder(t, WithEncoderDictRaw(77, raw))
+	for i, n := range []int{100, 5000, 200000} {
+		text := malText(n + i)
+		frames = append(frames, creftest.Frame{Data: re.EncodeAll(text, nil), Want: text})
+	}
+	d := newTestDecoder(t, WithDecoderConcurrency(4), WithDecoderDicts(dicts...), WithDecoderDictRaw(77, raw))
 	if cap(d.dctxs) != 4 {
 		t.Fatalf("%d contexts, want 4", cap(d.dctxs))
 	}
@@ -333,6 +342,227 @@ func TestDecodeAllAllocBound32(t *testing.T) {
 	d := newTestDecoder(t, WithDecoderConcurrency(1))
 	if _, err := d.DecodeAll(in, nil); !errors.Is(err, ErrFrameSizeMismatch) && !errors.Is(err, ErrDecoderSizeExceeded) {
 		t.Fatal(err)
+	}
+}
+
+// rleBombFrame is a frame without a content size (window 1 MiB) of nb RLE
+// blocks of 128 KiB each: about 4 × nb bytes of input, nb × 128 KiB of
+// output.
+func rleBombFrame(nb int) []byte {
+	b := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, malWindow1M}
+	for i := range nb {
+		b = append(b, malBlockHeader(btRLE, blockSizeMax, i == nb-1)...)
+		b = append(b, 'x')
+	}
+	return b
+}
+
+// TestDecodeAllConcurrent32 pins review I1 on 32-bit platforms (short mode
+// too: CI runs it under GOARCH=386): concurrent DecodeAll calls share the
+// Decoder's 1 GiB budget, so 4 goroutines decoding 16 MiB frames whose
+// trusted content size is 1 GiB, and 2 goroutines decoding a 33 KiB RLE
+// bomb of 1 GiB, each get output or ErrDecoderSizeExceeded, never a fatal
+// out-of-memory error.
+func TestDecodeAllConcurrent32(t *testing.T) {
+	if strconv.IntSize != 32 {
+		t.Skip("32-bit platforms")
+	}
+	nb := (1<<30/64)/3 + 1
+	trusted := emptyBlocksFrame(1<<30, nb)
+	bomb := rleBombFrame(8192)
+	for _, c := range []struct {
+		name string
+		in   []byte
+		n    int
+		ok   error // the error a call that got the memory ends with
+	}{
+		{"trusted-fcs", trusted, 4, ErrFrameSizeMismatch},
+		{"rle-bomb", bomb, 2, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := newTestDecoder(t)
+			var wg sync.WaitGroup
+			for range c.n {
+				wg.Go(func() {
+					out, err := d.DecodeAll(c.in, nil)
+					if err != c.ok && !errors.Is(err, ErrDecoderSizeExceeded) {
+						t.Errorf("%d bytes, %v", len(out), err)
+					}
+				})
+			}
+			wg.Wait()
+			if l := d.budget.left.Load(); l != maxMemoryCap {
+				t.Fatalf("budget left %d, want %d", l, int64(maxMemoryCap))
+			}
+		})
+	}
+}
+
+// TestDecodeAllBudget checks the budget logic on any platform with a
+// small budget: calls that need more fail with ErrDecoderSizeExceeded
+// (also after output: the bytes before it are kept), calls that fit
+// succeed while others hold memory, and every call gives back what it
+// took.
+func TestDecodeAllBudget(t *testing.T) {
+	text := malText(3 << 20)
+	withFCS := malEncode(t, text, true)
+	// A small frame without a content size: 1 MiB reserved, then grown.
+	rep := bytes.Repeat([]byte("abc"), 1<<20)
+	var b bytes.Buffer
+	e := newTestEncoder(t)
+	e.Reset(&b)
+	e.Write(rep)
+	e.Close()
+	noFCS := b.Bytes()
+	d := newTestDecoder(t, WithDecoderConcurrency(4))
+	d.budget = newMemBudget(4 << 20)
+	if got, err := d.DecodeAll(withFCS, nil); err != nil || !bytes.Equal(got, text) {
+		t.Fatalf("within the budget: %v", err)
+	}
+	// Growing from 1 MiB charges 1 + 2 + 3 MiB (replaced buffers stay
+	// charged): over 4 MiB.
+	if got, err := d.DecodeAll(noFCS, nil); !errors.Is(err, ErrDecoderSizeExceeded) || !bytes.Equal(got, rep[:len(got)]) || len(got) == 0 {
+		t.Fatalf("growing past the budget: %d bytes, %v", len(got), err)
+	}
+	// The caller's capacity is not charged.
+	if got, err := d.DecodeAll(noFCS, make([]byte, 0, len(rep))); err != nil || !bytes.Equal(got, rep) {
+		t.Fatalf("in dst's capacity: %v", err)
+	}
+	if l := d.budget.left.Load(); l != 4<<20 {
+		t.Fatalf("budget left %d after the calls", l)
+	}
+	// Two calls of 3 MiB each: one gets the memory, or both in turn.
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 5 {
+				got, err := d.DecodeAll(withFCS, nil)
+				if err != nil && !errors.Is(err, ErrDecoderSizeExceeded) || err == nil && !bytes.Equal(got, text) {
+					t.Errorf("%d bytes, %v", len(got), err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if l := d.budget.left.Load(); l != 4<<20 {
+		t.Fatalf("budget left %d after concurrent calls", l)
+	}
+}
+
+// TestDecodeAllPresized pins review I2: a frame without a content size
+// (the streaming Encoder's) decodes in a dst the caller sized for its
+// output, allocating no output buffer (what is left, under 1 KiB, is
+// fse.buildDTable's per-table workspace: Task 20).
+func TestDecodeAllPresized(t *testing.T) {
+	d := newTestDecoder(t, WithDecoderConcurrency(1))
+	e := newTestEncoder(t)
+	for _, n := range []int{1000, 100000, 1 << 20, 3 << 20} {
+		text := malText(n)
+		var b bytes.Buffer
+		e.Reset(&b)
+		e.Write(text)
+		e.Close()
+		frame := b.Bytes()
+		dst := make([]byte, 0, n)
+		if got, err := d.DecodeAll(frame, dst); err != nil || !bytes.Equal(got, text) || &got[0] != &dst[:1][0] {
+			t.Fatalf("%d: %v, equal %v", n, err, bytes.Equal(got, text))
+		}
+		var m0, m1 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		for range 10 {
+			d.DecodeAll(frame, dst)
+		}
+		runtime.ReadMemStats(&m1)
+		if a := (m1.TotalAlloc - m0.TotalAlloc) / 10; a >= 1024 {
+			t.Fatalf("%d: %d bytes allocated per call", n, a)
+		}
+	}
+}
+
+// TestDecodeAllTrialCold checks that the trial decode into dst's spare
+// capacity leaves the dictionary cold: a fresh context gives the same
+// result with and without spare capacity (FuzzDecodeAll seed
+// b1ad5558968c6210, whose error depends on C's cold/hot decoder choice).
+func TestDecodeAllTrialCold(t *testing.T) {
+	data := []byte("(\xb5/\xfd\xa000\x04\x00T\x00\x00%00\x01\x000001\x020")
+	raw := readTestdata(t, "dickens-32k.raw")
+	results := map[string]bool{}
+	for _, dst := range [][]byte{nil, make([]byte, 0, 10)} {
+		d := newTestDecoder(t, WithDecoderConcurrency(1), WithDecoderDictRaw(0, raw))
+		_, err := d.DecodeAll(data, dst)
+		if err == nil {
+			t.Fatal("no error")
+		}
+		results[errClass(err)] = true
+	}
+	if len(results) != 1 {
+		t.Fatalf("results differ with spare capacity: %v", results)
+	}
+}
+
+// TestDecoderZero checks that a Decoder not made by NewReader returns
+// errors and never blocks or panics.
+func TestDecoderZero(t *testing.T) {
+	var d Decoder
+	frame := malEncode(t, malText(100), true)
+	if _, err := d.DecodeAll(frame, nil); err != errDecoderZero {
+		t.Fatalf("DecodeAll: %v", err)
+	}
+	if _, err := d.Read(make([]byte, 10)); err != errDecoderZero {
+		t.Fatalf("Read: %v", err)
+	}
+	if _, err := d.WriteTo(io.Discard); err != errDecoderZero {
+		t.Fatalf("WriteTo: %v", err)
+	}
+	if err := d.Reset(wholeReader(frame)); err != errDecoderZero {
+		t.Fatalf("Reset: %v", err)
+	}
+	if err := d.ResetWithOptions(nil); err != errDecoderZero {
+		t.Fatalf("ResetWithOptions: %v", err)
+	}
+	d.Close()
+	if _, err := d.IOReadCloser().Read(make([]byte, 10)); err == nil {
+		t.Fatal("IOReadCloser Read: no error")
+	}
+}
+
+// TestDecodeAllClose runs DecodeAll from 8 goroutines while Close runs
+// (with -race): each call decodes or returns ErrDecoderClosed, and Close
+// drops the idle contexts.
+func TestDecodeAllClose(t *testing.T) {
+	text := malText(100000)
+	frame := malEncode(t, text, true)
+	d, err := NewReader(nil, WithDecoderConcurrency(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for {
+				got, err := d.DecodeAll(frame, nil)
+				if err == ErrDecoderClosed {
+					return
+				}
+				if err != nil || !bytes.Equal(got, text) {
+					t.Errorf("%v", err)
+					return
+				}
+			}
+		})
+	}
+	time.Sleep(10 * time.Millisecond)
+	d.Close()
+	wg.Wait()
+	d2 := newTestDecoder(t, WithDecoderConcurrency(2))
+	if _, err := d2.DecodeAll(frame, nil); err != nil {
+		t.Fatal(err)
+	}
+	d2.Close()
+	for range cap(d2.dctxs) {
+		if dc := <-d2.dctxs; dc != nil {
+			t.Fatal("Close kept an idle context")
+		}
 	}
 }
 
@@ -607,6 +837,12 @@ func TestDecoderOptions(t *testing.T) {
 		}
 		if err := d.ResetWithOptions(nil, WithDecoderConcurrency(2)); err == nil {
 			t.Fatal("changed with ResetWithOptions")
+		}
+		// 0 given again is no change, whatever GOMAXPROCS is now.
+		d = newTestDecoder(t, WithDecoderConcurrency(0))
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(runtime.GOMAXPROCS(0) + 1))
+		if err := d.ResetWithOptions(nil, WithDecoderConcurrency(0)); err != nil {
+			t.Fatalf("0 again after GOMAXPROCS changed: %v", err)
 		}
 		for _, n := range []int{1, 2} {
 			d := newTestDecoder(t, WithDecoderConcurrency(n))
@@ -1013,8 +1249,10 @@ func TestDecodeTo(t *testing.T) {
 //     one (ZSTD_decompressSequencesLong) when the dictionary is cold, i.e.
 //     not the one the context's previous frame used, or when the history
 //     is over 16 MiB and offsets are long. Both are the same C error.
+//     Only with a dictionary (dicts) can the two paths differ here: the
+//     long-offset share depends on the input alone.
 //     The output (the blocks before it) is the same.
-func checkStreamResult(t *testing.T, what string, singleSegment bool, got []byte, serr error, want []byte, derr error) {
+func checkStreamResult(t *testing.T, what string, singleSegment, dicts bool, got []byte, serr error, want []byte, derr error) {
 	t.Helper()
 	if derr == io.ErrUnexpectedEOF {
 		if serr == nil || !bytes.HasPrefix(got, want) {
@@ -1036,7 +1274,7 @@ func checkStreamResult(t *testing.T, what string, singleSegment bool, got []byte
 		return errors.Is(err, ErrWindowSizeTooSmall) || errors.As(err, &ce) && ce.code.cCode() == int(dErrCorruptionDetected)
 	}
 	sameClass := derr == nil && serr == nil || derr != nil && serr != nil && errClass(derr) == errClass(serr)
-	if !sameClass && !(derr != nil && serr != nil && (blockOrFrame(derr) || blockOrFrame(serr) || seqCorrupt(derr) && seqCorrupt(serr))) {
+	if !sameClass && !(derr != nil && serr != nil && (blockOrFrame(derr) || blockOrFrame(serr) || dicts && seqCorrupt(derr) && seqCorrupt(serr))) {
 		t.Fatalf("%s: DecodeAll %v, stream %v", what, derr, serr)
 	}
 	if !bytes.Equal(got, want) {
@@ -1112,9 +1350,9 @@ func FuzzDecodeAll(f *testing.F) {
 			return // the stream has no such limit
 		}
 		got, serr := readAll(t, d, wholeReader(data), fixedSize(dStreamOutSize), fuzzLimit)
-		checkStreamResult(t, "Read", d.s.dc.fParams.singleSegment, got, serr, want, derr)
+		checkStreamResult(t, "Read", d.s.dc.fParams.singleSegment, opts&48 != 0, got, serr, want, derr)
 		got, serr = writeToAll(t, d, wholeReader(data))
-		checkStreamResult(t, "WriteTo", d.s.dc.fParams.singleSegment, got, serr, want, derr)
+		checkStreamResult(t, "WriteTo", d.s.dc.fParams.singleSegment, opts&48 != 0, got, serr, want, derr)
 	})
 }
 
@@ -1135,14 +1373,14 @@ func FuzzDecoderRead(f *testing.F) {
 		maxP := 1 + r.IntN(1<<17)
 		got, serr := readAll(t, d, &chunkReader{b: data, next: func() int { return 1 + r.IntN(maxChunk) }},
 			func() int { return 1 + r.IntN(maxP) }, fuzzLimit)
-		checkStreamResult(t, "Read", d.s.dc.fParams.singleSegment, got, serr, want, derr)
+		checkStreamResult(t, "Read", d.s.dc.fParams.singleSegment, false, got, serr, want, derr)
 		got, serr = writeToAll(t, d, &chunkReader{b: data, next: func() int { return 1 + r.IntN(maxChunk) }})
-		checkStreamResult(t, "WriteTo", d.s.dc.fParams.singleSegment, got, serr, want, derr)
+		checkStreamResult(t, "WriteTo", d.s.dc.fParams.singleSegment, false, got, serr, want, derr)
 		// Under 128 KiB, from a buffer: DecodeAll's result exactly.
 		got, serr = readAll(t, d, bytes.NewBuffer(data), fixedSize(maxP), fuzzLimit)
 		if len(data) < 128<<10 && (!bytes.Equal(got, want) || serr != derr && (serr == nil || derr == nil || errClass(serr) != errClass(derr))) {
 			t.Fatalf("buffered: %d bytes, %v; DecodeAll %d bytes, %v", len(got), serr, len(want), derr)
 		}
-		checkStreamResult(t, "buffered", d.s.dc.fParams.singleSegment, got, serr, want, derr)
+		checkStreamResult(t, "buffered", d.s.dc.fParams.singleSegment, false, got, serr, want, derr)
 	})
 }

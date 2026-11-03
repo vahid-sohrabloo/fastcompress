@@ -30,14 +30,35 @@ import (
 // that is not registered fails with ErrUnknownDictionary, and a frame
 // without one uses the dictionary registered with ID 0, if any.
 //
-// ResetWithOptions must not run while DecodeAll calls are running. The zero
+// DecodeAll may run concurrently with every other method; it uses the
+// options of the last NewReader or ResetWithOptions that completed. The
+// stream methods (Read, WriteTo, Reset, ResetWithOptions) and Close must
+// not run concurrently with each other, as for any io.Reader. The zero
 // value is not usable: its methods return an error.
+//
+// On 32-bit platforms the DecodeAll calls of a Decoder share one memory
+// budget of 1 GiB (maxMemoryCap), charged for every buffer they allocate
+// and given back when each call returns; a call that would exceed it fails
+// with ErrDecoderSizeExceeded. Several Decoders in one 32-bit process, and
+// a stream's window buffers, are not covered by it.
 type Decoder struct {
-	o      decoderOptions
-	dctxs  chan *dctx // one slot per concurrent DecodeAll; nil slots get a context on first use
-	dicts  *ddictSet  // o's dictionaries by ID; shared, read only, by every context
+	o      decoderOptions // the stream's options (Reset, Read, WriteTo)
+	dctxs  chan *dctx     // one slot per concurrent DecodeAll; nil slots get a context on first use
+	dicts  *ddictSet      // o's dictionaries by ID; shared, read only, by every context
 	s      decStream
 	closed atomic.Bool
+	// cfg is DecodeAll's copy of o and dicts, replaced (never changed) by
+	// ResetWithOptions, so that DecodeAll can run during it.
+	cfg atomic.Pointer[decoderConfig]
+	// budget is the 32-bit DecodeAll memory budget; nil on 64-bit
+	// platforms.
+	budget *memBudget
+}
+
+// decoderConfig is an immutable snapshot of a Decoder's options.
+type decoderConfig struct {
+	o     decoderOptions
+	dicts *ddictSet
 }
 
 // decStream is the state of the stream (Read, WriteTo).
@@ -96,6 +117,10 @@ func NewReader(r io.Reader, opts ...DOption) (*Decoder, error) {
 		d.dctxs <- nil
 	}
 	d.dicts = d.o.ddictSet()
+	d.cfg.Store(&decoderConfig{o: d.o, dicts: d.dicts})
+	if maxMemoryCap < 64<<30 { // 32-bit platforms
+		d.budget = newMemBudget(maxMemoryCap)
+	}
 	if err := d.Reset(r); err != nil {
 		return nil, err
 	}
@@ -104,23 +129,24 @@ func NewReader(r io.Reader, opts ...DOption) (*Decoder, error) {
 
 // memLimit returns the memory limit in effect: WithDecoderMaxMemory, at
 // most maxMemoryCap.
-func (d *Decoder) memLimit() uint64 {
-	return min(d.o.maxMemory, maxMemoryCap)
+func (o *decoderOptions) memLimit() uint64 {
+	return min(o.maxMemory, maxMemoryCap)
 }
 
-// configure sets dc's C parameters and dictionaries from the options, and
-// its output limit (no C counterpart).
-func (d *Decoder) configure(dc *dctx, outLimit uint64) {
+// configure sets dc's C parameters and dictionaries from o and dicts, its
+// output limit and its memory budget (no C counterparts).
+func configure(dc *dctx, o *decoderOptions, dicts *ddictSet, outLimit uint64, budget *memBudget) {
 	// C: ZSTD_d_windowLogMax. WithDecoderMaxWindow, or a lower memory
 	// limit (doc text).
-	dc.setMaxWindow(min(d.o.maxWindow, d.memLimit()))
-	dc.setIgnoreChecksum(d.o.ignoreChecksum)
+	dc.setMaxWindow(min(o.maxWindow, o.memLimit()))
+	dc.setIgnoreChecksum(o.ignoreChecksum)
 	dc.maxMemory = outLimit
+	dc.budget = budget
 	// C: ZSTD_d_refMultipleDDicts: every frame picks its dictionary in the
 	// set by its ID (decompressFrames, decompressStream); there is no
 	// single default DDict.
 	dc.ddict = nil
-	dc.ddicts = d.dicts
+	dc.ddicts = dicts
 }
 
 // DecodeAll allows stateless decoding of a blob of bytes.
@@ -147,12 +173,15 @@ func (d *Decoder) DecodeAll(input, dst []byte) ([]byte, error) {
 	if dc == nil {
 		dc = newDCtx()
 	}
-	limit := d.memLimit()
-	if d.o.capLimit {
+	c := d.cfg.Load()
+	limit := c.o.memLimit()
+	if c.o.capLimit {
 		limit = min(limit, uint64(cap(dst)-len(dst)))
 	}
-	d.configure(dc, limit)
-	return dc.decompressMultiFrame(dst, input, nil)
+	configure(dc, &c.o, c.dicts, limit, d.budget)
+	out, err := dc.decompressMultiFrame(dst, input, nil)
+	dc.releaseBudget()
+	return out, err
 }
 
 // Reset will reset the decoder the supplied stream after the current has finished processing.
@@ -188,8 +217,9 @@ func (d *Decoder) Reset(r io.Reader) error {
 		Bytes() []byte
 		Len() int
 	}); ok && !d.o.capLimit && b.Len() < d.o.buffersBelow {
-		d.configure(s.dc, d.memLimit())
+		configure(s.dc, &d.o, d.dicts, d.o.memLimit(), d.budget)
 		out, err := s.dc.decompressMultiFrame(s.buf, b.Bytes(), nil)
+		s.dc.releaseBudget()
 		if !errors.Is(err, ErrDecoderSizeExceeded) {
 			s.buffered, s.buf, s.bufErr = true, out, err
 			return nil
@@ -201,7 +231,7 @@ func (d *Decoder) Reset(r io.Reader) error {
 	// Go: the output of a stream is not limited (doc text: for streams,
 	// WithDecoderMaxMemory limits the window). The single-pass shortcut
 	// decodes into the caller's buffer only, so it reserves no memory.
-	d.configure(s.dc, math.MaxUint64)
+	configure(s.dc, &d.o, d.dicts, math.MaxUint64, nil)
 	return nil
 }
 
@@ -227,11 +257,17 @@ func (d *Decoder) ResetWithOptions(r io.Reader, opts ...DOption) error {
 			return err
 		}
 	}
+	// WithDecoderConcurrency(n) given again is no change, even when n = 0
+	// now means another GOMAXPROCS.
+	if o.concurrentReq == d.o.concurrentReq {
+		o.concurrent = d.o.concurrent
+	}
 	if o.concurrent != d.o.concurrent || o.buffersBelow != d.o.buffersBelow || o.lowMem != d.o.lowMem {
 		return errors.New("zstd: WithDecoderConcurrency, WithDecodeBuffersBelow and WithDecoderLowmem cannot be changed with ResetWithOptions")
 	}
 	d.o = o
 	d.dicts = o.ddictSet() // a new set: one held by a context is not changed
+	d.cfg.Store(&decoderConfig{o: o, dicts: d.dicts})
 	return d.Reset(r)
 }
 
@@ -440,13 +476,22 @@ func (c closeWrapper) Close() error {
 // Close will release all resources.
 // It is NOT possible to reuse the decoder after this.
 //
-// DecodeAll calls already running finish normally. Closing twice is a
-// no-op.
+// DecodeAll calls already running finish normally. The idle DecodeAll
+// contexts are dropped; Close must not run concurrently with the stream
+// methods (see Decoder). Closing twice is a no-op.
 func (d *Decoder) Close() {
 	if d.closed.Swap(true) {
 		return
 	}
 	d.s = decStream{}
+	for n := len(d.dctxs); n > 0; n-- {
+		select {
+		case <-d.dctxs:
+			d.dctxs <- nil
+		default:
+			return
+		}
+	}
 }
 
 var (
