@@ -3,6 +3,7 @@ package zstd
 import (
 	"errors"
 	"io"
+	"strconv"
 	"sync"
 )
 
@@ -67,3 +68,84 @@ func (z *zipWriter) Write(p []byte) (int, error) {
 }
 
 var errZipClosed = errors.New("zstd: write to closed zip entry")
+
+// zipMaxWindow is ZipDecompressor's default max window (doc text: 128MB).
+const zipMaxWindow = 128 << 20
+
+// zipPoolSize is the number of idle Decoders a ZipDecompressor keeps:
+// 8 on 64-bit platforms, 4 on 32-bit ones. Each Decoder keeps its stream
+// buffers (up to the window size plus a block) while idle.
+const zipPoolSize = strconv.IntSize / 8
+
+// ZipDecompressor returns a decompressor that can be registered with zip libraries.
+// See ZipCompressor for example.
+// Options can be specified. WithDecoderConcurrency(1) is forced,
+// and by default a 128MB maximum decompression window is specified.
+// The window size can be overridden if required.
+//
+// Each open entry decodes with its own Decoder, so its own memory limits;
+// Close hands the Decoder back to a pool that keeps at most 8 idle
+// Decoders (4 on 32-bit platforms) and closes the others. An error in opts
+// is returned by every Read of the entry.
+func ZipDecompressor(opts ...DOption) func(r io.Reader) io.ReadCloser {
+	all := make([]DOption, 0, len(opts)+2)
+	all = append(all, WithDecoderMaxWindow(zipMaxWindow))
+	all = append(all, opts...)
+	all = append(all, WithDecoderConcurrency(1))
+	pool := make(chan *Decoder, zipPoolSize)
+	return func(r io.Reader) io.ReadCloser {
+		var d *Decoder
+		select {
+		case d = <-pool:
+		default:
+			var err error
+			if d, err = NewReader(nil, all...); err != nil {
+				return &zipReader{err: err}
+			}
+		}
+		if err := d.Reset(r); err != nil {
+			d.Close()
+			return &zipReader{err: err}
+		}
+		return &zipReader{dec: d, pool: pool}
+	}
+}
+
+// zipReader hands its Decoder back to the pool when closed. The Decoder is
+// a named field so that no other Decoder method is promoted (see
+// zipWriter). err, when set, is returned by every Read.
+type zipReader struct {
+	dec  *Decoder
+	pool chan *Decoder
+	err  error
+}
+
+func (z *zipReader) Read(p []byte) (int, error) {
+	if z.err != nil {
+		return 0, z.err
+	}
+	if z.dec == nil {
+		return 0, errZipReadClosed
+	}
+	return z.dec.Read(p)
+}
+
+func (z *zipReader) Close() error {
+	d := z.dec
+	if d == nil {
+		return nil
+	}
+	z.dec = nil
+	if d.Reset(nil) != nil { // do not keep the entry's reader alive
+		d.Close()
+		return nil
+	}
+	select {
+	case z.pool <- d:
+	default:
+		d.Close()
+	}
+	return nil
+}
+
+var errZipReadClosed = errors.New("zstd: read from closed zip entry")

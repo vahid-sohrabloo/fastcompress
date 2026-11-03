@@ -3,8 +3,14 @@ package zstd
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
+	"fmt"
+	"hash/crc32"
 	"io"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
 )
@@ -158,5 +164,288 @@ func TestZipWriterAfterClose(t *testing.T) {
 	}
 	if _, err := w.Write([]byte("x")); err == nil {
 		t.Fatal("Write after Close succeeded")
+	}
+}
+
+// zipEntry is one entry of a test archive: raw entries hold a frame written
+// with CreateRaw.
+type zipEntry struct {
+	name   string
+	data   []byte // the decompressed content
+	raw    []byte // nil: compressed with ZipCompressor
+	method uint16
+}
+
+// zipArchive writes entries into a zip archive.
+func zipArchive(t *testing.T, entries []zipEntry) *zip.Reader {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	zw.RegisterCompressor(ZipMethodWinZip, ZipCompressor())
+	zw.RegisterCompressor(ZipMethodPKWare, ZipCompressor())
+	for _, e := range entries {
+		var w io.Writer
+		var err error
+		if e.raw == nil {
+			w, err = zw.CreateHeader(&zip.FileHeader{Name: e.name, Method: e.method})
+		} else {
+			w, err = zw.CreateRaw(&zip.FileHeader{
+				Name:               e.name,
+				Method:             e.method,
+				CRC32:              crc32.ChecksumIEEE(e.data),
+				CompressedSize64:   uint64(len(e.raw)),
+				UncompressedSize64: uint64(len(e.data)),
+			})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		in := e.raw
+		if in == nil {
+			in = e.data
+		}
+		if _, err := w.Write(in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return zr
+}
+
+func readZipFile(f *zip.File) ([]byte, error) {
+	r, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	b, err := io.ReadAll(r)
+	if cerr := r.Close(); err == nil {
+		err = cerr
+	}
+	return b, err
+}
+
+func TestZipDecompressor(t *testing.T) {
+	inputs := creftest.Inputs(t)
+	var entries []zipEntry
+	for name, in := range inputs {
+		if len(in) > 1<<20 {
+			continue // the decoder's own tests cover large inputs
+		}
+		var c []byte
+		if len(in) > 0 {
+			c = crefLevel(t, 19, in)
+		}
+		for _, m := range []uint16{ZipMethodWinZip, ZipMethodPKWare} {
+			p := fmt.Sprintf("%d/", m)
+			entries = append(entries, zipEntry{name: p + "go/" + name, data: in, method: m})
+			if c != nil {
+				entries = append(entries, zipEntry{name: p + "c/" + name, data: in, raw: c, method: m})
+			}
+		}
+	}
+	zr := zipArchive(t, entries)
+	zr.RegisterDecompressor(ZipMethodWinZip, ZipDecompressor())
+	zr.RegisterDecompressor(ZipMethodPKWare, ZipDecompressor())
+	want := map[string][]byte{}
+	for _, e := range entries {
+		want[e.name] = e.data
+	}
+	for _, f := range zr.File {
+		got, err := readZipFile(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f.Name, err)
+		}
+		if !bytes.Equal(got, want[f.Name]) {
+			t.Fatalf("%s: content differs", f.Name)
+		}
+	}
+
+	// 64 entries read concurrently, through one decompressor (one pool).
+	before := runtime.NumGoroutine()
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for i := range 64 {
+		f := zr.File[i%len(zr.File)]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := readZipFile(f)
+			if err == nil && !bytes.Equal(got, want[f.Name]) {
+				err = fmt.Errorf("%s: content differs", f.Name)
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// WithDecoderConcurrency(1) is forced: no pipeline goroutine is left.
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Fatalf("goroutines: %d before, %d after", before, n)
+	}
+}
+
+func TestZipDecompressorCorrupt(t *testing.T) {
+	in := malText(200 << 10)
+	frame := crefLevel(t, 3, in)
+	flipped := bytes.Clone(frame)
+	flipped[len(flipped)/2] ^= 0x55
+	zr := zipArchive(t, []zipEntry{
+		{name: "truncated", data: in, raw: frame[:len(frame)-10], method: ZipMethodWinZip},
+		{name: "flipped", data: in, raw: flipped, method: ZipMethodWinZip},
+		{name: "garbage", data: in, raw: []byte("not a zstd frame at all"), method: ZipMethodWinZip},
+	})
+	zr.RegisterDecompressor(ZipMethodWinZip, ZipDecompressor())
+	for _, f := range zr.File {
+		_, err := readZipFile(f)
+		if err == nil {
+			t.Fatalf("%s: no error", f.Name)
+		}
+		// The decoder, not zip's CRC check, must catch it.
+		if errors.Is(err, zip.ErrChecksum) {
+			t.Fatalf("%s: only zip's checksum failed: %v", f.Name, err)
+		}
+	}
+}
+
+// zipWindowFrame is a frame whose window is 2^exp + mantissa*2^exp/8 bytes,
+// with one empty last raw block.
+func zipWindowFrame(exp, mantissa byte) []byte {
+	return []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, (exp-10)<<3 | mantissa, 0x01, 0, 0}
+}
+
+func TestZipDecompressorOptions(t *testing.T) {
+	read := func(dec func(io.Reader) io.ReadCloser, in []byte) ([]byte, error) {
+		r := dec(bytes.NewReader(in))
+		b, err := io.ReadAll(r)
+		if cerr := r.Close(); cerr != nil {
+			t.Fatal("Close:", cerr)
+		}
+		return b, err
+	}
+	// The default max window is 128 MB (doc text).
+	if _, err := read(ZipDecompressor(), zipWindowFrame(27, 1)); !errors.Is(err, ErrWindowSizeExceeded) {
+		t.Fatalf("144 MiB window, default: %v", err)
+	}
+	d0 := newTestDecoder(t)
+	if err := d0.Reset(bytes.NewReader(zipWindowFrame(27, 1))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(d0); err != nil {
+		t.Fatal("NewReader's default:", err)
+	}
+	// Options override it, both ways.
+	if _, err := read(ZipDecompressor(WithDecoderMaxWindow(1<<20)), zipWindowFrame(21, 0)); !errors.Is(err, ErrWindowSizeExceeded) {
+		t.Fatalf("2 MiB window, max 1 MiB: %v", err)
+	}
+	if !testing.Short() {
+		if got, err := read(ZipDecompressor(WithDecoderMaxWindow(1<<28)), zipWindowFrame(27, 1)); err != nil || len(got) != 0 {
+			t.Fatalf("144 MiB window, max 256 MiB: %d bytes, %v", len(got), err)
+		}
+	}
+	// An option error surfaces on the first Read.
+	_, wantErr := NewReader(nil, WithDecoderMaxMemory(0))
+	r := ZipDecompressor(WithDecoderMaxMemory(0))(bytes.NewReader(zipWindowFrame(10, 0)))
+	for range 2 {
+		if _, err := r.Read(make([]byte, 10)); wantErr == nil || err == nil || err.Error() != wantErr.Error() {
+			t.Fatalf("bad option: Read error %v, want %v", err, wantErr)
+		}
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// WithDecoderConcurrency(1) is forced, even over an explicit option.
+	dec := ZipDecompressor(WithDecoderConcurrency(4))
+	r = dec(bytes.NewReader(nil))
+	zr, ok := r.(*zipReader)
+	if !ok || zr.dec == nil || zr.dec.o.concurrent != 1 || zr.dec.o.pipelined() {
+		t.Fatalf("concurrency not forced to 1: %#v", r)
+	}
+	// Close hands the Decoder back without its reader; a second Close and
+	// a Read after Close are safe.
+	d := zr.dec
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if d.s.r != nil {
+		t.Fatal("pooled Decoder keeps the entry's reader")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal("second Close:", err)
+	}
+	if _, err := r.Read(make([]byte, 1)); err == nil {
+		t.Fatal("Read after Close succeeded")
+	}
+	// The next entry reuses it, and only that entry: the second Close did
+	// not pool it again.
+	in := []byte("hello, zip")
+	r = dec(bytes.NewReader(newTestEncoder(t).EncodeAll(in, nil)))
+	if r.(*zipReader).dec != d {
+		t.Fatal("Decoder not reused")
+	}
+	other := dec(bytes.NewReader(nil))
+	if other.(*zipReader).dec == d {
+		t.Fatal("one Decoder handed to two open entries")
+	}
+	defer other.Close()
+	if b, err := io.ReadAll(r); err != nil || !bytes.Equal(b, in) {
+		t.Fatalf("reused Decoder: %q, %v", b, err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A closed entry does not expose the Decoder's other methods.
+	if _, ok := r.(io.WriterTo); ok {
+		t.Fatal("zip entry reader exposes WriteTo")
+	}
+}
+
+// The pool keeps at most zipPoolSize idle Decoders; the others are closed.
+func TestZipDecompressorPoolCap(t *testing.T) {
+	dec := ZipDecompressor()
+	old := map[*Decoder]bool{}
+	rs := make([]io.ReadCloser, zipPoolSize+3)
+	for i := range rs {
+		rs[i] = dec(bytes.NewReader(nil))
+		old[rs[i].(*zipReader).dec] = true
+	}
+	for _, r := range rs {
+		if err := r.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reused := 0
+	for range rs {
+		r := dec(bytes.NewReader(nil))
+		if old[r.(*zipReader).dec] {
+			reused++
+		}
+		defer r.Close()
+	}
+	if reused != zipPoolSize {
+		t.Fatalf("%d Decoders reused, want %d", reused, zipPoolSize)
+	}
+	closed := 0
+	for d := range old {
+		if d.closed.Load() {
+			closed++
+		}
+	}
+	if closed != len(rs)-zipPoolSize {
+		t.Fatalf("%d Decoders closed, want %d", closed, len(rs)-zipPoolSize)
 	}
 }
