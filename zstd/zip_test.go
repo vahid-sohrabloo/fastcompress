@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -249,6 +250,7 @@ func TestZipDecompressor(t *testing.T) {
 			}
 		}
 	}
+	before := runtime.NumGoroutine()
 	zr := zipArchive(t, entries)
 	zr.RegisterDecompressor(ZipMethodWinZip, ZipDecompressor())
 	zr.RegisterDecompressor(ZipMethodPKWare, ZipDecompressor())
@@ -267,7 +269,6 @@ func TestZipDecompressor(t *testing.T) {
 	}
 
 	// 64 entries read concurrently, through one decompressor (one pool).
-	before := runtime.NumGoroutine()
 	var wg sync.WaitGroup
 	errs := make(chan error, 64)
 	for i := range 64 {
@@ -289,7 +290,7 @@ func TestZipDecompressor(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// WithDecoderConcurrency(1) is forced: no pipeline goroutine is left.
+	// No goroutine is left (see also TestZipDecompressorIdle).
 	deadline := time.Now().Add(5 * time.Second)
 	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
 		runtime.Gosched()
@@ -303,7 +304,7 @@ func TestZipDecompressorCorrupt(t *testing.T) {
 	in := malText(200 << 10)
 	frame := crefLevel(t, 3, in)
 	flipped := bytes.Clone(frame)
-	flipped[len(flipped)/2] ^= 0x55
+	flipped[len(flipped)-1] ^= 0x55 // in the content checksum
 	zr := zipArchive(t, []zipEntry{
 		{name: "truncated", data: in, raw: frame[:len(frame)-10], method: ZipMethodWinZip},
 		{name: "flipped", data: in, raw: flipped, method: ZipMethodWinZip},
@@ -318,6 +319,9 @@ func TestZipDecompressorCorrupt(t *testing.T) {
 		// The decoder, not zip's CRC check, must catch it.
 		if errors.Is(err, zip.ErrChecksum) {
 			t.Fatalf("%s: only zip's checksum failed: %v", f.Name, err)
+		}
+		if f.Name == "flipped" && !errors.Is(err, ErrCRCMismatch) {
+			t.Fatalf("flipped: %v, want ErrCRCMismatch", err)
 		}
 	}
 }
@@ -347,6 +351,9 @@ func TestZipDecompressorOptions(t *testing.T) {
 	}
 	if _, err := io.ReadAll(d0); err != nil {
 		t.Fatal("NewReader's default:", err)
+	}
+	if got, err := read(ZipDecompressor(), zipWindowFrame(27, 0)); err != nil || len(got) != 0 {
+		t.Fatalf("128 MiB window, default: %d bytes, %v", len(got), err)
 	}
 	// Options override it, both ways.
 	if _, err := read(ZipDecompressor(WithDecoderMaxWindow(1<<20)), zipWindowFrame(21, 0)); !errors.Is(err, ErrWindowSizeExceeded) {
@@ -416,6 +423,9 @@ func TestZipDecompressorOptions(t *testing.T) {
 
 // The pool keeps at most zipPoolSize idle Decoders; the others are closed.
 func TestZipDecompressorPoolCap(t *testing.T) {
+	if want := map[int]int{64: 8, 32: 4}[strconv.IntSize]; zipPoolSize != want {
+		t.Fatalf("zipPoolSize %d, want %d", zipPoolSize, want)
+	}
 	dec := ZipDecompressor()
 	old := map[*Decoder]bool{}
 	rs := make([]io.ReadCloser, zipPoolSize+3)
@@ -447,5 +457,62 @@ func TestZipDecompressorPoolCap(t *testing.T) {
 	}
 	if closed != len(rs)-zipPoolSize {
 		t.Fatalf("%d Decoders closed, want %d", closed, len(rs)-zipPoolSize)
+	}
+}
+
+// Entries left open mid-stream start no goroutine, even with an explicit
+// WithDecoderConcurrency (which would pipeline them), and an idle pooled
+// Decoder keeps no stream buffer over lowMemBuffers after a large-window
+// entry, read to its end or not.
+func TestZipDecompressorIdle(t *testing.T) {
+	in := malText(8 << 20)
+	var frame bytes.Buffer
+	e := newTestEncoder(t, WithWindowSize(128<<20))
+	e.Reset(&frame)
+	for p := in; len(p) > 0; p = p[min(len(p), 1<<20):] {
+		if _, err := e.Write(p[:min(len(p), 1<<20)]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := runtime.NumGoroutine()
+	dec := ZipDecompressor(WithDecoderConcurrency(4))
+	var rs []io.ReadCloser
+	var ds []*Decoder
+	for i := range zipPoolSize {
+		r := dec(bytes.NewReader(frame.Bytes()))
+		rs = append(rs, r)
+		d := r.(*zipReader).dec
+		ds = append(ds, d)
+		if i%2 == 0 { // read to the end
+			if b, err := io.ReadAll(r); err != nil || !bytes.Equal(b, in) {
+				t.Fatalf("entry %d: %d bytes, %v", i, len(b), err)
+			}
+		} else if _, err := io.ReadFull(r, make([]byte, 6<<20)); err != nil { // stop mid-frame
+			t.Fatal(err)
+		}
+		if n := runtime.NumGoroutine(); n > before {
+			t.Fatalf("entry %d open: goroutines %d, %d before", i, n, before)
+		}
+		if dc := d.s.dc; dc == nil || cap(dc.outBuff) < 4<<20 {
+			t.Fatalf("entry %d: no large window buffer to release", i)
+		}
+	}
+	for i, r := range rs {
+		if err := r.Close(); err != nil {
+			t.Fatal(err)
+		}
+		d := ds[i]
+		if d.closed.Load() {
+			t.Fatalf("entry %d: Decoder closed, not pooled", i)
+		}
+		if n := cap(d.s.dc.inBuff) + cap(d.s.dc.outBuff) + cap(d.s.buf); n > lowMemBuffers {
+			t.Fatalf("entry %d: idle Decoder keeps %d bytes of stream buffers", i, n)
+		}
+	}
+	if n := runtime.NumGoroutine(); n > before {
+		t.Fatalf("after Close: goroutines %d, %d before", n, before)
 	}
 }

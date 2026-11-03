@@ -73,8 +73,8 @@ var errZipClosed = errors.New("zstd: write to closed zip entry")
 const zipMaxWindow = 128 << 20
 
 // zipPoolSize is the number of idle Decoders a ZipDecompressor keeps:
-// 8 on 64-bit platforms, 4 on 32-bit ones. Each Decoder keeps its stream
-// buffers (up to the window size plus a block) while idle.
+// 8 on 64-bit platforms, 4 on 32-bit ones. An idle Decoder keeps at most
+// lowMemBuffers of stream buffers (see zipReader.Close).
 const zipPoolSize = strconv.IntSize / 8
 
 // ZipDecompressor returns a decompressor that can be registered with zip libraries.
@@ -85,8 +85,9 @@ const zipPoolSize = strconv.IntSize / 8
 //
 // Each open entry decodes with its own Decoder, so its own memory limits;
 // Close hands the Decoder back to a pool that keeps at most 8 idle
-// Decoders (4 on 32-bit platforms) and closes the others. An error in opts
-// is returned by every Read of the entry.
+// Decoders (4 on 32-bit platforms), without stream buffers over 1 MiB,
+// and closes the others. An error in opts is returned by every Read of
+// the entry.
 func ZipDecompressor(opts ...DOption) func(r io.Reader) io.ReadCloser {
 	all := make([]DOption, 0, len(opts)+2)
 	all = append(all, WithDecoderMaxWindow(zipMaxWindow))
@@ -103,10 +104,7 @@ func ZipDecompressor(opts ...DOption) func(r io.Reader) io.ReadCloser {
 				return &zipReader{err: err}
 			}
 		}
-		if err := d.Reset(r); err != nil {
-			d.Close()
-			return &zipReader{err: err}
-		}
+		_ = d.Reset(r) // cannot fail: d is from NewReader and not closed
 		return &zipReader{dec: d, pool: pool}
 	}
 }
@@ -136,10 +134,14 @@ func (z *zipReader) Close() error {
 		return nil
 	}
 	z.dec = nil
-	if d.Reset(nil) != nil { // do not keep the entry's reader alive
-		d.Close()
-		return nil
+	_ = d.Reset(nil) // do not keep the entry's reader alive; cannot fail
+	// An idle Decoder keeps no stream buffer over lowMemBuffers (a window
+	// can be 128 MB): end the frame the entry may have left unfinished,
+	// then free them as WithDecoderLowmem does.
+	if d.s.dc != nil {
+		d.s.dc.reset(true)
 	}
+	d.s.release()
 	select {
 	case z.pool <- d:
 	default:
