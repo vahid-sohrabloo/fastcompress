@@ -179,9 +179,8 @@ func (d *Decoder) DecodeAll(input, dst []byte) ([]byte, error) {
 		limit = min(limit, uint64(cap(dst)-len(dst)))
 	}
 	configure(dc, &c.o, c.dicts, limit, d.budget)
-	out, err := dc.decompressMultiFrame(dst, input, nil)
-	dc.releaseBudget()
-	return out, err
+	defer dc.releaseBudget()
+	return dc.decompressMultiFrame(dst, input, nil)
 }
 
 // Reset will reset the decoder the supplied stream after the current has finished processing.
@@ -219,7 +218,7 @@ func (d *Decoder) Reset(r io.Reader) error {
 	}); ok && !d.o.capLimit && b.Len() < d.o.buffersBelow {
 		configure(s.dc, &d.o, d.dicts, d.o.memLimit(), d.budget)
 		out, err := s.dc.decompressMultiFrame(s.buf, b.Bytes(), nil)
-		s.dc.releaseBudget()
+		s.dc.releaseBudget() // (a panic is not recovered: the stream is lost anyway)
 		if !errors.Is(err, ErrDecoderSizeExceeded) {
 			s.buffered, s.buf, s.bufErr = true, out, err
 			return nil

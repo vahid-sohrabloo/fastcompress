@@ -447,6 +447,48 @@ func TestDecodeAllBudget(t *testing.T) {
 	if l := d.budget.left.Load(); l != 4<<20 {
 		t.Fatalf("budget left %d after concurrent calls", l)
 	}
+	// Frames that outgrow their reservation are appended to dst, and that
+	// growth is charged too (review R3): 3 frames of 1.5 MiB without a
+	// content size and with a tiny compressed size reserve 1 MiB each.
+	var mb bytes.Buffer
+	e.Reset(&mb)
+	e.Write(rep[:3<<19])
+	e.Close()
+	multi := bytes.Repeat(mb.Bytes(), 3)
+	d.budget = newMemBudget(6 << 20)
+	if got, err := d.DecodeAll(multi, nil); !errors.Is(err, ErrDecoderSizeExceeded) || !bytes.Equal(got, bytes.Repeat(rep[:3<<19], 3)[:len(got)]) {
+		t.Fatalf("appends past the budget: %d bytes, %v", len(got), err)
+	}
+	d.budget = newMemBudget(64 << 20)
+	if got, err := d.DecodeAll(multi, nil); err != nil || !bytes.Equal(got, bytes.Repeat(rep[:3<<19], 3)) {
+		t.Fatalf("appends within the budget: %v", err)
+	}
+	// Every buffer the frame decoder allocates is charged (review R3: the
+	// append of frames that outgrew their reservation too): what a decode
+	// allocates is at most what it charged.
+	for _, in := range [][]byte{multi, noFCS, withFCS} {
+		dc := newDCtx()
+		dc.budget = newMemBudget(1 << 40)
+		dc.decompressFrames(nil, in, nil) // warm the context
+		dc.releaseBudget()
+		var m0, m1 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		if _, e := dc.decompressFrames(nil, in, nil); e != 0 {
+			t.Fatal(e)
+		}
+		runtime.ReadMemStats(&m1)
+		if a := m1.TotalAlloc - m0.TotalAlloc; a > uint64(dc.charged)+64<<10 {
+			t.Fatalf("allocated %d bytes, charged %d", a, dc.charged)
+		}
+		dc.releaseBudget()
+	}
+	// The buffered Reset gives back what it took (review R3).
+	if got, err := readAll(t, d, bytes.NewBuffer(multi), fixedSize(1<<20), 0); err != nil || len(got) != 3*(3<<19) {
+		t.Fatalf("buffered: %d bytes, %v", len(got), err)
+	}
+	if l := d.budget.left.Load(); l != 64<<20 {
+		t.Fatalf("budget left %d after a buffered Reset", l)
+	}
 }
 
 // TestDecodeAllPresized pins review I2: a frame without a content size
@@ -479,10 +521,11 @@ func TestDecodeAllPresized(t *testing.T) {
 	}
 }
 
-// TestDecodeAllTrialCold checks that the trial decode into dst's spare
-// capacity leaves the dictionary cold: a fresh context gives the same
-// result with and without spare capacity (FuzzDecodeAll seed
-// b1ad5558968c6210, whose error depends on C's cold/hot decoder choice).
+// TestDecodeAllTrialCold checks that the tight decode of a block into
+// dst's spare capacity leaves the dictionary cold when it fails: a fresh
+// context gives the same result with and without spare capacity
+// (FuzzDecodeAll seed b1ad5558968c6210, whose error depends on C's
+// cold/hot decoder choice).
 func TestDecodeAllTrialCold(t *testing.T) {
 	data := []byte("(\xb5/\xfd\xa000\x04\x00T\x00\x00%00\x01\x000001\x020")
 	raw := readTestdata(t, "dickens-32k.raw")
@@ -498,6 +541,112 @@ func TestDecodeAllTrialCold(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("results differ with spare capacity: %v", results)
 	}
+}
+
+// TestDecodeAllTightRetry pins review R2 for the tight decode: 3 MiB
+// streaming-Encoder frames (no content size), with and without a
+// dictionary, into dst spare capacities that run out inside a block, so
+// the block decoded in the room left fails and is decoded again after
+// growth from the restored state: the output is the input.
+func TestDecodeAllTightRetry(t *testing.T) {
+	text := malText(3 << 20)
+	dict := readTestdata(t, "train.dict")
+	for _, withDict := range []bool{false, true} {
+		var buf bytes.Buffer
+		var eo []EOption
+		do := []DOption{WithDecoderConcurrency(1)}
+		if withDict {
+			eo = append(eo, WithEncoderDict(dict))
+			do = append(do, WithDecoderDicts(dict))
+		}
+		e := newTestEncoder(t, eo...)
+		e.Reset(&buf)
+		e.Write(text)
+		e.Close()
+		d := newTestDecoder(t, do...)
+		for _, spare := range []int{1000, 1 << 20, 3<<20 - 1, 3 << 20} {
+			got, err := d.DecodeAll(buf.Bytes(), make([]byte, 0, spare))
+			if err != nil || !bytes.Equal(got, text) {
+				t.Errorf("dictionary %v, spare %d: %v, equal %v", withDict, spare, err, bytes.Equal(got, text))
+			}
+		}
+		// Every cut in the last 2000 bytes of each block of a 3-block
+		// frame: some fall in a block's last literals, after its
+		// sequences saved their repcodes (C's order), which the restore
+		// must undo (periodicSegments).
+		small := periodicSegments(300000)
+		buf.Reset()
+		e.Reset(&buf)
+		e.Write(small)
+		e.Close()
+		dst := make([]byte, 0, len(small))
+		for _, end := range []int{blockSizeMax, 2 * blockSizeMax, len(small)} {
+			for k := 1; k <= 2000; k++ {
+				got, err := d.DecodeAll(buf.Bytes(), dst[:0:end-k])
+				if err != nil || !bytes.Equal(got, small) {
+					t.Fatalf("dictionary %v, spare %d: %v, equal %v", withDict, end-k, err, bytes.Equal(got, small))
+				}
+			}
+		}
+	}
+}
+
+// periodicSegments returns n bytes in which each 128 KiB block ends with
+// 1000 random bytes (its last literals) and switches period in its middle:
+// from 64 KiB before to 64 KiB after a block boundary, the bytes repeat a
+// pattern of their own length (over 1000, so matches skip the random
+// bytes). Each block then starts with a repcode match at the previous
+// block's last offset and ends with other repcodes.
+func periodicSegments(n int) []byte {
+	r := rand.New(rand.NewPCG(3, 3))
+	var pats [][]byte
+	b := make([]byte, n)
+	for pos := range b {
+		if pos%blockSizeMax >= blockSizeMax-1000 {
+			b[pos] = byte(r.IntN(256))
+			continue
+		}
+		k := (pos + blockSizeMax/2) / blockSizeMax
+		for len(pats) <= k {
+			pat := make([]byte, 1100+97*len(pats))
+			for i := range pat {
+				pat[i] = byte(r.IntN(256))
+			}
+			pats = append(pats, pat)
+		}
+		b[pos] = pats[k][pos%len(pats[k])]
+	}
+	return b
+}
+
+// FuzzDecodeAllCapacity requires DecodeAll's result not to depend on dst:
+// DecodeAll(data, "pre"), DecodeAll into "pre" with spare capacity (chosen
+// by spare, up to 4 MiB) and DecodeAll(data, nil) on fresh Decoders give
+// the same bytes and the same error, with no dictionary, train-12k.dict or
+// dickens-32k.raw (ID 0), chosen by opts.
+func FuzzDecodeAllCapacity(f *testing.F) {
+	fuzzSeeds(f, func(i int) any { return uint32(i * 7919) })
+	dict := readTestdata(f, "train-12k.dict")
+	raw := readTestdata(f, "dickens-32k.raw")
+	f.Fuzz(func(t *testing.T, data []byte, spare uint32) {
+		o := []DOption{WithDecoderMaxMemory(fuzzLimit), WithDecoderConcurrency(1), IgnoreChecksum(spare&(1<<23) != 0)}
+		switch spare >> 30 {
+		case 1:
+			o = append(o, WithDecoderDicts(dict))
+		case 2:
+			o = append(o, WithDecoderDictRaw(0, raw))
+		}
+		want, werr := newTestDecoder(t, o...).DecodeAll(data, []byte("pre"))
+		dst := append(make([]byte, 0, 3+int(spare%(4<<20))), "pre"...)
+		got, gerr := newTestDecoder(t, o...).DecodeAll(data, dst)
+		if !bytes.Equal(got, want) || (gerr == nil) != (werr == nil) || gerr != nil && gerr.Error() != werr.Error() {
+			t.Fatalf("spare %d: %d bytes, %v; no spare: %d bytes, %v", spare%(4<<20), len(got), gerr, len(want), werr)
+		}
+		got, gerr = newTestDecoder(t, o...).DecodeAll(data, nil)
+		if !bytes.Equal(got, want[3:]) || (gerr == nil) != (werr == nil) || gerr != nil && gerr.Error() != werr.Error() {
+			t.Fatalf("nil dst: %d bytes, %v; no spare: %d bytes, %v", len(got), gerr, len(want)-3, werr)
+		}
+	})
 }
 
 // TestDecoderZero checks that a Decoder not made by NewReader returns
