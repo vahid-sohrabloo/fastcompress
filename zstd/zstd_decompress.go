@@ -1056,7 +1056,11 @@ func (d *dctx) decompressContinue(dst []byte, dstCapacity int, src []byte, srcSi
 		out := dst[len(dst) : len(dst)+dstCapacity]
 		switch d.bType {
 		case btCompressed:
-			rSize, e = d.decompressBlockInternal(dst, dstCapacity, src, isStreaming)
+			if d.pipe != nil {
+				rSize, e = d.pipeBlock(dst, dstCapacity, src) // Go: the stream pipeline (decoder_mt.go)
+			} else {
+				rSize, e = d.decompressBlockInternal(dst, dstCapacity, src, isStreaming)
+			}
 			d.expected = 0 // Streaming not supported
 		case btRaw:
 			// Go: a block that takes the frame past its content size is
@@ -1407,7 +1411,9 @@ func (d *dctx) decompressStreamCode(out *outBuffer, in *inBuffer) (int, dErr) {
 			// the frame, and may decode what follows there as a frame
 			// (deviation: the result must not depend on how the input is
 			// cut).
-			if d.fParams.frameContentSize != contentSizeUnknown &&
+			// Go: not when a pipeline feeds the stream (its compressed
+			// blocks are S2's to decode); the result is the same.
+			if d.pipe == nil && d.fParams.frameContentSize != contentSizeUnknown &&
 				d.fParams.frameType != zstdSkippableFrame &&
 				uint64(oend-op) >= d.fParams.frameContentSize && ip-istart == d.lhSize {
 				// C: ZSTD_findFrameCompressedSize_advanced from istart

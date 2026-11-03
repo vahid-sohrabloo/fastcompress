@@ -26,7 +26,7 @@ import (
 //	                        gets the given ID (C gives raw content ID 0)
 //	WithDecoderDictDelete   removes dictionaries (no C call)
 //	WithDecoderConcurrency  none; caps concurrent DecodeAll calls (one
-//	                        DCtx each); streams are synchronous
+//	                        DCtx each); n > 1 pipelines streams
 //	WithDecodeBuffersBelow  none; such readers are decoded with DecodeAll
 //	WithDecoderLowmem       none; stream buffers over 1 MiB are freed at
 //	                        frame ends
@@ -130,8 +130,10 @@ func WithDecodeBuffersBelow(size int) DOption {
 //
 // Each DecodeAll call holds one decompression context and runs on its
 // caller's goroutine; at most n calls hold one at once, and further calls
-// wait. Streams are decoded synchronously, whatever n. The value never
-// changes the output or the error.
+// wait. With n > 1 a stream is decoded by a pipeline: one goroutine reads
+// the io.Reader ahead (at most n blocks) and one decodes the blocks'
+// literals and sequences ahead of Read or WriteTo, which execute them. The
+// value never changes the output or the error.
 func WithDecoderConcurrency(n int) DOption {
 	return func(o *decoderOptions) error {
 		if n < 0 {

@@ -2,6 +2,7 @@ package zstd
 
 import (
 	"encoding/binary"
+	"slices"
 	"sync/atomic"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
@@ -1432,6 +1433,69 @@ var seqLongBodyBlocks atomic.Int64
 // dictionary/prefix boundary).
 var extDictSpans atomic.Int64
 
+// litState is where the literals of a block being executed are: the
+// sequence loops' lits, litPtr and litBufferEnd, plus C's
+// dctx->litBufferEnd while the literals are split between the output and
+// litExtraBuffer (split).
+type litState struct {
+	lits     []byte
+	ptr, end int
+	splitEnd int // C: dctx->litBufferEnd
+	split    bool
+}
+
+// exec executes sequence at out[op:], switching the literals to extra (the
+// literals in litExtraBuffer) when they reach the split point, and returns
+// the bytes it wrote. C: the step ZSTD_decompressSequencesLong_body
+// repeats (also the pipeline's, see execBlockSeqs)
+func (l *litState) exec(out []byte, op, oend int, sequence seq, prefixStart int, extDict, extra []byte) (int, dErr) {
+	if l.split && l.ptr+sequence.litLength > l.splitEnd {
+		// lit buffer is reaching split point, empty out the first buffer
+		// and transition to litExtraBuffer
+		leftoverLit := l.splitEnd - l.ptr
+		if leftoverLit != 0 {
+			if uint(leftoverLit) > uint(oend-op) {
+				return 0, dErrBlockDstSizeTooSmall // remaining lit must fit within dstBuffer
+			}
+			safecopyDstBeforeSrc(out, op, l.ptr, leftoverLit)
+			sequence.litLength -= leftoverLit
+			op += leftoverLit
+		}
+		l.lits, l.ptr, l.end, l.split = extra, 0, litBufferExtraSize, false
+		n, e := execSequence(out, op, oend, sequence, l.lits, &l.ptr, l.end, prefixStart, extDict)
+		return leftoverLit + n, e
+	}
+	// lit buffer is either wholly contained in first or second split, or
+	// not split at all
+	if l.split {
+		return execSequenceSplitLitBuffer(out, op, oend, l.ptr+sequence.litLength-wildcopyOverlength,
+			sequence, &l.ptr, l.end, prefixStart, extDict)
+	}
+	return execSequence(out, op, oend, sequence, l.lits, &l.ptr, l.end, prefixStart, extDict)
+}
+
+// lastLiterals copies the literals left after the last sequence to
+// out[op:oend] and returns op after them. C: the last literal segment of
+// ZSTD_decompressSequencesLong_body
+func (l *litState) lastLiterals(out []byte, op, oend int, extra []byte) (int, dErr) {
+	if l.split {
+		// first deplete literal buffer in dst, then copy litExtraBuffer
+		lastLLSize := l.end - l.ptr
+		if uint(lastLLSize) > uint(oend-op) {
+			return 0, dErrBlockDstSizeTooSmall
+		}
+		copy(out[op:op+lastLLSize], out[l.ptr:l.end]) // C: ZSTD_memmove
+		op += lastLLSize
+		l.lits, l.ptr, l.end = extra, 0, litBufferExtraSize
+	}
+	lastLLSize := l.end - l.ptr
+	if uint(lastLLSize) > uint(oend-op) {
+		return 0, dErrBlockDstSizeTooSmall
+	}
+	copy(out[op:op+lastLLSize], l.lits[l.ptr:l.end]) // C: ZSTD_memmove
+	return op + lastLLSize, 0
+}
+
 // decompressSequencesLongBody decodes the sequences ADVANCED_SEQS ahead of
 // their execution, to prefetch their matches (employed when a block has a
 // significant portion of long-distance matches, or with a "cold"
@@ -1445,41 +1509,11 @@ func (d *dctx) decompressSequencesLongBody(out []byte, ostart, maxDstSize int,
 	}
 	op := ostart
 	lits, litBase := d.litBufferStart(out, ostart)
-	litPtr := litBase + d.litPtr
-	dctxLitBufferEnd := litBase + d.litBufferEnd // C: dctx->litBufferEnd
-	litBufferEnd := dctxLitBufferEnd
+	l := litState{lits: lits, ptr: litBase + d.litPtr, end: litBase + d.litBufferEnd,
+		splitEnd: litBase + d.litBufferEnd, split: d.litBufferLocation == split}
 	prefixStart := d.prefixStart
 	extDict := d.extDict
-
-	// exec runs one sequence, switching the literals to litExtraBuffer first
-	// when they reach the split point (C repeats this block twice).
-	exec := func(sequence *seq) (int, dErr) {
-		if d.litBufferLocation == split && litPtr+sequence.litLength > dctxLitBufferEnd {
-			// lit buffer is reaching split point, empty out the first buffer
-			// and transition to litExtraBuffer
-			leftoverLit := dctxLitBufferEnd - litPtr
-			if leftoverLit != 0 {
-				if uint(leftoverLit) > uint(oend-op) {
-					return 0, dErrBlockDstSizeTooSmall // remaining lit must fit within dstBuffer
-				}
-				safecopyDstBeforeSrc(out, op, litPtr, leftoverLit)
-				sequence.litLength -= leftoverLit
-				op += leftoverLit
-			}
-			lits = d.litExtraBuffer[:]
-			litPtr = 0
-			litBufferEnd = litBufferExtraSize
-			d.litBufferLocation = notInDst
-			return execSequence(out, op, oend, *sequence, lits, &litPtr, litBufferEnd, prefixStart, extDict)
-		}
-		// lit buffer is either wholly contained in first or second split,
-		// or not split at all
-		if d.litBufferLocation == split {
-			return execSequenceSplitLitBuffer(out, op, oend, litPtr+sequence.litLength-wildcopyOverlength,
-				*sequence, &litPtr, litBufferEnd, prefixStart, extDict)
-		}
-		return execSequence(out, op, oend, *sequence, lits, &litPtr, litBufferEnd, prefixStart, extDict)
-	}
+	extra := d.litExtraBuffer[:]
 
 	// Regen sequences
 	if nbSeq != 0 {
@@ -1502,7 +1536,7 @@ func (d *dctx) decompressSequencesLongBody(out []byte, ostart, maxDstSize int,
 		// decompress without stomping litBuffer
 		for ; seqNb < nbSeq; seqNb++ {
 			sequence := decodeSequence(&seqState, isLongOffset, seqNb == nbSeq-1)
-			oneSeqSize, e := exec(&sequences[(seqNb-advancedSeqs)&storedSeqsMask])
+			oneSeqSize, e := l.exec(out, op, oend, sequences[(seqNb-advancedSeqs)&storedSeqsMask], prefixStart, extDict, extra)
 			if e != 0 {
 				return 0, e
 			}
@@ -1517,7 +1551,7 @@ func (d *dctx) decompressSequencesLongBody(out []byte, ostart, maxDstSize int,
 		// finish queue
 		seqNb -= seqAdvance
 		for ; seqNb < nbSeq; seqNb++ {
-			oneSeqSize, e := exec(&sequences[seqNb&storedSeqsMask])
+			oneSeqSize, e := l.exec(out, op, oend, sequences[seqNb&storedSeqsMask], prefixStart, extDict, extra)
 			if e != 0 {
 				return 0, e
 			}
@@ -1529,27 +1563,163 @@ func (d *dctx) decompressSequencesLongBody(out []byte, ostart, maxDstSize int,
 	}
 
 	// last literal segment
-	if d.litBufferLocation == split {
-		// first deplete literal buffer in dst, then copy litExtraBuffer
-		lastLLSize := litBufferEnd - litPtr
-		if uint(lastLLSize) > uint(oend-op) {
-			return 0, dErrBlockDstSizeTooSmall
-		}
-		copy(out[op:op+lastLLSize], out[litPtr:litBufferEnd]) // C: ZSTD_memmove
-		op += lastLLSize
-		lits = d.litExtraBuffer[:]
-		litPtr = 0
-		litBufferEnd = litBufferExtraSize
+	op, e := l.lastLiterals(out, op, oend, extra)
+	if e != 0 {
+		return 0, e
 	}
-	{
-		lastLLSize := litBufferEnd - litPtr
-		if uint(lastLLSize) > uint(oend-op) {
-			return 0, dErrBlockDstSizeTooSmall
-		}
-		copy(out[op:op+lastLLSize], lits[litPtr:litBufferEnd]) // C: ZSTD_memmove
-		op += lastLLSize
+	return op - ostart, 0
+}
+
+/*-*************************************************************
+ *   Pipelined block decoding (no C counterpart: the stream pipeline's
+ *   split of decompressBlockInternal, see decoder_mt.go)
+ ***************************************************************/
+
+// pseq is a seq as the pipeline stores it: 16 bytes instead of 24 on
+// 64-bit platforms. Lengths are below 2^18; the offset keeps its int
+// (C's size_t bits, see seq).
+type pseq struct {
+	litLength, matchLength uint32
+	offset                 int
+}
+
+// decodedBlock is a compressed block whose entropy stage S2 has run
+// (decodeBlockSeqs): its literals and sequences, for S3 to execute
+// (execBlockSeqs). sync: S3 decodes the block itself (decompressBlockInternal),
+// first taking the entropy state from ectx when that is set.
+type decodedBlock struct {
+	src   []byte // the block's content, in its unit
+	lits  []byte // cap(lits) >= len(lits)+wildcopyOverlength
+	seqs  []pseq
+	split bool // a stream places the literals split (C's ZSTD_split)
+	sync  bool
+	ectx  *dctx
+}
+
+// decodeBlockSeqs runs the entropy half of decompressBlockInternal (as a
+// stream decodes, with an output space of blockSizeMax bytes) on the
+// compressed block src: it decodes the literals into b.lits and the
+// sequences into b.seqs, and updates d's entropy state (tables, flags,
+// repcodes) as the block does. scratch holds at least blockSizeMax bytes.
+//
+// It returns false when S3 must decode the block itself instead: a check
+// fails, the bitstream does not end with the last sequence, or there are
+// more sequences than a block of blockSizeMax bytes can hold (3 bytes per
+// match at least). Every such block fails in decompressBlockInternal too
+// (though maybe on a check that depends on the output, made first there).
+// d's state is then one the block can be decoded again from: decoding a
+// block reads no entropy state it writes (a repeated table or Huffman
+// table is not rebuilt; a rebuilt one is rebuilt again from the block),
+// and the repcodes are saved only at the end. fseEntropy, set before the
+// sequences, matters only to a repeat mode, which the sequences headers
+// then passed with it as it was.
+func (d *dctx) decodeBlockSeqs(src, scratch []byte, b *decodedBlock) bool {
+	bsMax := d.blockSizeMax()
+	if len(src) > bsMax {
+		return false
+	}
+	litCSize, e := d.decodeLiteralsBlock(src, scratch[:bsMax], bsMax, isStreaming)
+	if e != 0 {
+		return false
+	}
+	litSize := d.litSize
+	if cap(b.lits) < litSize+wildcopyOverlength {
+		b.lits = make([]byte, 0, litSize+wildcopyOverlength)
+	}
+	b.lits = b.lits[:litSize]
+	b.split = d.litBufferLocation == split
+	if b.split {
+		n := copy(b.lits, d.litBuf[d.litBuffer:d.litBufferEnd])
+		copy(b.lits[n:], d.litExtraBuffer[:litBufferExtraSize])
+	} else {
+		copy(b.lits, d.litBuf[d.litPtr:d.litPtr+litSize])
 	}
 
+	nbSeq, seqHSize, e := decodeSeqHeaders(d, src[litCSize:])
+	if e != 0 || 3*nbSeq > bsMax {
+		return false
+	}
+	seqs := slices.Grow(b.seqs[:0], nbSeq)[:nbSeq]
+	b.seqs = seqs
+	if nbSeq > 0 {
+		var st seqState
+		if d.initSeqState(&st, src[litCSize+seqHSize:]) != 0 {
+			return false
+		}
+		for i := range seqs {
+			sq := decodeSequence(&st, false, i == nbSeq-1)
+			seqs[i] = pseq{uint32(sq.litLength), uint32(sq.matchLength), sq.offset}
+		}
+		if !st.dStream.EndOfDStream() {
+			return false
+		}
+		d.saveReps(&st)
+	}
+	return true
+}
+
+// splitLitBuffer returns where, from the start of the block's output,
+// C places the literals it splits (streaming) once decoded: litBuffer
+// after ZSTD_decodeLiteralsBlock, for the Huffman (shifted) and the raw or
+// RLE (splitImmediately) cases alike.
+func splitLitBuffer(expectedWriteSize, litSize int) int {
+	return expectedWriteSize - litSize + litBufferExtraSize - wildcopyOverlength
+}
+
+// execBlockSeqs runs the execution half of decompressBlockInternal
+// (streaming) on the block b (decoded by decodeBlockSeqs) into
+// dst[len(dst):len(dst)+dstCap], with the history d describes: first the
+// checks on the output space decodeBlockSeqs could not make, in C's order
+// (the others passed), then the sequences with the literals where C places
+// them, then the last literals. Since the bitstream ended with the last
+// sequence, which of C's sequence loops would run does not change the
+// result: they make the same checks per sequence, in sequence order.
+// The repcodes are not saved: d does not keep the entropy state (see
+// pipeExec).
+func (d *dctx) execBlockSeqs(dst []byte, dstCap int, b *decodedBlock) (int, dErr) {
+	ostart := len(dst)
+	out := dst[:ostart+dstCap]
+	litSize := len(b.lits)
+	// C: ZSTD_decodeLiteralsBlock's checks of dst
+	if litSize > 0 && dst == nil {
+		return 0, dErrLitDstSizeTooSmall // NULL not handled
+	}
+	expectedWriteSize := min(d.blockSizeMax(), dstCap)
+	if expectedWriteSize < litSize {
+		return 0, dErrLitDstSizeTooSmall
+	}
+	// C: ZSTD_decompressBlock_internal
+	if dstCap == 0 && len(b.seqs) > 0 {
+		return 0, dErrBlockDstSizeTooSmall // NULL not handled
+	}
+	d.ddictIsCold = false
+
+	extra := d.litExtraBuffer[:]
+	l := litState{lits: b.lits[:litSize+wildcopyOverlength], end: litSize}
+	if b.split {
+		// C: ZSTD_allocateLiteralsBuffer (streaming, split): all but the
+		// last litBufferExtraSize literals end WILDCOPY_OVERLENGTH before
+		// the end of the block's output space, those in litExtraBuffer.
+		lb := ostart + splitLitBuffer(expectedWriteSize, litSize)
+		le := lb + litSize - litBufferExtraSize
+		copy(out[lb:le], b.lits)
+		copy(extra, b.lits[litSize-litBufferExtraSize:])
+		l = litState{lits: out, ptr: lb, end: le, splitEnd: le, split: true}
+	}
+	oend := ostart + dstCap
+	op := ostart
+	prefixStart, extDict := d.prefixStart, d.extDict
+	for _, ps := range b.seqs {
+		n, e := l.exec(out, op, oend, seq{int(ps.litLength), int(ps.matchLength), ps.offset}, prefixStart, extDict, extra)
+		if e != 0 {
+			return 0, e
+		}
+		op += n
+	}
+	op, e := l.lastLiterals(out, op, oend, extra)
+	if e != 0 {
+		return 0, e
+	}
 	return op - ostart, 0
 }
 

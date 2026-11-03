@@ -204,6 +204,9 @@ type dctx struct {
 	// first (blockSnap holds the state to restore if that fails).
 	tryTight  bool
 	blockSnap *dBlockState
+	// pipe is set while a stream pipeline feeds the context (S3,
+	// decoder_mt.go): compressed blocks come decoded from S2.
+	pipe *pipeExec
 
 	// streaming (C: ZSTD_d_stableOutBuffer, the static DCtx and legacy
 	// frames are not ported: the output is always buffered)

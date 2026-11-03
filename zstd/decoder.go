@@ -19,7 +19,10 @@ import (
 // DecodeAll is C's ZSTD_decompressDCtx (ZSTD_decompressMultiFrame) on one
 // of the Decoder's decompression contexts; Read and WriteTo drive C's
 // ZSTD_decompressStream on the stream's own context, with input read from
-// the io.Reader in ZSTD_DStreamInSize() chunks. Both apply the options'
+// the io.Reader in ZSTD_DStreamInSize() chunks (with
+// WithDecoderConcurrency > 1, through a pipeline that decodes the blocks'
+// entropy ahead on another goroutine, see decoder_mt.go). Both apply the
+// options'
 // C parameters (see DOption) and the deviations from C listed in
 // docs/superpowers/phase2-api-decisions.md: in particular, a stream gives
 // DecodeAll's output and error for the same input, however it is cut, and
@@ -82,6 +85,13 @@ type decStream struct {
 	buf      []byte
 	bufPos   int
 	bufErr   error
+	// WithDecoderConcurrency > 1: the pipeline (decoder_mt.go) while it
+	// runs, with in holding its units' input; S2's context and scratch,
+	// kept for the next pipeline; join holds input left before a unit.
+	pipe     *pipeline
+	edc      *dctx
+	escratch []byte
+	join     []byte
 }
 
 // errDecoderZero is returned when a Decoder was not created by NewReader.
@@ -200,8 +210,9 @@ func (d *Decoder) Reset(r io.Reader) error {
 	if d.closed.Load() {
 		return ErrDecoderClosed
 	}
+	d.stopPipeline()
 	s := &d.s
-	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0]}
+	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0], edc: s.edc, escratch: s.escratch, join: s.join[:0]}
 	if r == nil {
 		return nil
 	}
@@ -315,6 +326,7 @@ func (d *Decoder) WriteTo(w io.Writer) (int64, error) {
 			}
 			if werr != nil {
 				s.err = werr
+				d.stopPipeline()
 				return written, werr
 			}
 		}
@@ -343,10 +355,22 @@ func (d *Decoder) check() error {
 // fill decodes into p until it is full, or more input is needed and some
 // output is in p, or the stream ends (io.EOF) or fails. It returns the
 // bytes written to p and the stream's sticky error, if it has one now.
+// With WithDecoderConcurrency > 1 the input comes from the pipeline
+// (decoder_mt.go), which ends with the stream.
 func (d *Decoder) fill(p []byte) (n int, err error) {
 	s := &d.s
 	if s.err != nil {
 		return 0, s.err
+	}
+	if !s.buffered && s.pipe == nil && d.o.concurrent > 1 {
+		d.startPipeline()
+	}
+	if s.pipe != nil {
+		defer func() {
+			if s.err != nil {
+				d.stopPipeline()
+			}
+		}()
 	}
 	if s.buffered {
 		n = copy(p, s.buf[s.bufPos:])
@@ -377,7 +401,11 @@ func (d *Decoder) fill(p []byte) (n int, err error) {
 				}
 				break
 			}
-			if err := s.readInput(); err != nil {
+			read := s.readInput
+			if s.pipe != nil {
+				read = s.readUnit
+			}
+			if err := read(); err != nil {
 				s.err = err
 				break
 			}
@@ -482,6 +510,7 @@ func (d *Decoder) Close() {
 	if d.closed.Swap(true) {
 		return
 	}
+	d.stopPipeline()
 	d.s = decStream{}
 	for n := len(d.dctxs); n > 0; n-- {
 		select {
