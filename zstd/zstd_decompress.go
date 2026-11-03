@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"math"
 	"sync/atomic"
+
+	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
 )
 
 // Frame-level decoding. C: lib/decompress/zstd_decompress.c (v1.5.7),
@@ -477,6 +479,7 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 	reserve := func(n int) dErr {
 		n = min(n, oend-op)
 		if cap(out)-op < n {
+			d.tryTight = false // the buffer is ours from now on
 			// grow the capacity by at least cap(out) (no overflow on 386),
 			// so honest frames copy their output O(1) times on average;
 			// exactly, not with append's rounding (review M7), and to the
@@ -546,14 +549,39 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 			// Go: room for a whole block and for literals placed after it
 			// (ZSTD_allocateLiteralsBuffer's in-dst test), so the
 			// placement and the checks are those of the full output space.
-			if e := reserve(2*bsMax + 2*wildcopyOverlength + 1); e != 0 {
+			room := 2*bsMax + 2*wildcopyOverlength + 1
+			if d.tryTight && cap(out)-op < min(room, oend-op) {
+				// Go: the caller's spare capacity has less room left than
+				// the full output space gives the block. Decode it in the
+				// room left; on any error (the block not fitting among
+				// them), restore the state the block started from and
+				// decode it as below. A valid block regenerates the same
+				// bytes wherever its literals are placed, and an invalid
+				// one gets the full-room result, so the result never
+				// depends on dst's capacity; at most one block per frame
+				// is decoded twice (growth ends tryTight).
+				d.saveBlockState()
+				decodedSize, e = d.decompressBlockInternal(out[:op], cap(out)-op, block, notStreaming)
+				// Over bsMax is not accepted here: with literals placed in
+				// dst, the full room stops such a block earlier, with
+				// another error (FuzzDecodeAllCapacity seed ac1be36c).
+				if e == 0 && decodedSize <= bsMax {
+					break
+				}
+				d.restoreBlockState()
+			}
+			if e := reserve(room); e != 0 {
 				return out[:op], ip, e
 			}
 			dstCap := min(oend, cap(out)) - op
 			decodedSize, e = d.decompressBlockInternal(out[:op], dstCap, block, notStreaming)
-			if e.cCode() == int(dErrDstSizeTooSmall) && dstCap < oend-op {
+			if e.cCode() == int(dErrDstSizeTooSmall) && dstCap > bsMax {
 				// More than dstCap > blockSizeMax bytes: the check below
-				// would have rejected the block.
+				// would have rejected the block. Go: named so whether the
+				// room was the buffer's or the output space's, so that the
+				// error does not depend on dst's capacity (which sets the
+				// buffer); only a block short of a space of at most
+				// blockSizeMax left is the space's error, as in streams.
 				e = dErrDecodedBlockTooLarge
 			}
 		case btRaw:
@@ -611,6 +639,37 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 		ip += 4
 	}
 	return out, ip, 0
+}
+
+// dBlockState is the state a compressed block can change that the next
+// block reads: the entropy tables and repcodes, the table pointers and the
+// entropy flags (decompressFrame's tight decode, no C counterpart).
+type dBlockState struct {
+	entropy                             entropyDTables
+	llTptr, mlTptr, ofTptr              []seqSymbol
+	hufPtr                              *huf.DTable
+	litEntropy, fseEntropy, ddictIsCold bool
+}
+
+// saveBlockState saves the block state in d.blockSnap (made once).
+func (d *dctx) saveBlockState() {
+	if d.blockSnap == nil {
+		d.blockSnap = new(dBlockState)
+	}
+	b := d.blockSnap
+	b.entropy.llTable, b.entropy.ofTable, b.entropy.mlTable = d.entropy.llTable, d.entropy.ofTable, d.entropy.mlTable
+	b.entropy.hufTable, b.entropy.rep = d.entropy.hufTable, d.entropy.rep
+	b.llTptr, b.mlTptr, b.ofTptr, b.hufPtr = d.llTptr, d.mlTptr, d.ofTptr, d.hufPtr
+	b.litEntropy, b.fseEntropy, b.ddictIsCold = d.litEntropy, d.fseEntropy, d.ddictIsCold
+}
+
+// restoreBlockState restores what saveBlockState saved.
+func (d *dctx) restoreBlockState() {
+	b := d.blockSnap
+	d.entropy.llTable, d.entropy.ofTable, d.entropy.mlTable = b.entropy.llTable, b.entropy.ofTable, b.entropy.mlTable
+	d.entropy.hufTable, d.entropy.rep = b.entropy.hufTable, b.entropy.rep
+	d.llTptr, d.mlTptr, d.ofTptr, d.hufPtr = b.llTptr, b.mlTptr, b.ofTptr, b.hufPtr
+	d.litEntropy, d.fseEntropy, d.ddictIsCold = b.litEntropy, b.fseEntropy, b.ddictIsCold
 }
 
 // memBudget is a byte budget that concurrent decodes share (no C
@@ -765,33 +824,29 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 		// Spare capacity dst already has is not an untrusted reservation:
 		// the frame decodes into it (up to its output space) before any
 		// growth.
+		// Without a trusted content size, the spare capacity replaces the
+		// guess: the frame decodes in it, and decompressFrame decodes a
+		// compressed block that lacks the full-space room there into the
+		// room left first (tryTight), so a dst the caller sized for the
+		// output is used without growth.
 		spare := min(frameCap, uint64(cap(dst)-len(dst)))
-		reserve = max(reserve, spare)
-		if !trusted && spare > 0 && spare < frameCap {
-			// Go: without a trusted content size, the frame is first
-			// decoded with the spare capacity as its whole output space (C
-			// one-shot's dstCapacity), so a dst the caller sized for the
-			// output is used without growth. On any error (a frame
-			// larger than the spare capacity among them) the frame is
-			// decoded again as below, from its start, and that result
-			// stands: the result never depends on dst's capacity.
-			cold := d.ddictIsCold
-			buf := dst[len(dst) : len(dst) : len(dst)+int(spare)]
-			d.checkContinuity(buf, int(spare))
-			out, consumed, e := d.decompressFrame(buf, int(spare), src)
-			if e == 0 {
-				dst = dst[:len(dst)+len(out)]
-				src = src[consumed:]
-				continue
-			}
-			d.decompressBeginUsingDDict(fdd)
-			d.ddictIsCold = cold // the trial does not warm the dictionary
+		d.tryTight = !trusted && spare > 0 && spare < frameCap
+		if d.tryTight {
+			reserve = spare
+		} else {
+			reserve = max(reserve, spare)
 		}
 		ge := dErr(0)
 		if dst, ge = d.growBuffer(dst, int(reserve)); ge != 0 {
 			return dst, ge
 		}
 		buf := dst[len(dst) : len(dst) : len(dst)+int(reserve)]
+		if frameCap == 0 {
+			// Go: no output space is C's NULL dst, whether or not the
+			// caller's dst is nil, so that the result does not depend on
+			// it (decodeLiteralsBlock's "NULL not handled" check).
+			buf = nil
+		}
 
 		// C passes dstCapacity, the frame's output space; the buffer's
 		// capacity may be smaller (decompressFrame grows it). Both are 0

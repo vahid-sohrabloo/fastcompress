@@ -199,6 +199,11 @@ type dctx struct {
 	// DecodeAll calls); charged is what this decode took from it.
 	budget  *memBudget
 	charged int
+	// tryTight: decompressFrame's buffer is the caller's spare capacity,
+	// where a compressed block short of room is decoded in the room left
+	// first (blockSnap holds the state to restore if that fails).
+	tryTight  bool
+	blockSnap *dBlockState
 
 	// streaming (C: ZSTD_d_stableOutBuffer, the static DCtx and legacy
 	// frames are not ported: the output is always buffered)
