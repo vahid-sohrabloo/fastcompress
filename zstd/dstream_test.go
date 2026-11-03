@@ -403,28 +403,122 @@ func TestDecompressStreamResetDicts(t *testing.T) {
 	}
 }
 
+// crefHint returns the hint of C's last call that made progress when it
+// decodes in (which must end inside a frame) with cref dstream: the
+// value of its INCOMPLETE line.
+func crefHint(t *testing.T, in []byte, chunk int) int {
+	t.Helper()
+	_, err := creftest.RunErr(t, in, "dstream", "-chunk-size", strconv.Itoa(chunk), "-out-size", "4096")
+	if err == nil {
+		t.Fatalf("cref accepted a cut frame")
+	}
+	_, after, ok := strings.Cut(err.Error(), "INCOMPLETE ")
+	n, cerr := strconv.Atoi(strings.TrimSpace(after))
+	if !ok || cerr != nil {
+		t.Fatalf("cref: %v", err)
+	}
+	return n
+}
+
+// TestDecompressStreamHintCref compares the hint decompressStream returns
+// with C's (cref dstream's INCOMPLETE value) for frames cut inside: the
+// header, a block header, a block being loaded (the part loaded is
+// subtracted), a raw block (streamed) and the checksum; after a block the
+// next block's header is preloaded. Text (compressed blocks) and random
+// (raw blocks) input, 1 KiB window, checksum; 7-byte chunks and the whole
+// cut input in one call.
+func TestDecompressStreamHintCref(t *testing.T) {
+	r := rand.New(rand.NewPCG(5, 5))
+	random := make([]byte, 3000)
+	for i := range random {
+		random[i] = byte(r.Uint32())
+	}
+	for _, in := range [][]byte{malText(3000), random} {
+		frame := creftest.Run(t, in, "compress", "-level", "3", "-window-log", "10", "-checksum", "1")
+		for n := 1; n < len(frame); n++ {
+			if n > 40 && n%13 != 0 && n < len(frame)-8 {
+				continue
+			}
+			for _, chunk := range []int{7, n} {
+				_, e, last := dstreamRun(t, newDCtx(), frame[:n], fixedChunks(chunk), 4096, 0)
+				if want := crefHint(t, frame[:n], chunk); e != 0 || last != want {
+					t.Fatalf("cut %d/%d chunk %d: err %d, hint %d, C %d", n, len(frame), chunk, e, last, want)
+				}
+			}
+		}
+	}
+}
+
+// TestDecompressStreamWrapEdgeCref pins the wrap condition (C:
+// outStart + blockSizeMax > outBuffSize) at equality: with a 1 KiB window
+// (round buffer 3136 bytes, FCS unknown), raw blocks fill it to 2112, and
+// 2112 + 1024 = 3136 does not wrap, so the next block's literals go at
+// 2112 and a match at offset 2162 copies the raw bytes at 50 (beyond the
+// window: C's history check allows it). Had the buffer wrapped, the
+// literals would have overwritten them.
+func TestDecompressStreamWrapEdgeCref(t *testing.T) {
+	raw := func(n int, seed byte) malBlock {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = seed + byte(i*7)
+		}
+		return malBlock{typ: btRaw, size: n, body: b}
+	}
+	lits := bytes.Repeat([]byte{'L'}, 100)
+	frame := malFrame{hdr: malFHdr{winDesc: 0}.bytes(), blocks: []malBlock{
+		raw(1024, 1), raw(1024, 2), raw(64, 3), // outStart 2112: no wrap
+		malCBlock(craftBlock(t, lits, []malSeq{{ll: 100, ml: 8, off: 2112 + 100 - 50}}), true),
+	}}.bytes()
+	for _, chunk := range []int{7, len(frame)} {
+		if k, _ := streamCref(t, frame, nil, nil, chunk, 4096); k != "accept" {
+			t.Errorf("chunk %d: %s", chunk, k)
+		}
+	}
+}
+
 // TestDecompressStreamOversized pins C's buffer shrinking: after a frame
 // with a 1 MiB window, frames with a 1 KiB window keep its buffer sizes
 // until the 128th (ZSTD_WORKSPACETOOLARGE_MAXDURATION) in a row for which
-// they are 3 times too large, which reallocates them at the small sizes.
+// they are 3 times too large or more, which reallocates them at the small
+// sizes; also when they are exactly 3 times the small frames' sizes.
 func TestDecompressStreamOversized(t *testing.T) {
-	big := malFrame{hdr: malFHdr{winDesc: malWindow1M}.bytes(), blocks: []malBlock{{typ: btRaw, last: true, size: 1, body: []byte{'x'}}}}.bytes()
-	small := malFrame{hdr: malFHdr{winDesc: 0}.bytes(), blocks: []malBlock{{typ: btRaw, last: true, size: 1, body: []byte{'y'}}}}.bytes()
-	d := newDCtx()
-	buf := make([]byte, 16)
-	decode := func(f []byte) {
-		t.Helper()
-		in := inBuffer{src: f}
-		if hint, e := d.decompressStreamCode(&outBuffer{dst: buf}, &in); e != 0 || hint != 0 || in.pos != len(f) {
-			t.Fatalf("err %d, hint %d", e, hint)
-		}
+	rle := func(n int, last bool) malBlock { return malBlock{typ: btRLE, last: last, size: n, body: []byte{'r'}} }
+	single := func(fcs uint64, blocks ...malBlock) []byte {
+		return malFrame{hdr: malFHdr{single: true, fcsSize: 4, fcs: fcs}.bytes(), blocks: blocks}.bytes()
 	}
-	decode(big)
-	bigSize := d.outBuffSize
-	for i := 1; i <= workspaceTooLargeMaxDuration; i++ {
-		decode(small)
-		if shrunk := d.outBuffSize < bigSize; shrunk != (i == workspaceTooLargeMaxDuration) {
-			t.Fatalf("small frame %d: outBuffSize %d (after the big frame %d)", i, d.outBuffSize, bigSize)
+	for _, c := range []struct {
+		name       string
+		big, small []byte
+	}{
+		{"window-1MiB-vs-1KiB",
+			malFrame{hdr: malFHdr{winDesc: malWindow1M}.bytes(), blocks: []malBlock{rle(1, true)}}.bytes(),
+			malFrame{hdr: malFHdr{winDesc: 0}.bytes(), blocks: []malBlock{rle(1, true)}}.bytes()},
+		// exactly 3 times: (131072 + 168928) = 3 × (50000 + 50000)
+		{"exactly-3x", single(168928, rle(131072, false), rle(37856, true)), single(50000, rle(50000, true))},
+	} {
+		d := newDCtx()
+		buf := make([]byte, 16) // smaller than the content: no single-pass shortcut
+		decode := func(f []byte) {
+			t.Helper()
+			in := inBuffer{src: f}
+			for {
+				o := outBuffer{dst: buf}
+				hint, e := d.decompressStreamCode(&o, &in)
+				if e != 0 {
+					t.Fatalf("%s: err %d", c.name, e)
+				}
+				if hint == 0 {
+					return
+				}
+			}
+		}
+		decode(c.big)
+		bigSize := d.outBuffSize
+		for i := 1; i <= workspaceTooLargeMaxDuration; i++ {
+			decode(c.small)
+			if shrunk := d.outBuffSize < bigSize; shrunk != (i == workspaceTooLargeMaxDuration) {
+				t.Fatalf("%s: small frame %d: outBuffSize %d (after the big frame %d)", c.name, i, d.outBuffSize, bigSize)
+			}
 		}
 	}
 }
