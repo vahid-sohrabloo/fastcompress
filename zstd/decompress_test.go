@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -198,6 +199,7 @@ func TestMaliciousCorpus(t *testing.T) {
 func TestDecompressErrorsIs(t *testing.T) {
 	text := malText(600)
 	frame := malEncode(t, text, true)
+	skippable := func() []byte { return []byte{0x50, 0x2A, 0x4D, 0x18, 2, 0, 0, 0, 'h', 'i'} }
 	for _, c := range []struct {
 		name      string
 		in        []byte
@@ -212,6 +214,8 @@ func TestDecompressErrorsIs(t *testing.T) {
 		{"magic prefix after a frame", append(slices.Clone(frame), 0x28, 0xB5), 0, io.ErrUnexpectedEOF},
 		{"skippable prefix after a frame", append(slices.Clone(frame), 0x5F, 0x2A, 0x4D, 0x18), 0, io.ErrUnexpectedEOF},
 		{"checksum cut", frame[:len(frame)-2], 0, io.ErrUnexpectedEOF},
+		{"1 garbage byte after a skippable frame", append(skippable(), 0x27), 0, ErrMagicMismatch},
+		{"magic prefix after a skippable frame", append(skippable(), 0x28, 0xB5), 0, io.ErrUnexpectedEOF},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			d := newDCtx()
@@ -306,6 +310,16 @@ func TestDecompressParams(t *testing.T) {
 	d.setMaxWindow(1 << 10)
 	if _, err := d.decompressMultiFrame(nil, frame, nil); err != nil {
 		t.Fatalf("max window 1024: %v", err)
+	}
+	// Byte granularity: a 1.25 MiB window (exponent 10, mantissa 2).
+	w125 := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, 10<<3 | 2, 1, 0, 0}
+	d.setMaxWindow(1<<20 + 1<<18 - 1)
+	if _, err := d.decompressMultiFrame(nil, w125, nil); err != ErrWindowSizeExceeded {
+		t.Fatalf("1.25 MiB window, max 1.25 MiB-1: %v", err)
+	}
+	d.setMaxWindow(1<<20 + 1<<18)
+	if _, err := d.decompressMultiFrame(nil, w125, nil); err != nil {
+		t.Fatalf("1.25 MiB window, max 1.25 MiB: %v", err)
 	}
 	d.setMaxWindow(1 << 10)
 	d.reset(true)
@@ -413,6 +427,107 @@ func TestDecompressHugeHeader(t *testing.T) {
 	}
 }
 
+// TestDecompressEmptyBlocks: a frame of many empty raw or compressed
+// blocks (3 or 5 input bytes each, no output) claims an output space of
+// blocks × blockSizeMax; without an FCS, with an implausible one (2^40) or
+// with the largest one trusted (frameTrustRatio × the frame's size) it must
+// reserve at most a small multiple of the input, on 386 too (review C1).
+func TestDecompressEmptyBlocks(t *testing.T) {
+	for _, n := range []int{100, 4000, 100000} {
+		for _, typ := range []string{"raw", "compressed"} {
+			bSize := map[string]int{"raw": 3, "compressed": 5}[typ]
+			for _, fcs := range []string{"none", "2^40", "trusted"} {
+				hdr := []byte{0x28, 0xB5, 0x2F, 0xFD, 0x00, 7 << 3} // window 128 KiB
+				// at most frameGuessRatio × the input, at least frameTrustMin
+				bound := uint64(max(frameTrustMin, frameGuessRatio*(len(hdr)+n*bSize)))
+				if fcs != "none" {
+					v := uint64(1 << 40)
+					if fcs == "trusted" {
+						v = uint64(frameTrustRatio * (len(hdr) + 8 + n*bSize))
+						bound = v
+					}
+					hdr[4] = 0xC0
+					hdr = binary.LittleEndian.AppendUint64(hdr, v)
+				}
+				in := hdr
+				for i := range n {
+					if typ == "raw" {
+						in = append(in, malBlockHeader(btRaw, 0, i == n-1)...)
+					} else {
+						// raw literals of size 0, nbSeq 0
+						in = append(append(in, malBlockHeader(btCompressed, 2, i == n-1)...), 0, 0)
+					}
+				}
+				name := fmt.Sprintf("%d-%s-fcs-%s", n, typ, fcs)
+				want := error(nil)
+				if fcs != "none" {
+					want = ErrFrameSizeMismatch
+				}
+				// The least of three runs: other goroutines only add.
+				alloc := uint64(math.MaxUint64)
+				for range 3 {
+					var ms0, ms1 runtime.MemStats
+					runtime.ReadMemStats(&ms0)
+					got, err := dctxDecode(in)
+					runtime.ReadMemStats(&ms1)
+					if err != want || len(got) != 0 {
+						t.Fatalf("%s: (%d bytes, %v), want %v", name, len(got), err, want)
+					}
+					alloc = min(alloc, ms1.TotalAlloc-ms0.TotalAlloc)
+				}
+				// + 256 KiB for the dctx and its tables
+				if max := bound + 256<<10; alloc > max {
+					t.Errorf("%s: %d input bytes allocated %d bytes (> %d)", name, len(in), alloc, max)
+				}
+			}
+		}
+	}
+}
+
+// TestDecompressFrameGrowExtDict: a frame decoded after a raw-content
+// dictionary (set up as ZSTD_refDictContent does) into a buffer that
+// decompressFrame must grow several times: checkContinuity, given the
+// frame's output space, makes the dictionary the extDict, and growing keeps
+// it (and every offset) valid. Task 10's dictionaries take this path.
+func TestDecompressFrameGrowExtDict(t *testing.T) {
+	nFrames := 0
+	for _, name := range creftest.FrameNames(t) {
+		if !strings.HasPrefix(name, "dict") {
+			continue
+		}
+		f := creftest.LoadFrame(t, name)
+		if f.CErr != "" || !f.RawDict || len(f.Want) < 4<<10 {
+			continue
+		}
+		fsi := findFrameSizeInfo(f.Data)
+		if fsi.err != 0 || fsi.compressedSize != len(f.Data) {
+			continue // not a single frame
+		}
+		nFrames++
+		for _, initial := range []int{0, 1, 1000} {
+			d := newDCtx()
+			d.decompressBegin()
+			// C: ZSTD_refDictContent
+			d.prevDst = f.Dict
+			d.prefixStart, d.virtualStart, d.previousDstEnd = 0, 0, len(f.Dict)
+			buf := make([]byte, 0, initial)
+			d.checkContinuity(buf, len(f.Want))
+			if len(d.extDict) != len(f.Dict) {
+				t.Fatalf("%s: extDict %d bytes, want the dictionary's %d", name, len(d.extDict), len(f.Dict))
+			}
+			out, consumed, e := d.decompressFrame(buf, len(f.Want), f.Data)
+			if e != 0 || consumed != len(f.Data) || !bytes.Equal(out, f.Want) {
+				t.Errorf("%s (initial %d): error %d, consumed %d of %d, equal %v",
+					name, initial, e, consumed, len(f.Data), bytes.Equal(out, f.Want))
+			}
+		}
+	}
+	if nFrames == 0 {
+		t.Fatal("no raw-dictionary frames")
+	}
+	t.Logf("%d frames", nFrames)
+}
+
 // truncCheck decodes every prefix of data (the parts concatenated) and
 // checks that the prefixes ending at a part boundary decode to the
 // concatenated wants, and every other one fails with io.ErrUnexpectedEOF.
@@ -443,7 +558,7 @@ func truncCheck(t *testing.T, parts, wants [][]byte) {
 	}
 	d := newDCtx()
 	buf := make([]byte, 0, len(want))
-	for n := 1; n < len(data); n++ {
+	for n := 1; n <= len(data); n++ {
 		if !near(n) {
 			continue
 		}

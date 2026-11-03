@@ -356,13 +356,19 @@ func (d *dctx) decompressBegin() {
 // Decoder parameter defaults (no C counterparts: the klauspost doc text
 // decides them, see docs/superpowers/phase2-api-decisions.md).
 const (
-	// defaultMaxWindowSize is WithDecoderMaxWindow's default, MaxWindowSize
-	// (C: ZSTD_MAXWINDOWSIZE_DEFAULT, (1<<27)+1).
+	// defaultMaxWindowSize is WithDecoderMaxWindow's default. C's
+	// counterpart is ZSTD_MAXWINDOWSIZE_DEFAULT ((1<<27)+1); the doc text
+	// sets MaxWindowSize (1<<29).
 	defaultMaxWindowSize = MaxWindowSize
 	// defaultMaxMemory is WithDecoderMaxMemory's default, 64 GiB.
 	defaultMaxMemory = 64 << 30
 	// frameHeaderSizeMin. C: ZSTD_FRAMEHEADERSIZE_MIN(ZSTD_f_zstd1)
 	frameHeaderSizeMin = 6
+	// frameTrustMin and frameTrustRatio bound the output space
+	// decompressMultiFrame reserves before decoding a frame (Go only).
+	frameTrustMin   = 1 << 20
+	frameTrustRatio = 64
+	frameGuessRatio = 4
 )
 
 // ddict is a digested decoder dictionary. C: zstd_ddict.c:ZSTD_DDict.
@@ -439,32 +445,50 @@ func setRLEBlock(dst []byte, b byte, regenSize int) (int, dErr) {
 	return regenSize, 0
 }
 
-// decompressFrame decodes the frame starting src into dst[:cap(dst)], the
-// frame's output buffer from its start (as given to checkContinuity), and
-// returns the bytes written and the bytes of src consumed. On an error,
-// written is the output of the blocks decoded before it.
+// decompressFrame decodes the frame starting src into dst[:dstCapacity],
+// the frame's output buffer from its start (as given to checkContinuity;
+// len(dst) is ignored), and returns the output and the bytes of src
+// consumed. dstCapacity is C's output space; the buffer itself may be
+// shorter (cap(dst) < dstCapacity): decompressFrame then grows it before
+// each block that needs more room, so the memory held follows the output,
+// not the space a header or a run of empty blocks claims. On an error, the
+// output holds the blocks decoded before it.
 // C: zstd_decompress.c:ZSTD_decompressFrame
-func (d *dctx) decompressFrame(dst, src []byte) (written, consumed int, err dErr) {
-	out := dst[:cap(dst)]
-	oend := len(out)
+func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []byte, consumed int, err dErr) {
+	out = dst[:0]
+	oend := dstCapacity
 	op, ip := 0, 0
 	remainingSrcSize := len(src)
 
+	// Go: makes room for min(n, oend-op) bytes at op. The offsets C keeps
+	// as pointers stay valid when the buffer moves; prevDst follows it.
+	reserve := func(n int) {
+		n = min(n, oend-op)
+		if cap(out)-op < n {
+			// grow by at least cap(out) (no overflow on 386), so honest
+			// frames copy their output O(1) times on average
+			n = min(max(n, cap(out)), oend-op)
+			out = slices.Grow(out[:op], n)
+			out = out[:0:min(cap(out), oend)]
+			d.prevDst = out[:cap(out)]
+		}
+	}
+
 	// check
 	if remainingSrcSize < frameHeaderSizeMin+blockHeaderSize {
-		return 0, 0, dErrSrcSizeWrong
+		return out, 0, dErrSrcSizeWrong
 	}
 
 	// Frame Header
 	frameHeaderSize, e := frameHeaderSizeInternal(src[:startingInputLength])
 	if e != 0 {
-		return 0, 0, e
+		return out, 0, e
 	}
 	if remainingSrcSize < frameHeaderSize+blockHeaderSize {
-		return 0, 0, dErrSrcSizeWrong
+		return out, 0, dErrSrcSizeWrong
 	}
 	if e := d.decodeFrameHeader(src[:frameHeaderSize]); e != 0 {
-		return 0, 0, e
+		return out, 0, e
 	}
 	ip += frameHeaderSize
 	remainingSrcSize -= frameHeaderSize
@@ -474,21 +498,22 @@ func (d *dctx) decompressFrame(dst, src []byte) (written, consumed int, err dErr
 	// ZSTD_decodeFrameHeader) too: a deliberate deviation, see the error
 	// mapping table.
 	if max(d.fParams.windowSize, 1<<windowLogAbsoluteMin) > d.maxWindowSize {
-		return 0, ip, dErrFrameParameterWindowTooLarge
+		return out, ip, dErrFrameParameterWindowTooLarge
 	}
 
 	// C shrinks blockSizeMax to maxBlockSizeParam here; no option sets it.
+	bsMax := int(d.fParams.blockSizeMax)
 
 	// Loop on each block
 	for {
 		cBlockSize, bp, e := getcBlockSize(src[ip:])
 		if e != 0 {
-			return op, ip, e
+			return out[:op], ip, e
 		}
 		ip += blockHeaderSize
 		remainingSrcSize -= blockHeaderSize
 		if cBlockSize > remainingSrcSize {
-			return op, ip, dErrSrcSizeWrong
+			return out[:op], ip, dErrSrcSizeWrong
 		}
 		// C limits the output to ip when decompressing in place (src
 		// inside dst); Go's src and dst are separate slices here.
@@ -497,24 +522,37 @@ func (d *dctx) decompressFrame(dst, src []byte) (written, consumed int, err dErr
 		var decodedSize int
 		switch bp.blockType {
 		case btCompressed:
-			decodedSize, e = d.decompressBlockInternal(out[:op], oend-op, block, notStreaming)
+			// Go: room for a whole block and for literals placed after it
+			// (ZSTD_allocateLiteralsBuffer's in-dst test), so the
+			// placement and the checks are those of the full output space.
+			reserve(2*bsMax + 2*wildcopyOverlength + 1)
+			dstCap := min(oend, cap(out)) - op
+			decodedSize, e = d.decompressBlockInternal(out[:op], dstCap, block, notStreaming)
+			if e.cCode() == int(dErrDstSizeTooSmall) && dstCap < oend-op {
+				// More than dstCap > blockSizeMax bytes: the check below
+				// would have rejected the block.
+				e = dErrDecodedBlockTooLarge
+			}
 		case btRaw:
-			decodedSize, e = copyRawBlock(out[op:oend], block)
+			reserve(cBlockSize)
+			decodedSize, e = copyRawBlock(out[op:min(oend, cap(out))], block)
 		case btRLE:
-			decodedSize, e = setRLEBlock(out[op:oend], block[0], int(bp.origSize))
+			reserve(int(bp.origSize))
+			decodedSize, e = setRLEBlock(out[op:min(oend, cap(out))], block[0], int(bp.origSize))
 		default: // btReserved: getcBlockSize has rejected it
-			return op, ip, dErrCorruptionDetected
+			return out[:op], ip, dErrCorruptionDetected
 		}
 		if e != 0 {
-			return op, ip, e
+			return out[:op], ip, e
 		}
 		// Go: streaming C's check (ZSTD_decompressContinue), which one-shot
 		// C does not make: a block regenerating more than blockSizeMax.
 		// DecodeAll and streaming then agree (a deliberate deviation, see
 		// the error mapping table).
-		if decodedSize > int(d.fParams.blockSizeMax) {
-			return op, ip, dErrDecodedBlockTooLarge
+		if decodedSize > bsMax {
+			return out[:op], ip, dErrDecodedBlockTooLarge
 		}
+		out = out[:op+decodedSize]
 		if d.validateChecksum {
 			d.xxhState.Write(out[op : op+decodedSize])
 		}
@@ -527,32 +565,33 @@ func (d *dctx) decompressFrame(dst, src []byte) (written, consumed int, err dErr
 	}
 
 	if d.fParams.frameContentSize != contentSizeUnknown && uint64(op) != d.fParams.frameContentSize {
-		return op, ip, dErrFrameSizeMismatch
+		return out, ip, dErrFrameSizeMismatch
 	}
 	if d.fParams.checksumFlag { // Frame content checksum verification
 		if remainingSrcSize < 4 {
 			// Go: C returns checksum_wrong here; streaming C waits for
 			// more input. DecodeAll reports the cut input like streaming
 			// (io.ErrUnexpectedEOF): a deliberate deviation.
-			return op, ip, dErrSrcSizeWrong
+			return out, ip, dErrSrcSizeWrong
 		}
 		if !d.forceIgnoreChecksum {
 			checkCalc := uint32(d.xxhState.Sum64())
 			checkRead := binary.LittleEndian.Uint32(src[ip:])
 			if checkRead != checkCalc {
-				return op, ip, dErrChecksumWrong
+				return out, ip, dErrChecksumWrong
 			}
 		}
 		ip += 4
 	}
-	return op, ip, 0
+	return out, ip, 0
 }
 
 // decompressMultiFrame decodes every frame of src (skipping skippable
 // frames), appending the output to dst, which it grows as the allocation
-// rule says (docs/superpowers/phase2-api-decisions.md): each frame gets
-// min(frame content size, blocks × blockSizeMax) bytes, cut to
-// d.maxMemory less the output so far. dst[:len(dst)] is never modified.
+// rule says (docs/superpowers/phase2-api-decisions.md): each frame gets an
+// output space of min(frame content size, blocks × blockSizeMax) bytes,
+// cut to d.maxMemory less the output so far, and memory as its blocks
+// need it. dst[:len(dst)] is never modified.
 // On an error the result holds the output decoded before it.
 // C: zstd_decompress.c:ZSTD_decompressMultiFrame (via ZSTD_decompressDCtx)
 func (d *dctx) decompressMultiFrame(dst, src []byte, dd *ddict) ([]byte, error) {
@@ -596,9 +635,13 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 		// (ZSTD_decompressBound's nbBlocks × blockSizeMax; the blocks
 		// before the walk failed when it did) and the memory left. A
 		// frame whose header fails, or declares a window too large, gets
-		// none: decompressFrame reports that before any output.
+		// none: decompressFrame reports that before any output. Memory is
+		// reserved up front for a plausible frame content size (at most
+		// frameTrustRatio times the frame's compressed size); otherwise for
+		// frameGuessRatio times the compressed size, at least
+		// frameTrustMin. decompressFrame grows the buffer as blocks need it.
 		limit := min(d.maxMemory-min(d.maxMemory, uint64(len(dst)-start)), uint64(math.MaxInt-len(dst)))
-		var frameCap uint64
+		var frameCap, reserve uint64
 		byFCS, byLimit := false, false
 		var zfh frameHeader
 		if need, e := getFrameHeaderAdvanced(&zfh, src); e == 0 && need == 0 &&
@@ -614,13 +657,30 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 			if frameCap > limit {
 				frameCap, byLimit = limit, true
 			}
+			compressedSize := uint64(len(src))
+			if fsi.err == 0 {
+				compressedSize = uint64(fsi.compressedSize)
+			}
+			reserve = min(frameCap, max(frameTrustMin, frameGuessRatio*compressedSize))
+			if byFCS && frameCap/frameTrustRatio <= compressedSize {
+				reserve = frameCap
+			}
 		}
-		dst = slices.Grow(dst, int(frameCap))
-		buf := dst[len(dst) : len(dst) : len(dst)+int(frameCap)]
+		dst = slices.Grow(dst, int(reserve))
+		buf := dst[len(dst) : len(dst) : len(dst)+int(reserve)]
 
-		d.checkContinuity(buf, len(buf))
-		n, consumed, e := d.decompressFrame(buf, src)
-		dst = dst[:len(dst)+n]
+		// C passes dstCapacity, the frame's output space; the buffer's
+		// capacity may be smaller (decompressFrame grows it). Both are 0
+		// only together.
+		d.checkContinuity(buf, int(frameCap))
+		out, consumed, e := d.decompressFrame(buf, int(frameCap), src)
+		if len(out) > 0 && cap(dst) > len(dst) && &out[0] == &dst[:len(dst)+1][len(dst)] {
+			dst = dst[:len(dst)+len(out)] // decoded in place
+		} else if len(dst) == 0 {
+			dst = out // the frame outgrew its reservation: its buffer is the result
+		} else {
+			dst = append(dst, out...) // the frame outgrew its reservation
+		}
 		if e != 0 {
 			if e.cCode() == int(dErrDstSizeTooSmall) {
 				// Go: name what limited the output space.
