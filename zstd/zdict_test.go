@@ -216,13 +216,25 @@ func TestBuildDictOptionErrors(t *testing.T) {
 func TestBuildDictCapacity(t *testing.T) {
 	hist := buildDictHistory(t, 100)
 	samples := buildDictSamples(t)[:10]
-	_, err := BuildDict(BuildDictOptions{History: hist, Contents: samples, Offsets: [3]int{1, 4, 100 + 64<<10}})
+	plain, err := BuildDict(BuildDictOptions{History: hist, Contents: samples})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hSize := len(plain) - len(hist) // the header does not depend on the offsets' values
+	// The largest offset that fits exactly: header + padded content ==
+	// capacity (len(hist) + 64 KiB).
+	limit := len(hist) + 64<<10 - hSize
+	dict, err := BuildDict(BuildDictOptions{History: hist, Contents: samples, Offsets: [3]int{1, 4, limit}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dict) != len(hist)+64<<10 {
+		t.Fatalf("len %d, want the capacity %d", len(dict), len(hist)+64<<10)
+	}
+	_, err = BuildDict(BuildDictOptions{History: hist, Contents: samples, Offsets: [3]int{1, 4, limit + 1}})
 	var ce *buildDictError
 	if !errors.As(err, &ce) || ce.code != 70 {
 		t.Fatalf("err = %v, want C error 70 (dstSize_tooSmall)", err)
-	}
-	if _, err := BuildDict(BuildDictOptions{History: hist, Contents: samples, Offsets: [3]int{1, 4, 100 + 60<<10}}); err != nil {
-		t.Fatal(err)
 	}
 }
 

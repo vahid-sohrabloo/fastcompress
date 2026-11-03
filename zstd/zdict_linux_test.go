@@ -4,6 +4,7 @@ package zstd
 
 import (
 	"errors"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -24,19 +25,40 @@ func hugeZeroMapping(t *testing.T, n int) []byte {
 // TestBuildDictTooLarge checks C's limit on the history: offcodeMax =
 // highbit32(len + 128 KiB) must be at most 30, so a history of
 // 2 GiB - 128 KiB fails with dictionaryCreation_failed, before the CDict
-// or the output is allocated.
+// or the output is allocated. From 4 GiB - 128 KiB C's 32-bit cast wraps
+// (and C goes on into undefined behaviour); Go rejects those with the same
+// error. The histories are untouched mappings, never read.
 func TestBuildDictTooLarge(t *testing.T) {
 	if testing.Short() {
-		t.Skip("hashes 2 GiB")
+		t.Skip("maps 4 GiB of address space")
 	}
 	const n = 2<<30 - 128<<10
 	if offcodeMaxFor(n-1) != 30 || offcodeMaxFor(n) != 31 {
 		t.Fatalf("offcodeMax %d, %d", offcodeMaxFor(n-1), offcodeMaxFor(n))
 	}
-	hist := hugeZeroMapping(t, n)
-	_, err := BuildDict(BuildDictOptions{ID: 1, History: hist})
+	const wrap = 4<<30 - 128<<10 // C: uint32(len + 128 KiB) wraps to 0
+	for _, size := range []int{n, wrap - 1, wrap, wrap + 1<<20} {
+		hist := hugeZeroMapping(t, size)
+		_, err := BuildDict(BuildDictOptions{ID: 1, History: hist})
+		var ce *buildDictError
+		if !errors.As(err, &ce) || ce.code != 34 {
+			t.Fatalf("history %d: err = %v, want C error 34 (dictionaryCreation_failed)", size, err)
+		}
+	}
+}
+
+// TestBuildDictLDMRefused checks that parameters C would run with
+// long-distance matching (level 22 with a 64 MiB history: btultra2,
+// windowLog 27) are refused before the CDict is built, since LDM is not
+// ported.
+func TestBuildDictLDMRefused(t *testing.T) {
+	if testing.Short() {
+		t.Skip("maps 64 MiB of address space")
+	}
+	hist := hugeZeroMapping(t, 64<<20)
+	_, err := finalizeDictionary(hist, nil, 22, 1, repStartValue, nil)
 	var ce *buildDictError
-	if !errors.As(err, &ce) || ce.code != 34 {
-		t.Fatalf("err = %v, want C error 34 (dictionaryCreation_failed)", err)
+	if !errors.As(err, &ce) || ce.code != int(dErrGeneric) || !strings.Contains(err.Error(), "long-distance") {
+		t.Fatalf("err = %v, want the LDM refusal", err)
 	}
 }

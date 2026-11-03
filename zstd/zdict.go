@@ -140,8 +140,8 @@ type entropyStats struct {
 // C: zstd_compress.c:ZSTD_compressBegin_usingCDict_deprecated, through
 // ZSTD_compressBegin_usingCDict_internal (the CDict's parameters: the size
 // is unknown) and ZSTD_compressBegin_internal. LDM stays disabled
-// (ZSTD_resolveEnableLdm needs windowLog >= 27, which levels <= 12 reach
-// only with btlazy2 or below).
+// (ZSTD_resolveEnableLdm needs btopt or above with windowLog >= 27;
+// analyzeEntropy refuses such parameters before getting here).
 func (c *cctx) compressBeginUsingCDict(cd *cdict) {
 	// C: ZSTD_CCtxParams_init_internal(&cctxParams, &params, ZSTD_NO_CLEVEL)
 	var params cctxParams
@@ -280,6 +280,13 @@ func offcodeMaxFor(dictSize int) uint32 {
 // level, into dst and returns their size. C: zdict.c:ZDICT_analyzeEntropy
 // (which writes repStartValue; reps is written instead, see BuildDict).
 func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [repNum]uint32, debug io.Writer) (int, error) {
+	// Go guard: from 4 GiB - 128 KiB C's (U32) cast in offcodeMax wraps
+	// and lets the history through, after which C writes offcodeCount
+	// out of bounds (undefined behaviour). It is rejected with the code C
+	// gives the sizes below the wrap, before anything is allocated.
+	if uint64(len(dict))+blockSizeMax >= 1<<32 {
+		return 0, &buildDictError{code: cErrDictionaryCreationFailed} // too large dictionary
+	}
 	offcodeMax := offcodeMaxFor(len(dict))
 	if offcodeMax > zdictOffcodeMax {
 		return 0, &buildDictError{code: cErrDictionaryCreationFailed} // too large dictionary
@@ -319,6 +326,14 @@ func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [
 	var cdParams cctxParams
 	cctxParamsInit(&cdParams, 0)
 	cdParams.cParams = cParams
+	// compressBeginUsingCDict does not port C's LDM, which
+	// ZSTD_resolveEnableLdm turns on for btopt and above with windowLog >=
+	// 27 (C level 22 with a history of 64 MiB or more). Refuse rather than
+	// differ from C, before building the CDict (whose parameters these
+	// are); BuildDict's levels (<= 11) never get here.
+	if cp := getCParamsFromCCtxParams(&cdParams, contentSizeUnknown, uint64(len(dict)), cpmCreateCDict); cp.strategy >= zstdBtopt && cp.windowLog >= 27 {
+		return 0, &buildDictError{code: int(dErrGeneric), err: fmt.Sprintf("level %d needs long-distance matching, which is not ported", level)}
+	}
 	cd, err := createCDictAdvanced2(dict, dctRawContent, &cdParams)
 	if err != nil {
 		debugf(debug, "Not enough memory \n")
@@ -435,6 +450,10 @@ func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [
 // as `cref finalize-dict` gives C, so content is never truncated.
 // C: zdict.c:ZDICT_finalizeDictionary (C's minContentSize is
 // ZDICT_maxRep(repStartValue); it is the largest of reps here)
+//
+// Precondition: level must not select C's long-distance matcher (btopt or
+// above with windowLog >= 27, reachable from C level 22 with a 64 MiB
+// history): it is not ported, and analyzeEntropy returns an error instead.
 func finalizeDictionary(content []byte, samples [][]byte, level int, dictID uint32, reps [repNum]uint32, debug io.Writer) ([]byte, error) {
 	var header [zdictHBuffSize]byte
 	if level == 0 {
