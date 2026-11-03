@@ -2,6 +2,7 @@ package zstd
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/rand/v2"
@@ -100,6 +101,11 @@ func TestSnappyConvert(t *testing.T) {
 		out, err = snappyConvert(t, &r, tsStreamID(nil))
 		if err != nil {
 			t.Fatal(err)
+		}
+		// Magic, FHD 0 (no FCS, checksum or dictID), the 64 KiB window
+		// descriptor, then the empty last raw block.
+		if want := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, windowDescriptor(1 << 16), 1, 0, 0}; !bytes.Equal(out, want) || want[5] != 0x30 {
+			t.Fatalf("frame % x, want % x", out, want)
 		}
 		checkSnappyOutput(t, d, out, nil)
 	})
@@ -271,6 +277,14 @@ func TestSnappyConvertErrors(t *testing.T) {
 			t.Fatalf("tsDecode: %v", terr)
 		}
 	})
+	t.Run("short write", func(t *testing.T) {
+		// shortWriter (stream_test.go) takes half of each Write, no error.
+		cw := &countWriter{w: shortWriter{}}
+		n, err := r.Convert(bytes.NewReader(tsEncode([]byte("data"), tsEncodeOpts{})), cw)
+		if err != io.ErrShortWrite || n != cw.n || n != 3 {
+			t.Fatalf("got %d (wrote %d), %v, want 3, io.ErrShortWrite", n, cw.n, err)
+		}
+	})
 	t.Run("reader error", func(t *testing.T) {
 		errRead := errors.New("read failed")
 		_, err := r.Convert(io.MultiReader(bytes.NewReader(tsStreamID(nil)), errReader{errRead}), io.Discard)
@@ -360,7 +374,7 @@ func TestSnappyConvertAllocs(t *testing.T) {
 			t.Errorf("%s: allocated %d bytes", c.name, d)
 		}
 	}
-	// A fresh converter's buffers are fixed: about 0.5 MiB.
+	// A fresh converter's buffers are fixed: about 0.85 MiB.
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
 	var fresh SnappyConverter
@@ -430,4 +444,76 @@ func FuzzSnappyConvert(f *testing.F) {
 			t.Fatalf("Decoder: %v, %d bytes, want %d", err, len(got), len(want))
 		}
 	})
+}
+
+// tsLits appends b as literal elements of at most 60 bytes.
+func tsLits(dst, b []byte) []byte {
+	for len(b) > 0 {
+		n := min(len(b), 60)
+		dst = append(dst, byte((n-1)<<2))
+		dst = append(dst, b[:n]...)
+		b = b[n:]
+	}
+	return dst
+}
+
+// tsLitChunk appends a compressed chunk holding a as literals only.
+func tsLitChunk(dst, a []byte) []byte {
+	return tsDataChunk(dst, tsChunkCompressed, a, tsLits(binary.AppendUvarint(nil, uint64(len(a))), a))
+}
+
+// TestSnappyRawFallbackKeepsTables: a chunk whose literals Huffman-compress
+// but whose block falls back to raw must not leave its tables for the next
+// chunk to repeat (C: the swap happens only for an emitted compressed
+// block). Chunk A is slightly compressible literals, chunk B 1000
+// literals, which strategy fast would code with a repeated table.
+func TestSnappyRawFallbackKeepsTables(t *testing.T) {
+	d := newTestDecoder(t, WithDecoderConcurrency(1))
+	var r SnappyConverter
+	raw := 0
+	for trial := range 600 {
+		rng := rand.New(rand.NewPCG(uint64(trial), 77))
+		q := 0.01 + 0.04*rng.Float64()
+		alpha := 230 + rng.IntN(26)
+		sym := func() byte {
+			if rng.Float64() < q {
+				return 'a'
+			}
+			return byte(rng.IntN(alpha))
+		}
+		a := make([]byte, 20000+rng.IntN(45537))
+		for i := range a {
+			a[i] = sym()
+		}
+		b := make([]byte, 1000)
+		for i := range b {
+			b[i] = 'a'
+			if i%10 == 0 {
+				b[i] = byte(rng.IntN(alpha))
+			}
+		}
+		s := tsLitChunk(tsStreamID(nil), a)
+		s = tsLitChunk(s, b)
+		out, err := snappyConvert(t, &r, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aRaw := (out[6]>>1)&3 == btRaw
+		want := append(append([]byte(nil), a...), b...)
+		got, err := d.DecodeAll(out, nil)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("trial %d (A raw %v): %v", trial, aRaw, err)
+		}
+		if aRaw {
+			if raw < 3 {
+				if got := creftest.DecodeC(t, out); !bytes.Equal(got, want) {
+					t.Fatalf("trial %d: C decodes %d bytes, want %d", trial, len(got), len(want))
+				}
+			}
+			raw++
+		}
+	}
+	if raw == 0 {
+		t.Fatal("chunk A was never stored raw")
+	}
 }

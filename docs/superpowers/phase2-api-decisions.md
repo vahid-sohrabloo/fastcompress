@@ -245,6 +245,7 @@ An explicit `WithDecoderConcurrency(n)` that resolves to n > 1 (0 means GOMAXPRO
   - `CompatV155`: C's `ZDICT_finalizeDictionary` output already loads in zstd ≤ v1.5.5, so both values produce C's bytes. Task 16 verifies this against `/usr/bin/zstd` (v1.5.5).
   - `DebugOut` receives C's `DISPLAYLEVEL` messages at notification level 4.
 - **Snappy:** each snappy chunk is decoded into a 64 KiB scratch buffer, which is needed to validate offsets and to turn copies shorter than 3 bytes into literals. Its *parse* (literal and copy elements) becomes the zstd sequences directly: `offBase = offset + 3`, no repcodes, and no match search. Those sequences are encoded with Phase 1's `entropyCompressSeqStore` as one zstd block per chunk, inside one frame (FCS unknown, window 64 KiB, no checksum). CRC-32C is checked on every chunk, since the data is decoded anyway. That is stricter than "not all CRC values are checked", but still conforming.
+- **Snappy empty input (Task 15 ruling R1):** `Convert` on empty input writes nothing and returns `0, nil`. The framing spec says a valid stream always starts with the stream identifier, so this is more lenient than the spec. The klauspost doc text says nothing about this case. Writing nothing is harmless: our `Decoder` and C both read 0 bytes as empty. A stream that holds only the identifier gives a valid empty frame.
 
 ---
 
