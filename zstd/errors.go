@@ -92,6 +92,8 @@ const (
 	dErrDictionaryWrong              dErr = 32 // C: ZSTD_error_dictionary_wrong
 	dErrDstSizeTooSmall              dErr = 70 // C: ZSTD_error_dstSize_tooSmall
 	dErrSrcSizeWrong                 dErr = 72 // C: ZSTD_error_srcSize_wrong
+	dErrNoForwardProgressDestFull    dErr = 80 // C: ZSTD_error_noForwardProgress_destFull
+	dErrNoForwardProgressInputEmpty  dErr = 82 // C: ZSTD_error_noForwardProgress_inputEmpty
 
 	// dErrReservedBlockType is corruption_detected from ZSTD_getcBlockSize
 	// (block type 3).
@@ -142,13 +144,20 @@ const (
 	// a block regenerates more than blockSizeMax. Streaming C's check, which
 	// decompressFrame makes too.
 	dErrDecodedBlockTooLarge dErr = 139
+	// dErrCBlockSizeTooLarge is corruption_detected from
+	// ZSTD_decompressContinue ("Block Size Exceeds Maximum") for a
+	// compressed block: its size in the block header is above
+	// blockSizeMax. One-shot decoding rejects the same block with
+	// dErrCompressedSizeTooBig, whose sentinel it shares. (A raw or RLE
+	// block failing that check is dErrDecodedBlockTooLarge.)
+	dErrCBlockSizeTooLarge dErr = 140
 )
 
 // cCode returns the C ZSTD_ErrorCode e stands for.
 func (e dErr) cCode() int {
 	switch e {
 	case dErrReservedBlockType, dErrBlockTooSmall, dErrLitSizeTooLarge, dErrOffsetBeyondHistory,
-		dErrFrameSizeMismatch, dErrDecodedBlockTooLarge:
+		dErrFrameSizeMismatch, dErrDecodedBlockTooLarge, dErrCBlockSizeTooLarge:
 		return int(dErrCorruptionDetected)
 	case dErrSeqHeaderTooSmall, dErrCompressedSizeTooBig:
 		return int(dErrSrcSizeWrong)
@@ -171,6 +180,8 @@ var cErrorNames = map[int]string{
 	32: "Dictionary mismatch",
 	70: "Destination buffer is too small",
 	72: "Src size is incorrect",
+	80: "Operation made no progress over multiple calls, due to output buffer being full",
+	82: "Operation made no progress over multiple calls, due to input being empty",
 }
 
 // corruptError is a decoder error that matches no sentinel.
@@ -204,7 +215,7 @@ func (e dErr) toError(where string) error {
 		return ErrUnexpectedBlockSize
 	case dErrOffsetBeyondHistory:
 		return ErrWindowSizeTooSmall
-	case dErrCompressedSizeTooBig:
+	case dErrCompressedSizeTooBig, dErrCBlockSizeTooLarge:
 		return ErrCompressedSizeTooBig
 	case dErrFrameSizeExceeded:
 		return ErrFrameSizeExceeded

@@ -333,10 +333,12 @@ func getcBlockSize(src []byte) (cSize int, bp blockProperties, err dErr) {
 	return cSize, bp, 0
 }
 
-// decompressBegin resets d for a new frame. Only the fields dctx has so
-// far are ported; the frame stage fields come with the frame decoder.
+// decompressBegin resets d for a new frame.
 // C: zstd_decompress.c:ZSTD_decompressBegin
 func (d *dctx) decompressBegin() {
+	d.expected = startingInputLength
+	d.stage = dsGetFrameHeaderSize
+	d.decodedSize = 0 // C also resets processedCSize, which only tracing reads
 	d.previousDstEnd = 0
 	d.prefixStart = 0
 	d.virtualStart = 0
@@ -346,6 +348,7 @@ func (d *dctx) decompressBegin() {
 	d.entropy.hufTable.Init(hufDTableCapacityLog) // C: hufTable[0] = ZSTD_HUFFDTABLE_CAPACITY_LOG * 0x1000001
 	d.litEntropy, d.fseEntropy = false, false
 	d.dictID = 0
+	d.bType = btReserved
 	d.isFrameDecompression = true
 	d.entropy.rep = repStartValue // initial repcodes
 	d.llTptr = d.entropy.llTable[:]
@@ -381,12 +384,14 @@ func newDCtx() *dctx {
 }
 
 // reset resets the session (and, unless sessionOnly, the parameters).
-// The streaming and dictionary state come with the tasks that port them.
 // C: zstd_decompress.c:ZSTD_DCtx_reset (ZSTD_reset_session_only, or
 // ZSTD_reset_session_and_parameters)
 func (d *dctx) reset(sessionOnly bool) {
+	d.streamStage = zdssInit
+	d.noForwardProgress = 0
 	d.isFrameDecompression = true
 	if !sessionOnly {
+		d.ddict = nil // C: ZSTD_clearDict
 		// C: ZSTD_DCtx_resetParameters
 		d.maxWindowSize = defaultMaxWindowSize
 		d.forceIgnoreChecksum = false
@@ -717,4 +722,661 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 		return dst, dErrSrcSizeWrong
 	}
 	return dst, 0
+}
+
+/*-**************************************
+*   Advanced Streaming Decompression API
+*   Bufferless and synchronous
+****************************************/
+
+// nextSrcSizeToDecompress. C: zstd_decompress.c:ZSTD_nextSrcSizeToDecompress
+func (d *dctx) nextSrcSizeToDecompress() uint { return d.expected }
+
+// nextSrcSizeToDecompressWithInputSize is nextSrcSizeToDecompress, but a
+// raw block, which can be streamed, may be taken partially: the input the
+// caller has (inputSize), at least 1 byte and at most what the block has
+// left. C: zstd_decompress.c:ZSTD_nextSrcSizeToDecompressWithInputSize
+func (d *dctx) nextSrcSizeToDecompressWithInputSize(inputSize uint) uint {
+	if !(d.stage == dsDecompressBlock || d.stage == dsDecompressLastBlock) {
+		return d.expected
+	}
+	if d.bType != btRaw {
+		return d.expected
+	}
+	return max(1, min(inputSize, d.expected))
+}
+
+// inputType is the kind of input the bufferless decoder expects next.
+// C: zstd.h:ZSTD_nextInputType_e
+type inputType uint8
+
+const (
+	nitFrameHeader    inputType = iota // C: ZSTDnit_frameHeader
+	nitBlockHeader                     // C: ZSTDnit_blockHeader
+	nitBlock                           // C: ZSTDnit_block
+	nitLastBlock                       // C: ZSTDnit_lastBlock
+	nitChecksum                        // C: ZSTDnit_checksum
+	nitSkippableFrame                  // C: ZSTDnit_skippableFrame
+)
+
+// nextInputType. C: zstd_decompress.c:ZSTD_nextInputType
+func (d *dctx) nextInputType() inputType {
+	switch d.stage {
+	case dsDecodeBlockHeader:
+		return nitBlockHeader
+	case dsDecompressBlock:
+		return nitBlock
+	case dsDecompressLastBlock:
+		return nitLastBlock
+	case dsCheckChecksum:
+		return nitChecksum
+	case dsDecodeSkippableHeader, dsSkipFrame:
+		return nitSkippableFrame
+	}
+	return nitFrameHeader // dsGetFrameHeaderSize, dsDecodeFrameHeader
+}
+
+// isSkipFrame. C: zstd_decompress.c:ZSTD_isSkipFrame
+func (d *dctx) isSkipFrame() bool { return d.stage == dsSkipFrame }
+
+// decompressContinue decodes the next srcSize bytes of input (src, which
+// must be exactly nextSrcSizeToDecompress bytes, or for a raw block at
+// least 1 of them), writing output into dst[len(dst):len(dst)+dstCapacity],
+// and returns the number of bytes written. dst[:len(dst)] is the output
+// buffer before them (as for checkContinuity); cap(dst) >=
+// len(dst)+dstCapacity. In the dsSkipFrame stage, C does not read src: it
+// may then be nil, srcSize still giving its size.
+// C: zstd_decompress.c:ZSTD_decompressContinue
+func (d *dctx) decompressContinue(dst []byte, dstCapacity int, src []byte, srcSize uint) (int, dErr) {
+	// Sanity check
+	if srcSize != d.nextSrcSizeToDecompressWithInputSize(srcSize) {
+		return 0, dErrSrcSizeWrong // not allowed
+	}
+	d.checkContinuity(dst, dstCapacity)
+
+	switch d.stage {
+	case dsGetFrameHeaderSize:
+		// format ZSTD_f_zstd1: allows header; srcSize >= frameIDSize to
+		// read the skippable magic number
+		if binary.LittleEndian.Uint32(src)&magicSkippableMask == magicSkippableStart { // skippable frame
+			copy(d.headerBuffer[:], src)
+			d.expected = skippableHeaderSize - srcSize // remaining to load to get full skippable frame header
+			d.stage = dsDecodeSkippableHeader
+			return 0, 0
+		}
+		headerSize, e := frameHeaderSizeInternal(src)
+		if e != 0 {
+			return 0, e
+		}
+		d.headerSize = headerSize
+		copy(d.headerBuffer[:], src)
+		d.expected = uint(d.headerSize) - srcSize
+		d.stage = dsDecodeFrameHeader
+		return 0, 0
+
+	case dsDecodeFrameHeader:
+		copy(d.headerBuffer[uint(d.headerSize)-srcSize:], src)
+		// Go: with a set of dictionaries, C selects the frame's here
+		// (ZSTD_decodeFrameHeader); the caller of the bufferless API
+		// begins the frame with its dictionary instead.
+		if e := d.decodeFrameHeader(d.headerBuffer[:d.headerSize]); e != 0 {
+			return 0, e
+		}
+		d.expected = blockHeaderSize
+		d.stage = dsDecodeBlockHeader
+		return 0, 0
+
+	case dsDecodeBlockHeader:
+		cBlockSize, bp, e := getcBlockSize(src[:blockHeaderSize])
+		if e != 0 {
+			return 0, e
+		}
+		if cBlockSize > int(d.fParams.blockSizeMax) {
+			// Block Size Exceeds Maximum. Go: refined by block type, as
+			// one-shot decoding reports the same block (see the dErrs).
+			if bp.blockType == btCompressed {
+				return 0, dErrCBlockSizeTooLarge
+			}
+			return 0, dErrDecodedBlockTooLarge
+		}
+		d.expected = uint(cBlockSize)
+		d.bType = bp.blockType
+		d.rleSize = bp.origSize
+		if cBlockSize != 0 {
+			d.stage = dsDecompressBlock
+			if bp.lastBlock {
+				d.stage = dsDecompressLastBlock
+			}
+			return 0, 0
+		}
+		// empty block
+		if bp.lastBlock {
+			if d.fParams.checksumFlag {
+				d.expected = 4
+				d.stage = dsCheckChecksum
+			} else {
+				d.expected = 0 // end of frame
+				d.stage = dsGetFrameHeaderSize
+			}
+		} else {
+			d.expected = blockHeaderSize // jump to next header
+			d.stage = dsDecodeBlockHeader
+		}
+		return 0, 0
+
+	case dsDecompressLastBlock, dsDecompressBlock:
+		var rSize int
+		e := dErr(0)
+		out := dst[len(dst) : len(dst)+dstCapacity]
+		switch d.bType {
+		case btCompressed:
+			rSize, e = d.decompressBlockInternal(dst, dstCapacity, src, isStreaming)
+			d.expected = 0 // Streaming not supported
+		case btRaw:
+			rSize, e = copyRawBlock(out, src)
+			if e != 0 {
+				return 0, e
+			}
+			d.expected -= uint(rSize)
+		case btRLE:
+			rSize, e = setRLEBlock(out, src[0], int(d.rleSize))
+			d.expected = 0 // Streaming not supported
+		default: // btReserved: should never happen
+			return 0, dErrCorruptionDetected // invalid block type
+		}
+		if e != 0 {
+			return 0, e
+		}
+		if rSize > int(d.fParams.blockSizeMax) {
+			return 0, dErrDecodedBlockTooLarge // Decompressed Block Size Exceeds Maximum
+		}
+		d.decodedSize += uint64(rSize)
+		if d.validateChecksum {
+			d.xxhState.Write(out[:rSize])
+		}
+		if rSize > 0 {
+			// C sets previousDstEnd = dst + rSize unconditionally: see
+			// decompressBlock.
+			d.previousDstEnd = len(dst) + rSize
+		}
+
+		// Stay on the same stage until we are finished streaming the block.
+		if d.expected > 0 {
+			return rSize, 0
+		}
+
+		if d.stage == dsDecompressLastBlock { // end of frame
+			if d.fParams.frameContentSize != contentSizeUnknown && d.decodedSize != d.fParams.frameContentSize {
+				return 0, dErrFrameSizeMismatch
+			}
+			if d.fParams.checksumFlag { // another round for frame checksum
+				d.expected = 4
+				d.stage = dsCheckChecksum
+			} else {
+				d.expected = 0 // ends here
+				d.stage = dsGetFrameHeaderSize
+			}
+		} else {
+			d.stage = dsDecodeBlockHeader
+			d.expected = blockHeaderSize
+		}
+		return rSize, 0
+
+	case dsCheckChecksum:
+		// srcSize == 4, guaranteed by d.expected
+		if d.validateChecksum {
+			h32 := uint32(d.xxhState.Sum64())
+			check32 := binary.LittleEndian.Uint32(src)
+			if check32 != h32 {
+				return 0, dErrChecksumWrong
+			}
+		}
+		d.expected = 0
+		d.stage = dsGetFrameHeaderSize
+		return 0, 0
+
+	case dsDecodeSkippableHeader:
+		copy(d.headerBuffer[skippableHeaderSize-srcSize:], src) // complete skippable header
+		// note: expected can grow seriously large, beyond local buffer size
+		d.expected = uint(binary.LittleEndian.Uint32(d.headerBuffer[frameIDSize:]))
+		d.stage = dsSkipFrame
+		return 0, 0
+
+	case dsSkipFrame:
+		d.expected = 0
+		d.stage = dsGetFrameHeaderSize
+		return 0, 0
+	}
+	return 0, dErrGeneric // impossible to reach
+}
+
+// Streaming decompression buffers. C: zstd.h
+const (
+	dStreamInSize  = blockSizeMax + blockHeaderSize // C: ZSTD_DStreamInSize()
+	dStreamOutSize = blockSizeMax                   // C: ZSTD_DStreamOutSize()
+
+	// noForwardProgressMax is the number of calls in a row without
+	// progress decompressStream accepts. C: ZSTD_NO_FORWARD_PROGRESS_MAX
+	noForwardProgressMax = 16
+	// C: zstd_internal.h:ZSTD_WORKSPACETOOLARGE_FACTOR and
+	// ZSTD_WORKSPACETOOLARGE_MAXDURATION
+	workspaceTooLargeFactor      = 3
+	workspaceTooLargeMaxDuration = 128
+)
+
+// inBuffer. C: zstd.h:ZSTD_inBuffer (size is len(src))
+type inBuffer struct {
+	src []byte
+	pos int
+}
+
+// outBuffer. C: zstd.h:ZSTD_outBuffer (size is len(dst))
+type outBuffer struct {
+	dst []byte
+	pos int
+}
+
+// decodingBufferSizeInternal returns the size of the round buffer a frame
+// needs. C: zstd_decompress.c:ZSTD_decodingBufferSize_internal
+func decodingBufferSizeInternal(windowSize, frameContentSize uint64, maxBlockSize int) (int, dErr) {
+	blockSize := min(windowSize, blockSizeMax, uint64(maxBlockSize))
+	// We need blockSize + WILDCOPY_OVERLENGTH worth of buffer so that if a
+	// block ends at windowSize + WILDCOPY_OVERLENGTH + 1 bytes, we can start
+	// writing the block at the beginning of the output buffer, and maintain
+	// a full window.
+	//
+	// We need another blockSize worth of buffer so that we can store split
+	// literals at the end of the block without overwriting the extDict
+	// window.
+	neededRBSize := windowSize + blockSize*2 + wildcopyOverlength*2
+	neededSize := min(frameContentSize, neededRBSize)
+	// C: the size must fit size_t; Go's buffers are indexed by int.
+	if neededSize > math.MaxInt {
+		return 0, dErrFrameParameterWindowTooLarge
+	}
+	return int(neededSize), 0
+}
+
+// isOverflow. C: zstd_decompress.c:ZSTD_DCtx_isOverflow (in uint64, as on
+// 64-bit C)
+func (d *dctx) isOverflow(neededInBuffSize, neededOutBuffSize int) bool {
+	return uint64(d.inBuffSize)+uint64(d.outBuffSize) >= (uint64(neededInBuffSize)+uint64(neededOutBuffSize))*workspaceTooLargeFactor
+}
+
+// updateOversizedDuration. C: zstd_decompress.c:ZSTD_DCtx_updateOversizedDuration
+func (d *dctx) updateOversizedDuration(neededInBuffSize, neededOutBuffSize int) {
+	if d.isOverflow(neededInBuffSize, neededOutBuffSize) {
+		d.oversizedDuration++
+	} else {
+		d.oversizedDuration = 0
+	}
+}
+
+// isOversizedTooLong. C: zstd_decompress.c:ZSTD_DCtx_isOversizedTooLong
+func (d *dctx) isOversizedTooLong() bool {
+	return d.oversizedDuration >= workspaceTooLargeMaxDuration
+}
+
+// growBuf returns b if it has n bytes or more, else a buffer of
+// max(n, 2×len(b)) bytes, at most limit (n <= limit), starting with b's
+// bytes (Go: the stream buffers grow as the data needs them).
+func growBuf(b []byte, n, limit int) []byte {
+	if n <= len(b) {
+		return b
+	}
+	nb := make([]byte, min(max(n, 2*len(b)), limit))
+	copy(nb, b)
+	return nb
+}
+
+// growOutBuff makes outBuff at least n bytes long (n <= outBuffSize). The
+// output in it moves with it: when the current segment is in outBuff,
+// prevDst follows (the offsets C keeps as pointers stay valid). Once the
+// buffer has wrapped it is never grown again (decompressStream grows it to
+// outBuffSize first), so the extDict is never left in an old copy.
+func (d *dctx) growOutBuff(n int) {
+	if n <= len(d.outBuff) {
+		return
+	}
+	old := d.outBuff
+	d.outBuff = growBuf(old, n, d.outBuffSize)
+	if len(old) > 0 && cap(d.prevDst) > 0 && &d.prevDst[:1][0] == &old[0] {
+		d.prevDst = d.outBuff
+	}
+}
+
+// decompressContinueStream calls decompressContinue with the right
+// parameters for decompressStream and updates the stage and the output
+// buffer state (C's buffered output mode; ZSTD_bm_stable is not ported).
+// C: zstd_decompress.c:ZSTD_decompressContinueStream
+func (d *dctx) decompressContinueStream(src []byte, srcSize uint) dErr {
+	isSkipFrame := d.isSkipFrame()
+	dstSize := 0
+	if !isSkipFrame {
+		dstSize = d.outBuffSize - d.outStart
+	}
+	// Go: make room in outBuff for what this input can write (C's outBuff
+	// has dstSize bytes there): a raw block's bytes, an RLE block's size,
+	// and for a compressed block, a whole block and literals placed after
+	// it (more than ZSTD_decompressBlock_internal can write before it
+	// fails). dstCap is what the buffer has.
+	dstCap := 0
+	if dstSize > 0 {
+		need := 1
+		if d.stage == dsDecompressBlock || d.stage == dsDecompressLastBlock {
+			switch d.bType {
+			case btRaw:
+				need = int(srcSize)
+			case btRLE:
+				need = int(d.rleSize)
+			case btCompressed:
+				need = 2*int(d.fParams.blockSizeMax) + 2*wildcopyOverlength + 1
+			}
+		}
+		d.growOutBuff(d.outStart + min(dstSize, max(need, 1)))
+		dstCap = min(dstSize, len(d.outBuff)-d.outStart)
+	}
+	decodedSize, e := d.decompressContinue(d.outBuff[:d.outStart:d.outStart+dstCap], dstCap, src, srcSize)
+	if e != 0 {
+		if e.cCode() == int(dErrDstSizeTooSmall) {
+			switch {
+			case dstCap < dstSize:
+				// More than dstCap > 2 × blockSizeMax bytes: C fails the
+				// block too, with "Decompressed Block Size Exceeds Maximum"
+				// unless it also runs out of its larger buffer.
+				e = dErrDecodedBlockTooLarge
+			case uint64(d.outBuffSize) == d.fParams.frameContentSize && dstSize < int(d.fParams.blockSizeMax):
+				// Go: the buffer (not round: no wrap) is the frame content
+				// size, and less of it is left than a block may regenerate:
+				// the frame regenerates more than its content size. One-shot
+				// decoding names that error so too (its output space is
+				// then the content size); a block failing with more room
+				// left is over blockSizeMax, ErrUnexpectedBlockSize.
+				e = dErrFrameSizeExceeded
+			}
+		}
+		return e
+	}
+	if decodedSize == 0 && !isSkipFrame {
+		d.streamStage = zdssRead
+	} else {
+		d.outEnd = d.outStart + decodedSize
+		d.streamStage = zdssFlush
+	}
+	return 0
+}
+
+// decompressStream decodes input from in into out, advancing in.pos and
+// out.pos, and returns a hint for the input size of the next call: 0 when
+// a frame is completely decoded and flushed (also with no input at a frame
+// boundary). On an error, in.pos and out.pos are left as they were (C
+// returns before updating them), even when output was written into
+// out.dst; the dctx must then be reset (reset(true)) before reuse.
+// C: zstd_decompress.c:ZSTD_decompressStream
+func (d *dctx) decompressStream(out *outBuffer, in *inBuffer) (hint int, err error) {
+	hint, e := d.decompressStreamCode(out, in)
+	if e != 0 {
+		return 0, e.toError("stream")
+	}
+	return hint, nil
+}
+
+// decompressStreamCode is decompressStream returning the dErr.
+func (d *dctx) decompressStreamCode(out *outBuffer, in *inBuffer) (int, dErr) {
+	if in.pos > len(in.src) {
+		return 0, dErrSrcSizeWrong // forbidden
+	}
+	if out.pos > len(out.dst) {
+		return 0, dErrDstSizeTooSmall // forbidden
+	}
+	istart, iend := in.pos, len(in.src)
+	ip := istart
+	ostart, oend := out.pos, len(out.dst)
+	op := ostart
+	someMoreWork := true
+
+	for someMoreWork {
+		switch d.streamStage {
+		case zdssInit: // transparent reset
+			d.streamStage = zdssLoadHeader
+			d.lhSize, d.inPos, d.outStart, d.outEnd = 0, 0, 0, 0
+			d.hostageByte = false
+			fallthrough
+
+		case zdssLoadHeader:
+			hSize, e := getFrameHeaderAdvanced(&d.fParams, d.headerBuffer[:d.lhSize])
+			// C selects the frame's dictionary here (ZSTD_DCtx_selectFrameDDict,
+			// with ZSTD_d_refMultipleDDicts): see fdd below.
+			if e != 0 {
+				return 0, e
+			}
+			if hSize != 0 { // need more input
+				toLoad := hSize - d.lhSize // if hSize != 0, hSize > lhSize
+				remainingInput := iend - ip
+				if toLoad > remainingInput { // not enough input to load full header
+					copy(d.headerBuffer[d.lhSize:], in.src[ip:iend])
+					d.lhSize += remainingInput
+					in.pos = len(in.src)
+					// check first few bytes
+					if _, e := getFrameHeaderAdvanced(&d.fParams, d.headerBuffer[:d.lhSize]); e != 0 {
+						return 0, e // First few bytes detected incorrect
+					}
+					// return hint input size: remaining header bytes + next block header
+					return max(frameHeaderSizeMin, hSize) - d.lhSize + blockHeaderSize, 0
+				}
+				copy(d.headerBuffer[d.lhSize:], in.src[ip:ip+toLoad])
+				d.lhSize = hSize
+				ip += toLoad
+				break
+			}
+
+			// Go: the frame's dictionary, chosen as decompressFrames does
+			// (selectFrameDDict; see the deviations from C there).
+			fdd := d.ddict
+			if d.ddicts != nil {
+				fdd = d.ddicts.selectFrameDDict(d.fParams.dictID)
+			}
+
+			// check for single-pass mode opportunity
+			if d.fParams.frameContentSize != contentSizeUnknown &&
+				d.fParams.frameType != zstdSkippableFrame &&
+				uint64(oend-op) >= d.fParams.frameContentSize {
+				// C: ZSTD_findFrameCompressedSize_advanced from istart (where
+				// this call's input starts, which is the frame's start only
+				// when the whole header came in this call)
+				fsi := findFrameSizeInfo(in.src[istart:iend])
+				if fsi.err == 0 && fsi.compressedSize <= iend-istart {
+					// shortcut: using single-pass mode. C:
+					// ZSTD_decompress_usingDDict, ZSTD_decompressMultiFrame
+					// on one frame. Go: decompressFrame applies the
+					// streaming checks C's one-shot path does not make
+					// (window-limit, block-over-max; see the error mapping
+					// table).
+					src := in.src[istart : istart+fsi.compressedSize]
+					decompressedSize := 0
+					if !isSkippableFrame(src) {
+						d.decompressBeginUsingDDict(fdd)
+						dst := out.dst[op:op:oend]
+						d.checkContinuity(dst, oend-op)
+						res, _, e := d.decompressFrame(dst, oend-op, src)
+						if e != 0 {
+							return 0, e
+						}
+						decompressedSize = len(res)
+					}
+					ip = istart + fsi.compressedSize
+					op += decompressedSize
+					d.expected = 0
+					d.streamStage = zdssInit
+					someMoreWork = false
+					break
+				}
+			}
+
+			// Consume header (see dsDecodeFrameHeader)
+			d.decompressBeginUsingDDict(fdd)
+
+			if binary.LittleEndian.Uint32(d.headerBuffer[:])&magicSkippableMask == magicSkippableStart { // skippable frame
+				d.expected = uint(binary.LittleEndian.Uint32(d.headerBuffer[frameIDSize:]))
+				d.stage = dsSkipFrame
+			} else {
+				if e := d.decodeFrameHeader(d.headerBuffer[:d.lhSize]); e != 0 {
+					return 0, e
+				}
+				d.expected = blockHeaderSize
+				d.stage = dsDecodeBlockHeader
+			}
+
+			// control buffer memory usage
+			d.fParams.windowSize = max(d.fParams.windowSize, 1<<windowLogAbsoluteMin)
+			if d.fParams.windowSize > d.maxWindowSize {
+				return 0, dErrFrameParameterWindowTooLarge
+			}
+			// C shrinks blockSizeMax to maxBlockSizeParam here; no option
+			// sets it.
+
+			// Adapt buffer sizes to frame header instructions
+			neededInBuffSize := max(int(d.fParams.blockSizeMax), 4) // 4: frame checksum
+			neededOutBuffSize, e := decodingBufferSizeInternal(d.fParams.windowSize, d.fParams.frameContentSize, int(d.fParams.blockSizeMax))
+			if e != 0 {
+				return 0, e
+			}
+			d.updateOversizedDuration(neededInBuffSize, neededOutBuffSize)
+			tooSmall := d.inBuffSize < neededInBuffSize || d.outBuffSize < neededOutBuffSize
+			tooLarge := d.isOversizedTooLong()
+			if tooSmall || tooLarge {
+				// C frees the buffers and allocates them at the new sizes.
+				// Go drops them; they grow as the frame's data needs.
+				d.inBuff, d.outBuff = nil, nil
+				d.inBuffSize = neededInBuffSize
+				d.outBuffSize = neededOutBuffSize
+			}
+			d.streamStage = zdssRead
+			fallthrough
+
+		case zdssRead:
+			neededInSize := d.nextSrcSizeToDecompressWithInputSize(uint(iend - ip))
+			if neededInSize == 0 { // end of frame
+				d.streamStage = zdssInit
+				someMoreWork = false
+				break
+			}
+			if uint(iend-ip) >= neededInSize { // decode directly from src
+				if e := d.decompressContinueStream(in.src[ip:ip+int(neededInSize)], neededInSize); e != 0 {
+					return 0, e
+				}
+				ip += int(neededInSize)
+				// Function modifies the stage so we must break
+				break
+			}
+			if ip == iend { // no more input
+				someMoreWork = false
+				break
+			}
+			d.streamStage = zdssLoad
+			fallthrough
+
+		case zdssLoad:
+			neededInSize := d.nextSrcSizeToDecompress()
+			toLoad := neededInSize - d.inPos
+			isSkipFrame := d.isSkipFrame()
+			// At this point we shouldn't be decompressing a block that we can stream.
+			var loadedSize int
+			if isSkipFrame {
+				loadedSize = int(min(toLoad, uint(iend-ip)))
+			} else {
+				if toLoad > uint(d.inBuffSize)-d.inPos {
+					return 0, dErrCorruptionDetected // should never happen
+				}
+				loadedSize = int(min(toLoad, uint(iend-ip))) // C: ZSTD_limitCopy
+				d.inBuff = growBuf(d.inBuff, int(d.inPos)+loadedSize, d.inBuffSize)
+				copy(d.inBuff[d.inPos:], in.src[ip:ip+loadedSize])
+			}
+			ip += loadedSize
+			d.inPos += uint(loadedSize)
+			if uint(loadedSize) < toLoad { // not enough input, wait for more
+				someMoreWork = false
+				break
+			}
+
+			// decode loaded input
+			d.inPos = 0 // input is consumed
+			var src []byte
+			if !isSkipFrame {
+				src = d.inBuff[:neededInSize]
+			}
+			if e := d.decompressContinueStream(src, neededInSize); e != 0 {
+				return 0, e
+			}
+			// Function modifies the stage so we must break
+
+		case zdssFlush:
+			toFlushSize := d.outEnd - d.outStart
+			flushedSize := copy(out.dst[op:oend], d.outBuff[d.outStart:d.outEnd]) // C: ZSTD_limitCopy
+			op += flushedSize
+			d.outStart += flushedSize
+			if flushedSize == toFlushSize { // flush completed
+				d.streamStage = zdssRead
+				if uint64(d.outBuffSize) < d.fParams.frameContentSize &&
+					d.outStart+int(d.fParams.blockSizeMax) > d.outBuffSize {
+					// restart filling outBuff from beginning. Go: the
+					// buffer gets its full size first, so it does not
+					// move while the extDict is in it.
+					d.growOutBuff(d.outBuffSize)
+					d.outStart, d.outEnd = 0, 0
+				}
+				break
+			}
+			// cannot complete flush
+			someMoreWork = false
+
+		default:
+			return 0, dErrGeneric // impossible to reach
+		}
+	}
+
+	// result
+	in.pos = ip
+	out.pos = op
+
+	if ip == istart && op == ostart { // no forward progress
+		d.noForwardProgress++
+		if d.noForwardProgress >= noForwardProgressMax {
+			if op == oend {
+				return 0, dErrNoForwardProgressDestFull
+			}
+			if ip == iend {
+				return 0, dErrNoForwardProgressInputEmpty
+			}
+		}
+	} else {
+		d.noForwardProgress = 0
+	}
+	nextSrcSizeHint := d.nextSrcSizeToDecompress()
+	if nextSrcSizeHint == 0 { // frame fully decoded
+		if d.outEnd == d.outStart { // output fully flushed
+			if d.hostageByte {
+				if in.pos >= len(in.src) {
+					// can't release hostage (not present)
+					d.streamStage = zdssRead
+					return 1, 0
+				}
+				in.pos++ // release hostage
+			}
+			return 0, 0
+		}
+		if !d.hostageByte {
+			// output not fully flushed; keep last byte as hostage; will be
+			// released when all output is flushed
+			in.pos-- // note: pos > 0, otherwise, impossible to finish reading last block
+			d.hostageByte = true
+		}
+		return 1, 0
+	}
+	if d.nextInputType() == nitBlock {
+		nextSrcSizeHint += blockHeaderSize // preload header of next block
+	}
+	nextSrcSizeHint -= d.inPos // part already loaded
+	// Go: a skippable frame's hint can exceed int on 32-bit platforms.
+	return int(min(nextSrcSizeHint, math.MaxInt)), 0
 }

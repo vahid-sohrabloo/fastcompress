@@ -107,6 +107,33 @@ const (
 	isStreaming  streamingOperation = 1 // C: is_streaming
 )
 
+// dStage is the bufferless decoder's stage.
+// C: zstd_decompress_internal.h:ZSTD_dStage
+type dStage uint8
+
+const (
+	dsGetFrameHeaderSize    dStage = iota // C: ZSTDds_getFrameHeaderSize
+	dsDecodeFrameHeader                   // C: ZSTDds_decodeFrameHeader
+	dsDecodeBlockHeader                   // C: ZSTDds_decodeBlockHeader
+	dsDecompressBlock                     // C: ZSTDds_decompressBlock
+	dsDecompressLastBlock                 // C: ZSTDds_decompressLastBlock
+	dsCheckChecksum                       // C: ZSTDds_checkChecksum
+	dsDecodeSkippableHeader               // C: ZSTDds_decodeSkippableHeader
+	dsSkipFrame                           // C: ZSTDds_skipFrame
+)
+
+// dStreamStage is the streaming decoder's stage.
+// C: zstd_decompress_internal.h:ZSTD_dStreamStage
+type dStreamStage uint8
+
+const (
+	zdssInit       dStreamStage = iota // C: zdss_init
+	zdssLoadHeader                     // C: zdss_loadHeader
+	zdssRead                           // C: zdss_read
+	zdssLoad                           // C: zdss_load
+	zdssFlush                          // C: zdss_flush
+)
+
 // dctx is the decompression context. C: zstd_decompress_internal.h:ZSTD_DCtx_s
 //
 // C's pointers into the output become int offsets into the current output
@@ -140,7 +167,13 @@ type dctx struct {
 	// continuity; Go compares the buffer's start and the offset.
 	prevDst []byte
 
+	expected             uint // C: size_t expected
 	fParams              frameHeader
+	decodedSize          uint64 // C: U64 decodedSize
+	bType                int    // C: blockType_e bType, used for stage determination
+	stage                dStage // C: ZSTD_dStage stage
+	rleSize              uint32 // C: U32 rleSize
+	headerSize           int    // C: size_t headerSize
 	xxhState             xxhash.Digest
 	litEntropy           bool // C: U32 litEntropy
 	fseEntropy           bool // C: U32 fseEntropy
@@ -148,6 +181,9 @@ type dctx struct {
 	validateChecksum     bool   // C: int validateChecksum
 	dictID               uint32 // C: U32 dictID
 	ddictIsCold          bool   // C: int ddictIsCold
+	// ddict is the dictionary decompressStream begins each frame with (C:
+	// ddict with dictUses ZSTD_use_indefinitely); nil for none.
+	ddict *ddict
 	// ddicts, when set, picks each frame's dictionary by its ID (C:
 	// ddictSet with ZSTD_d_refMultipleDDicts).
 	ddicts *ddictSet
@@ -158,6 +194,26 @@ type dctx struct {
 	// maxMemory caps decompressMultiFrame's output (no C counterpart):
 	// WithDecoderMaxMemory, or the WithDecodeAllCapLimit capacity.
 	maxMemory uint64
+
+	// streaming (C: ZSTD_d_stableOutBuffer, the static DCtx and legacy
+	// frames are not ported: the output is always buffered)
+	streamStage dStreamStage // C: ZSTD_dStreamStage streamStage
+	// inBuff and outBuff are C's inBuff and outBuff, whose sizes C sets to
+	// inBuffSize and outBuffSize from the frame header. Go allocates them
+	// as the input and output need, up to those sizes (no memory is
+	// reserved from untrusted header fields).
+	inBuff            []byte
+	inBuffSize        int // C: size_t inBuffSize
+	inPos             uint
+	outBuff           []byte
+	outBuffSize       int // C: size_t outBuffSize
+	outStart          int
+	outEnd            int
+	lhSize            int
+	hostageByte       bool                     // C: U32 hostageByte
+	noForwardProgress int                      // C: int noForwardProgress
+	oversizedDuration int                      // C: size_t oversizedDuration
+	headerBuffer      [frameHeaderSizeMax]byte // tmp buffer to store frame header
 
 	litBuf            []byte
 	litPtr            int

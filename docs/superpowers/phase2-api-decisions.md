@@ -64,6 +64,26 @@ Tasks 4 and 9 must either mirror each of these or list it as a deliberate deviat
 - **Output space** (`output-space`): each frame gets an output space (C's `dstCapacity`, the memory is reserved as blocks need it, see `DecodeAll` per frame) of min(FCS, nbBlocks × blockSizeMax, memory left), where nbBlocks counts the whole blocks `ZSTD_findFrameSizeInfo` walks (those before the walk failed, when it fails). C's space is its caller's (cref: the sum of every frame's bound). A `dstSize_tooSmall` when that space was the FCS is `ErrFrameSizeExceeded`; when it was the memory left, `ErrDecoderSizeExceeded`; ties between FCS and the block bound count as the block bound (`ErrUnexpectedBlockSize`). An FCS within the block bound but above the memory left is `ErrDecoderSizeExceeded` before any decoding. A frame whose header fails or whose window is too large gets no space.
 - **Output on error:** the result keeps the bytes of the blocks decoded before the error (streaming C delivers those too). Frames before it are complete.
 
+#### Streaming decoding (Task 11): `decompressStream`
+
+`dctx.decompressStream` is C's `ZSTD_decompressStream` (buffered output only; `ZSTD_d_stableOutBuffer`, static contexts and legacy frames are not ported). `TestDecompressStreamErrorsCref` compares it with `cref dstream` byte for byte and C error code for error code. Go changes:
+
+- **Buffers grow on demand.** C allocates `inBuff` and `outBuff` at the sizes the frame header implies (up to window + 2 × blockSizeMax + 64). Go keeps those sizes as limits and allocates as the data needs: the input buffer as a block is loaded, the round buffer as output is written (doubling). Before the round buffer wraps, it gets its full size, so the extDict stays in the same memory as in C. `TestStreamAllocBound` pins this: a 2^29 window or FCS 2^60 header with 50 bytes of a block allocates under 64 KiB.
+- **Room for a compressed block** (`block-room`): Go makes room for 2 × blockSizeMax + 65 bytes, not C's whole remaining buffer. A block that runs past that room but would still fit C's buffer gets `dErrDecodedBlockTooLarge` (corruption_detected, as C's "Decompressed Block Size Exceeds Maximum"). C says dstSize_tooSmall when the block also runs past its own buffer. Both are `ErrUnexpectedBlockSize`.
+- **Single-pass shortcut.** C runs one-shot decoding when a whole frame with a content size is in the call's input and fits the output. Go does the same through `decompressFrame`, which adds the streaming checks: `window-limit` and `block-over-max`, as in the one-shot table above.
+- **Dictionary selection** happens at the frame header, as in `decompressFrames`, with the same deviations (a)–(c). `dctx.ddict` is the default dictionary (C's `ddict`, `ZSTD_use_indefinitely`).
+- **Error names** (same C code, the sentinel `DecodeAll` gives):
+  - A "Block Size Exceeds Maximum" header for a compressed block is `dErrCBlockSizeTooLarge` (`ErrCompressedSizeTooBig`). For a raw or RLE block it is `dErrDecodedBlockTooLarge`.
+  - A frame whose round buffer is its FCS (no wrap) and that overflows it with less than blockSizeMax left is `dErrFrameSizeExceeded`.
+
+Streaming C behaviours that differ from one-shot C. Go follows streaming C; Task 12 must keep or list each of them:
+
+- **Output on error.** On an error, C returns before it updates `in.pos` and `out.pos`, so the bytes the failing call wrote are not delivered. Bytes from earlier calls are delivered.
+- **Skippable size 0xFFFFFFF8–0xFFFFFFFF.** Streaming C waits for the content, which ends in `io.ErrUnexpectedEOF`. One-shot C returns frameParameter_unsupported (corrupt).
+- **An empty last block skips the FCS check.** `ZSTD_decompressContinue` checks the content size only after a non-empty last block. A frame with FCS 48 and only an empty last block decodes to 0 bytes in streaming C. One-shot gives `ErrFrameSizeMismatch`.
+- **A compressed block of size 0** is skipped as empty. One-shot gives `ErrBlockTooSmall`.
+- **Input cut short.** The stream checks block sizes against blockSizeMax, and header fields, as they arrive. One-shot reports `io.ErrUnexpectedEOF` first.
+
 ### Concurrency (`WithDecoderConcurrency`)
 
 C's decoder is single-threaded. The design adds threads only at points C's own structure already separates. The doc text decides the defaults: n=0 means GOMAXPROCS, and the default is min(4, GOMAXPROCS).
