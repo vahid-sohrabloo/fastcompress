@@ -212,6 +212,19 @@
  *   the content is never truncated). Output: the dictionary. On error: the
  *   ERR line of decompress, exit 1.
  *
+ * train -max-dict N -sizes N1,N2,...
+ *   ZDICT_trainFromBuffer into a buffer of N bytes, the samples concatenated
+ *   on stdin. Output: the dictionary. On error: the ERR line, exit 1.
+ *
+ * train-cover / train-fastcover -max-dict N -sizes ... -k K -d D -steps S
+ *   [-f F -accel A] -split X -shrink B -shrink-reg R -level L -dict-id I
+ *   ZDICT_trainFromBuffer_cover / _fastCover, or the optimize variant when K
+ *   or D is 0, with nbThreads 0 and notificationLevel 0 (-f and -accel are
+ *   fastCover only). Output: the dictionary; on stderr one line
+ *   "PARAMS k= d= steps= f= accel= split= shrink= shrinkReg= level= dictID="
+ *   with the parameter struct as the caller holds it after the call (cover
+ *   prints the given -f and -accel; split as %.17g). On error: the ERR line.
+ *
  * OUTPUT BUFFER CONTRACT: every ZSTD_compressStream2 call in cref (compress
  * -pledged 0, and stream) uses an output buffer of exactly
  * ZSTD_CStreamOutSize() bytes which is drained into the result after each
@@ -237,6 +250,7 @@
 #include "hist.h"
 #include "zstd_compress_internal.h"
 #include "zstd_preSplit.h"
+#define ZDICT_STATIC_LINKING_ONLY /* the COVER / fastCover trainers */
 #include "zdict.h"
 #include "../zstd/lib/decompress/zstd_decompress_internal.h" /* ZSTD_loadDEntropy */
 
@@ -267,6 +281,9 @@ typedef struct {
     size_t outSize;
     unsigned dictID;
     const char* contentFile;
+    size_t maxDict;
+    unsigned k, d, steps, f, accel, shrink, shrinkReg;
+    double split;
 } Opts;
 
 static void* readAll(FILE* f, size_t* n) {
@@ -331,6 +348,15 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-variant"))    o->variant = atoi(v);
         else if (!strcmp(a, "-dict-id"))    o->dictID = (unsigned)strtoul(v, NULL, 10);
         else if (!strcmp(a, "-content"))    o->contentFile = v;
+        else if (!strcmp(a, "-max-dict"))   o->maxDict = (size_t)strtoull(v, NULL, 10);
+        else if (!strcmp(a, "-k"))          o->k = (unsigned)strtoul(v, NULL, 10);
+        else if (!strcmp(a, "-d"))          o->d = (unsigned)strtoul(v, NULL, 10);
+        else if (!strcmp(a, "-steps"))      o->steps = (unsigned)strtoul(v, NULL, 10);
+        else if (!strcmp(a, "-f"))          o->f = (unsigned)strtoul(v, NULL, 10);
+        else if (!strcmp(a, "-accel"))      o->accel = (unsigned)strtoul(v, NULL, 10);
+        else if (!strcmp(a, "-split"))      o->split = strtod(v, NULL);
+        else if (!strcmp(a, "-shrink"))     o->shrink = (unsigned)strtoul(v, NULL, 10);
+        else if (!strcmp(a, "-shrink-reg")) o->shrinkReg = (unsigned)strtoul(v, NULL, 10);
     else { fprintf(stderr, "cref: unknown option %s\n", a); exit(2); }
     }
 }
@@ -833,6 +859,64 @@ static int cmdFinalizeDict(const Opts* o, const unsigned char* src, size_t n) {
     return 0;
 }
 
+/* parseSizes splits "N1,N2,..." into *nb sample sizes that must sum to n. */
+static size_t* parseSizes(const char* spec, size_t n, unsigned* nb) {
+    if (!spec) die("needs -sizes");
+    size_t cnt = 1;
+    for (const char* p = spec; *p; p++) cnt += *p == ',';
+    size_t* sizes = malloc(cnt * sizeof(size_t));
+    char* ss = strdup(spec);
+    if (!sizes || !ss) die("oom");
+    char* save = NULL;
+    size_t i = 0, tot = 0;
+    for (char* t = strtok_r(ss, ",", &save); t; t = strtok_r(NULL, ",", &save))
+        tot += sizes[i++] = (size_t)strtoull(t, NULL, 10);
+    if (tot != n) die("sizes do not cover input length");
+    free(ss);
+    *nb = (unsigned)i;
+    return sizes;
+}
+
+/* cmdTrain: mode 0 ZDICT_trainFromBuffer, 1 cover, 2 fastCover. */
+static int cmdTrain(const Opts* o, const unsigned char* src, size_t n, int mode) {
+    unsigned nb;
+    size_t* sizes = parseSizes(o->sizes, n, &nb);
+    unsigned char* dst = malloc(o->maxDict ? o->maxDict : 1);
+    if (!dst) die("oom");
+    size_t r;
+    ZDICT_params_t z = { o->level, 0, o->dictID };
+    if (mode == 0) {
+        r = ZDICT_trainFromBuffer(dst, o->maxDict, src, sizes, nb);
+    } else if (mode == 1) {
+        ZDICT_cover_params_t p;
+        memset(&p, 0, sizeof(p));
+        p.k = o->k; p.d = o->d; p.steps = o->steps; p.splitPoint = o->split;
+        p.shrinkDict = o->shrink; p.shrinkDictMaxRegression = o->shrinkReg; p.zParams = z;
+        r = (p.k == 0 || p.d == 0)
+            ? ZDICT_optimizeTrainFromBuffer_cover(dst, o->maxDict, src, sizes, nb, &p)
+            : ZDICT_trainFromBuffer_cover(dst, o->maxDict, src, sizes, nb, p);
+        if (!ZDICT_isError(r))
+            fprintf(stderr, "PARAMS k=%u d=%u steps=%u f=%u accel=%u split=%.17g shrink=%u shrinkReg=%u level=%d dictID=%u\n",
+                    p.k, p.d, p.steps, o->f, o->accel, p.splitPoint, p.shrinkDict, p.shrinkDictMaxRegression,
+                    p.zParams.compressionLevel, p.zParams.dictID);
+    } else {
+        ZDICT_fastCover_params_t p;
+        memset(&p, 0, sizeof(p));
+        p.k = o->k; p.d = o->d; p.steps = o->steps; p.f = o->f; p.accel = o->accel; p.splitPoint = o->split;
+        p.shrinkDict = o->shrink; p.shrinkDictMaxRegression = o->shrinkReg; p.zParams = z;
+        r = (p.k == 0 || p.d == 0)
+            ? ZDICT_optimizeTrainFromBuffer_fastCover(dst, o->maxDict, src, sizes, nb, &p)
+            : ZDICT_trainFromBuffer_fastCover(dst, o->maxDict, src, sizes, nb, p);
+        if (!ZDICT_isError(r))
+            fprintf(stderr, "PARAMS k=%u d=%u steps=%u f=%u accel=%u split=%.17g shrink=%u shrinkReg=%u level=%d dictID=%u\n",
+                    p.k, p.d, p.steps, p.f, p.accel, p.splitPoint, p.shrinkDict, p.shrinkDictMaxRegression,
+                    p.zParams.compressionLevel, p.zParams.dictID);
+    }
+    if (ZDICT_isError(r)) dieErr(r);
+    writeAll(dst, r);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: cref <mode> [options] < in > out\n"); return 2; }
     const char* m = argv[1];
@@ -862,6 +946,9 @@ int main(int argc, char** argv) {
     else if (!strcmp(m, "dictinfo")) rc = cmdDictInfo(src, n);
     else if (!strcmp(m, "skippable")) rc = cmdSkippable(&o, src, n);
     else if (!strcmp(m, "finalize-dict")) rc = cmdFinalizeDict(&o, src, n);
+    else if (!strcmp(m, "train"))    rc = cmdTrain(&o, src, n, 0);
+    else if (!strcmp(m, "train-cover")) rc = cmdTrain(&o, src, n, 1);
+    else if (!strcmp(m, "train-fastcover")) rc = cmdTrain(&o, src, n, 2);
     else { fprintf(stderr, "cref: unknown mode %s\n", m); return 2; }
     if (fflush(stdout)) die("write error");
     return rc;

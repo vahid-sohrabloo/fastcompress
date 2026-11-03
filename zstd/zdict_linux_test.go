@@ -62,3 +62,24 @@ func TestBuildDictLDMRefused(t *testing.T) {
 		t.Fatalf("err = %v, want the LDM refusal", err)
 	}
 }
+
+// TestTrainDictTooLarge checks the trainers' limit on the total sample
+// size (4 GiB - 1 on 64-bit): 5 GiB of samples (one untouched 1 GiB
+// mapping, five times) fail with srcSize_wrong, as in C, without being
+// concatenated or read.
+func TestTrainDictTooLarge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("maps 1 GiB of address space")
+	}
+	big := hugeZeroMapping(t, 1<<30)
+	samples := [][]byte{big, big, big, big, big}
+	_, err := TrainDict(samples, 4096)
+	_, _, err2 := TrainDictCover(samples, 4096, CoverParams{K: 100, D: 8})
+	_, _, err3 := TrainDictFastCover(samples, 4096, CoverParams{})
+	for _, e := range []error{err, err2, err3} {
+		var ce *buildDictError
+		if !errors.As(e, &ce) || ce.code != int(dErrSrcSizeWrong) {
+			t.Fatalf("err = %v, want C error 72 (srcSize_wrong)", e)
+		}
+	}
+}

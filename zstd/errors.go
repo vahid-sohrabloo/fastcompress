@@ -179,6 +179,7 @@ var cErrorNames = map[int]string{
 	30: "Dictionary is corrupted",
 	32: "Dictionary mismatch",
 	34: "Cannot create Dictionary from provided samples",
+	42: "Parameter is out of bound",
 	64: "Allocation error : not enough memory",
 	70: "Destination buffer is too small",
 	72: "Src size is incorrect",

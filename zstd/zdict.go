@@ -77,10 +77,17 @@ func BuildDict(o BuildDictOptions) ([]byte, error) {
 	return finalizeDictionary(o.History, o.Contents, zstdLevels[level], o.ID, reps, o.DebugOut)
 }
 
-// buildDictError is a ZDICT_finalizeDictionary failure: C's error code.
+// buildDictError is a ZDICT_finalizeDictionary (or trainer) failure: C's
+// error code.
 type buildDictError struct {
 	code int    // C: ZSTD_ErrorCode
 	err  string // the failing step's error, if it has a Go one
+	// notPorted: C would go on, through a path that is not ported (LDM,
+	// the btultra and btultra2 strategies)
+	notPorted bool
+	// undefined: C's behaviour is undefined here (it crashes)
+	undefined bool
+	op        string // the public function; "" is BuildDict
 }
 
 func (e *buildDictError) Error() string {
@@ -91,7 +98,11 @@ func (e *buildDictError) Error() string {
 	if e.err != "" {
 		name += " (" + e.err + ")"
 	}
-	return "zstd: BuildDict: " + name
+	op := e.op
+	if op == "" {
+		op = "BuildDict"
+	}
+	return "zstd: " + op + ": " + name
 }
 
 // C error codes ZDICT_finalizeDictionary returns besides cErrorNames'.
@@ -121,6 +132,7 @@ const (
 	zdictMaxRepOffset = 1024 // C: zdict.c:MAXREPOFFSET
 	zdictOffcodeMax   = 30   // C: zdict.c:OFFCODE_MAX (only applicable to first block)
 	zdictHBuffSize    = 256  // C: zdict.c:HBUFFSIZE, large enough for all entropy headers
+	zdictDictSizeMin  = 256  // C: zdict.h:ZDICT_DICTSIZE_MIN
 	// zdictCapacityExtra is the output room beyond the content, as
 	// `cref finalize-dict` gives C.
 	zdictCapacityExtra = 64 << 10
@@ -194,18 +206,24 @@ func (c *cctx) compressBlockDeprecated(dst, src []byte) (int, error) {
 // block (min(128 KiB, 1 << windowLog), windowLog from ZSTD_getParams) are
 // cut to one; samples the context rejects as larger than its own block size
 // are skipped. C: zdict.c:ZDICT_countEStats
-func countEStats(c *cctx, cd *cdict, windowLog uint32, st *entropyStats, src, work []byte, debug io.Writer) {
+//
+// It fails only for a strategy this port does not have (btultra and
+// btultra2, C levels 13 and up for small samples), where C would go on.
+func countEStats(c *cctx, cd *cdict, windowLog uint32, st *entropyStats, src, work []byte, debug io.Writer) error {
 	if maxSize := min(blockSizeMax, 1<<windowLog); len(src) > maxSize {
 		src = src[:maxSize] // protection vs large samples
 	}
 	c.compressBeginUsingCDict(cd)
 	cSize, err := c.compressBlockDeprecated(work, src)
+	if errors.Is(err, errStrategyUnsupported) {
+		return &buildDictError{code: int(dErrGeneric), err: err.Error(), notPorted: true}
+	}
 	if err != nil {
 		debugf(debug, "warning : could not compress sample size %d \n", len(src))
-		return
+		return nil
 	}
 	if cSize == 0 {
-		return // block is not compressible
+		return nil // block is not compressible
 	}
 	ss := &c.seqStore
 
@@ -239,6 +257,7 @@ func countEStats(c *cctx, cd *cdict, windowLog uint32, st *entropyStats, src, wo
 		st.repOffset[offset1] += 3
 		st.repOffset[offset2]++
 	}
+	return nil
 }
 
 // offsetCount. C: zdict.c:offsetCount_t
@@ -332,7 +351,7 @@ func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [
 	// differ from C, before building the CDict (whose parameters these
 	// are); BuildDict's levels (<= 11) never get here.
 	if cp := getCParamsFromCCtxParams(&cdParams, contentSizeUnknown, uint64(len(dict)), cpmCreateCDict); cp.strategy >= zstdBtopt && cp.windowLog >= 27 {
-		return 0, &buildDictError{code: int(dErrGeneric), err: fmt.Sprintf("level %d needs long-distance matching, which is not ported", level)}
+		return 0, &buildDictError{code: int(dErrGeneric), err: fmt.Sprintf("level %d needs long-distance matching, which is not ported", level), notPorted: true}
 	}
 	cd, err := createCDictAdvanced2(dict, dctRawContent, &cdParams)
 	if err != nil {
@@ -344,7 +363,9 @@ func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [
 
 	// collect stats on all samples
 	for _, s := range samples {
-		countEStats(c, cd, cParams.windowLog, st, s, work, debug)
+		if err := countEStats(c, cd, cParams.windowLog, st, s, work, debug); err != nil {
+			return 0, err
+		}
 	}
 
 	if debug != nil {
@@ -454,7 +475,16 @@ func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [
 // Precondition: level must not select C's long-distance matcher (btopt or
 // above with windowLog >= 27, reachable from C level 22 with a 64 MiB
 // history): it is not ported, and analyzeEntropy returns an error instead.
+// So it does for levels that select btultra or btultra2 (not ported either)
+// when a sample is compressed.
 func finalizeDictionary(content []byte, samples [][]byte, level int, dictID uint32, reps [repNum]uint32, debug io.Writer) ([]byte, error) {
+	return finalizeDictionaryCap(content, samples, level, dictID, reps, uint64(len(content))+zdictCapacityExtra, debug)
+}
+
+// finalizeDictionaryCap is finalizeDictionary into a dictionary of at most
+// capacity bytes (C's dictBufferCapacity): content that does not fit after
+// the header is cut at its end, as C does.
+func finalizeDictionaryCap(content []byte, samples [][]byte, level int, dictID uint32, reps [repNum]uint32, capacity uint64, debug io.Writer) ([]byte, error) {
 	var header [zdictHBuffSize]byte
 	if level == 0 {
 		level = clevelDefault
@@ -462,9 +492,11 @@ func finalizeDictionary(content []byte, samples [][]byte, level int, dictID uint
 	// The final dictionary content must be at least as large as the
 	// largest repcode.
 	minContentSize := uint64(max(reps[0], reps[1], reps[2]))
-	capacity := uint64(len(content)) + zdictCapacityExtra
-	// C's checks of the capacity against the content size and
-	// ZDICT_DICTSIZE_MIN (256) always pass with this capacity.
+
+	// check conditions
+	if capacity < uint64(len(content)) || capacity < zdictDictSizeMin {
+		return nil, &buildDictError{code: int(dErrDstSizeTooSmall)}
+	}
 
 	// dictionary header
 	binary.LittleEndian.PutUint32(header[:], dictMagic)
@@ -483,8 +515,12 @@ func finalizeDictionary(content []byte, samples [][]byte, level int, dictID uint
 		return nil, err
 	}
 	hSize += eSize
-	// C shrinks the content when it does not fit; with this capacity it
-	// always does.
+
+	// Shrink the content size if it doesn't fit in the buffer (C keeps
+	// its start)
+	if uint64(hSize)+uint64(len(content)) > capacity {
+		content = content[:capacity-uint64(hSize)]
+	}
 
 	// Pad the dictionary content with zeros if it is too small
 	var paddingSize int

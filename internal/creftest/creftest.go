@@ -499,6 +499,52 @@ func FinalizeDictCRef(t testing.TB, content []byte, samples [][]byte, level int,
 	return out, nil
 }
 
+// TrainCRef runs `cref mode -max-dict maxDict -sizes ... args...` (mode is
+// train, train-cover or train-fastcover) on the samples. It returns the
+// dictionary and the key=value fields of the PARAMS line (nil for train).
+// On a libzstd error it returns the error and no dictionary; when cref dies
+// from a signal (C's undefined behaviour on some degenerate inputs) the
+// error has Code -2.
+func TrainCRef(t testing.TB, mode string, samples [][]byte, maxDict int, args ...string) ([]byte, map[string]string, *CError) {
+	t.Helper()
+	sizes := make([]string, len(samples))
+	for i, s := range samples {
+		sizes[i] = strconv.Itoa(len(s))
+	}
+	args = append([]string{mode, "-max-dict", strconv.Itoa(maxDict), "-sizes", strings.Join(sizes, ",")}, args...)
+	cmd := exec.Command(Bin(t), args...)
+	cmd.Stdin = bytes.NewReader(slices.Concat(samples...))
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	msg := strings.TrimSuffix(stderr.String(), "\n")
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && !ee.Exited() {
+			return nil, nil, &CError{Code: -2, Name: "crash: " + ee.String()}
+		}
+		if rest, ok := strings.CutPrefix(msg, "ERR "); ok && errors.As(err, &ee) && ee.ExitCode() == 1 {
+			code, name, _ := strings.Cut(rest, " ")
+			if n, err := strconv.Atoi(code); err == nil {
+				return nil, nil, &CError{Code: n, Name: name}
+			}
+		}
+		t.Fatalf("cref %s: %v: %s", mode, err, msg)
+	}
+	var params map[string]string
+	if rest, ok := strings.CutPrefix(msg, "PARAMS "); ok {
+		params = map[string]string{}
+		for _, f := range strings.Fields(rest) {
+			k, v, _ := strings.Cut(f, "=")
+			params[k] = v
+		}
+	} else if mode != "train" {
+		t.Fatalf("cref %s: no PARAMS line: %q", mode, msg)
+	}
+	return out.Bytes(), params, nil
+}
+
 // ZstdCLI returns the path of the C zstd program built from ref/zstd.
 func ZstdCLI(t testing.TB) string {
 	t.Helper()

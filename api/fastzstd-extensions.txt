@@ -1,1 +1,15 @@
+func TrainDict(samples [][]byte, maxDictSize int) ([]byte, error)
+func TrainDictCover(samples [][]byte, maxDictSize int, p CoverParams) ([]byte, CoverParams, error)
+func TrainDictFastCover(samples [][]byte, maxDictSize int, p CoverParams) ([]byte, CoverParams, error)
 func WithHugePages(b bool) EOption
+type CoverParams struct {
+type CoverParams struct { | Accel uint32
+type CoverParams struct { | D uint32
+type CoverParams struct { | DictID uint32
+type CoverParams struct { | F uint32
+type CoverParams struct { | K uint32
+type CoverParams struct { | Level int
+type CoverParams struct { | ShrinkDict bool
+type CoverParams struct { | ShrinkDictMaxRegression uint32
+type CoverParams struct { | SplitPoint float64
+type CoverParams struct { | Steps uint32

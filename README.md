@@ -35,6 +35,11 @@ header (C writes none for raw content); everything after that field is C's.
   `Offsets` replace C's starting repcodes {1, 4, 8} (the history is
   zero-padded in front up to the largest); `CompatV155` changes nothing, as
   C's dictionaries already load in zstd v1.5.5.
+- `TrainDict`, `TrainDictCover`, `TrainDictFastCover` and `CoverParams`
+  are extensions: C's dictionary trainers (`ZDICT_trainFromBuffer`, COVER
+  and fastCover), byte-identical to C v1.5.7, parameters included. Levels
+  that would make C compress with btultra, btultra2 or long-distance
+  matching (not ported) return an error.
 - `EncoderLevelFromZstd` maps a zstd level to the highest `EncoderLevel`
   whose C level (1, 3, 7, 11) does not exceed it.
 
