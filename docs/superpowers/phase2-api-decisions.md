@@ -205,7 +205,12 @@ C's decoder is single-threaded. The design adds threads only at points C's own s
   - On hostile input, for example blocks of 43,690 three-byte matches, the decoded sequences take 700 KiB per block. `TestStreamMemoryBoundHostile` checks `pipelineMemBound` there.
   - 32-bit platforms: the pipeline is provably bounded as above, so it is not charged to the `DecodeAll` budget. Its windows are not charged either, as with n == 1 (Task 12 residual risk). `TestStreamConcurrent32` runs 4 hostile 8-way streams at once under `GOARCH=386`.
 - **Stopping.** `Reset`, `ResetWithOptions` and `Close` stop the pipeline. They close `done`, wait for S1 and S2 to return, and give their buffers back. An error or EOF stops it as soon as the stream sees it, and so does a writer error in `WriteTo`. If S1 is inside the reader's `Read`, stopping waits for that `Read` to return; the old reader is never read after `Reset` returns. A panic in the caller's goroutine (for example a writer's) leaves S1 and S2 blocked until the next `Reset` or `Close`. A panic in the reader's `Read` happens in S1's goroutine, so it cannot be recovered by the caller (no `recover()` in the decoder).
-- **Equivalence oracle.** `TestStreamConcurrencyEquiv` and `FuzzDecoderReadConcurrent` compare n > 1 with n == 1, read the same way. They allow only the documented exemptions: the dictionary cold/hot pair (Task 12, ruling 1), and offsets beyond a non-single-segment window (Task 11). On the corpus, the malicious corpus and 2,000 mutations, neither was needed: 0 uses.
+- **Equivalence oracle.** `TestStreamConcurrencyEquiv` and `FuzzDecoderReadConcurrent` compare n > 1 with n == 1, read the same way. They allow only the documented exemptions, which all come from the n == 1 stream's own dependence on how its input is cut (its single-pass shortcut and its round buffer's wrap), which the pipeline does not share:
+  - the size pair `ErrFrameSizeExceeded` / `ErrUnexpectedBlockSize` with the same output (`FuzzDecompressStream`'s second exception). Fuzzing found one (seed `bc393feb…`, committed): an RLE block over blockSizeMax in an FCS frame is `ErrFrameSizeExceeded` for n == 1 when the whole frame arrives in one read (shortcut), `ErrUnexpectedBlockSize` otherwise, and always `ErrUnexpectedBlockSize` for n > 1;
+  - the dictionary cold/hot pair (Task 12, ruling 1);
+  - offsets beyond a non-single-segment window (Task 11).
+
+  On the corpus (923 entries short, 1,028 full), the malicious corpus and 2,000 mutations, none was needed: 0 uses.
 
 ### Other decisions
 
