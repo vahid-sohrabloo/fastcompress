@@ -85,7 +85,15 @@ func equivConcurrencies() []int {
 // stream's result (got, gerr vs want, werr), up to the documented
 // exemptions. limited: the read stopped at an output limit, so only the
 // common prefix is compared.
-func checkSameStream(t testing.TB, what string, singleSegment, dicts, limited bool, got []byte, gerr error, want []byte, werr error) (exempt string) {
+//
+// An exemption covers a difference that comes from the n == 1 stream's
+// own dependence on how its input is cut, which the pipeline does not
+// share, so it is accepted only in its documented class and only when ref
+// (the n == 1 stream reading the whole input with 1-byte reads: whole
+// blocks, never the single-pass shortcut, as the pipeline) gives exactly
+// the n > 1 result.
+func checkSameStream(t testing.TB, what string, singleSegment, dicts, limited bool, got []byte, gerr error, want []byte, werr error,
+	ref func() ([]byte, error, bool)) (exempt string) {
 	t.Helper()
 	if limited {
 		m := min(len(got), len(want))
@@ -94,37 +102,52 @@ func checkSameStream(t testing.TB, what string, singleSegment, dicts, limited bo
 		}
 		return ""
 	}
-	same := gerr == nil && werr == nil || gerr != nil && werr != nil && errClass(gerr) == errClass(werr)
-	if same && bytes.Equal(got, want) {
+	sameErr := func(a, b error) bool {
+		return a == nil && b == nil || a != nil && b != nil && errClass(a) == errClass(b)
+	}
+	if sameErr(gerr, werr) && bytes.Equal(got, want) {
 		return ""
 	}
-	if !singleSegment && (errors.Is(gerr, ErrWindowSizeTooSmall) || errors.Is(werr, ErrWindowSizeTooSmall)) {
-		if !bytes.HasPrefix(got, want) && !bytes.HasPrefix(want, got) {
-			t.Fatalf("%s: offset beyond the window: outputs are not prefixes (%d, %d bytes)", what, len(got), len(want))
-		}
-		return "window"
+	seqCorrupt := func(err error) bool {
+		var ce *corruptError
+		return errors.Is(err, ErrWindowSizeTooSmall) || errors.As(err, &ce) && ce.code.cCode() == int(dErrCorruptionDetected)
 	}
-	if !same {
-		seqCorrupt := func(err error) bool {
-			var ce *corruptError
-			return errors.Is(err, ErrWindowSizeTooSmall) || errors.As(err, &ce) && ce.code.cCode() == int(dErrCorruptionDetected)
-		}
-		sizeErr := func(err error) bool {
-			return errors.Is(err, ErrFrameSizeExceeded) || errors.Is(err, ErrUnexpectedBlockSize)
-		}
-		switch {
-		case sizeErr(gerr) && sizeErr(werr):
-			exempt = "size"
-		case dicts && seqCorrupt(gerr) && seqCorrupt(werr):
-			exempt = "dict-cold"
-		default:
-			t.Fatalf("%s: n>1 %v, n=1 %v", what, gerr, werr)
-		}
+	switch {
+	case !singleSegment && (errors.Is(gerr, ErrWindowSizeTooSmall) || errors.Is(werr, ErrWindowSizeTooSmall)):
+		exempt = "window"
+	case errors.Is(gerr, ErrUnexpectedBlockSize) && errors.Is(werr, ErrFrameSizeExceeded) && bytes.Equal(got, want):
+		exempt = "size" // the shortcut names it ErrFrameSizeExceeded; never the pipeline
+	case dicts && seqCorrupt(gerr) && seqCorrupt(werr) && bytes.Equal(got, want):
+		exempt = "dict-cold"
+	default:
+		t.Fatalf("%s: n>1 %d bytes, %v; n=1 %d bytes, %v", what, len(got), gerr, len(want), werr)
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("%s: outputs differ: n>1 %d bytes, n=1 %d (%v)", what, len(got), len(want), werr)
+	rout, rerr, rlimited := ref()
+	if rlimited {
+		m := min(len(got), len(rout))
+		if !bytes.Equal(got[:m], rout[:m]) {
+			t.Fatalf("%s (%s): n>1 differs from n=1 without the shortcut within %d bytes", what, exempt, m)
+		}
+		return exempt
+	}
+	if !sameErr(gerr, rerr) || !bytes.Equal(got, rout) {
+		t.Fatalf("%s (%s): n>1 %d bytes, %v; n=1 without the shortcut %d bytes, %v", what, exempt, len(got), gerr, len(rout), rerr)
 	}
 	return exempt
+}
+
+// noShortcutRef returns checkSameStream's ref for data, decoded by a
+// Decoder of concurrency 1 with opts, output limited to limit.
+func noShortcutRef(t testing.TB, data []byte, opts []DOption, limit int) func() ([]byte, error, bool) {
+	return func() ([]byte, error, bool) {
+		d, err := NewReader(nil, append(slices.Clone(opts), WithDecoderConcurrency(1))...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		out, err := readAll(t, d, wholeReader(data), fixedSize(1), limit)
+		return out, err, len(out) > limit
+	}
 }
 
 // equivSem bounds the equivStream calls running at once (each holds the
@@ -169,7 +192,8 @@ func equivStream(t testing.TB, data []byte, opts []DOption) map[string]int {
 			got, gerr := so.run(t, d, data)
 			what := fmt.Sprintf("%s n=%d", so.name, equivConcurrencies()[i])
 			limited := so.name[:4] == "read" && (len(got) > limit || len(want) > limit)
-			if e := checkSameStream(t, what, ss || d.s.dc != nil && d.s.dc.fParams.singleSegment, dicts, limited, got, gerr, want, werr); e != "" {
+			if e := checkSameStream(t, what, ss || d.s.dc != nil && d.s.dc.fParams.singleSegment, dicts, limited, got, gerr, want, werr,
+				noShortcutRef(t, data, opts, equivLimit)); e != "" {
 				ex[e]++
 			}
 		}
@@ -198,7 +222,11 @@ func TestStreamConcurrencyEquiv(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				f := creftest.LoadFrame(t, name)
-				add(equivStream(t, f.Data, frameDictOpts(f)))
+				ex := equivStream(t, f.Data, frameDictOpts(f))
+				if f.CErr == "" && len(ex) > 0 {
+					t.Fatalf("valid entry needed exemptions %v", ex)
+				}
+				add(ex)
 			})
 		}
 	})
@@ -215,6 +243,39 @@ func TestStreamConcurrencyEquiv(t *testing.T) {
 					}
 				}
 				add(equivStream(t, c.data, opts))
+			})
+		}
+	})
+	t.Run("multiframe", func(t *testing.T) {
+		for _, m := range multiFrameStreams(t, 1) {
+			t.Run(m.name, func(t *testing.T) {
+				t.Parallel()
+				if ex := equivStream(t, m.data, m.opts); len(ex) > 0 {
+					t.Fatalf("valid stream needed exemptions %v", ex)
+				}
+			})
+		}
+	})
+	t.Run("multiframe-mutations", func(t *testing.T) {
+		var seeds [][]byte
+		for _, m := range multiFrameStreams(t, 16) {
+			if m.opts == nil {
+				seeds = append(seeds, m.data)
+			}
+		}
+		const n = 400
+		workers := runtime.GOMAXPROCS(0)
+		for w := range workers {
+			t.Run(fmt.Sprint(w), func(t *testing.T) {
+				t.Parallel()
+				for i := w; i < n; i += workers {
+					r := rand.New(rand.NewPCG(uint64(i), 0x17))
+					data := mutate(r, seeds)
+					add(equivStream(t, data, nil))
+					if t.Failed() {
+						t.Fatalf("mutation %d: %x", i, data)
+					}
+				}
 			})
 		}
 	})
@@ -236,6 +297,103 @@ func TestStreamConcurrencyEquiv(t *testing.T) {
 			})
 		}
 	})
+}
+
+// multiFrame is a stream of several frames (multiFrameStreams).
+type multiFrame struct {
+	name       string
+	data, want []byte
+	opts       []DOption
+}
+
+// multiFrameStreams returns streams of several frames whose decoding needs
+// each frame to begin afresh (review I2): frames of text and of one-byte
+// runs, whose first match is repcode 1 from the frame's start values,
+// after frames that end with other repcodes; streaming-Encoder frames (no
+// content size) and EncodeAll ones; a frame with a 1 KiB window (another
+// blockSizeMax); skippable frames between; dictionary frames after plain
+// ones (with opts registering the dictionary). Sizes are divided by div.
+func multiFrameStreams(t testing.TB, div int) []multiFrame {
+	t.Helper()
+	part := func(i int) []byte {
+		if i%2 == 1 {
+			return bytes.Repeat([]byte{byte('a' + i)}, (150000+i)/div)
+		}
+		return malText((200<<10 + i*777) / div)
+	}
+	streamed := func(src []byte, opts ...EOption) []byte {
+		var buf bytes.Buffer
+		w, err := NewWriter(&buf, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Write(src)
+		w.Close()
+		return buf.Bytes()
+	}
+	var ms []multiFrame
+	add := func(name string, f func(i int, src []byte) []byte, opts []DOption) {
+		m := multiFrame{name: name, opts: opts}
+		for i := range 6 {
+			src := part(i)
+			m.data = f(i, src)
+			m.want = append(m.want, src...)
+		}
+		ms = append(ms, m)
+	}
+	var data []byte
+	add("streamed", func(i int, src []byte) []byte {
+		data = append(data[:len(data):len(data)], streamed(src, WithEncoderLevel(SpeedDefault), WithWindowSize(1<<20))...)
+		return data
+	}, nil)
+	data = nil
+	enc := newTestEncoder(t, WithEncoderLevel(SpeedDefault))
+	small := newTestEncoder(t, WithEncoderLevel(SpeedFastest), WithWindowSize(1<<10))
+	add("encodeall-windows", func(i int, src []byte) []byte {
+		if i == 3 {
+			data = small.EncodeAll(src, data)
+		} else {
+			data = enc.EncodeAll(src, data)
+		}
+		return data
+	}, nil)
+	data = nil
+	add("skippable", func(i int, src []byte) []byte {
+		data = append(data, 0x5A, 0x2A, 0x4D, 0x18, 5, 0, 0, 0, 1, 2, 3, 4, 5)
+		data = append(data, streamed(src, WithEncoderLevel(SpeedFastest), WithEncoderCRC(true))...)
+		return data
+	}, nil)
+	dict := readTestdata(t, "train.dict")
+	denc := newTestEncoder(t, WithEncoderDict(dict))
+	data = nil
+	add("dict", func(i int, src []byte) []byte {
+		if i%2 == 0 {
+			data = denc.EncodeAll(src, data)
+		} else {
+			data = enc.EncodeAll(src, data)
+		}
+		return data
+	}, []DOption{WithDecoderDicts(dict)})
+	return ms
+}
+
+// TestStreamMultiFrame decodes multiFrameStreams with concurrency 1, 2 and
+// 4, read whole with 4096-byte reads and with WriteTo of 7-byte chunks:
+// exactly the input, no error.
+func TestStreamMultiFrame(t *testing.T) {
+	for _, m := range multiFrameStreams(t, 1) {
+		for _, n := range []int{1, 2, 4} {
+			d := newTestDecoder(t, append(slices.Clone(m.opts), WithDecoderConcurrency(n))...)
+			got, err := readAll(t, d, wholeReader(m.data), fixedSize(4096), 0)
+			if err != nil || !bytes.Equal(got, m.want) {
+				t.Fatalf("%s n=%d read: %d bytes (want %d), %v", m.name, n, len(got), len(m.want), err)
+			}
+			got, err = writeToAll(t, d, &chunkReader{b: m.data, next: fixedSize(7)})
+			if err != nil || !bytes.Equal(got, m.want) {
+				t.Fatalf("%s n=%d writeto: %d bytes (want %d), %v", m.name, n, len(got), len(m.want), err)
+			}
+		}
+	}
 }
 
 // scriptReader returns its data in reads of up to step bytes, and after
@@ -773,7 +931,10 @@ func FuzzDecoderReadConcurrent(f *testing.F) {
 			want, werr, l1 := run(d1, read)
 			got, gerr, l2 := run(dn, read)
 			ss := d1.s.dc.fParams.singleSegment || dn.s.dc.fParams.singleSegment
-			checkSameStream(t, fmt.Sprintf("read=%v n=%d", read, n), ss, false, l1 || l2, got, gerr, want, werr)
+			if e := checkSameStream(t, fmt.Sprintf("read=%v n=%d", read, n), ss, false, l1 || l2, got, gerr, want, werr,
+				noShortcutRef(t, data, nil, fuzzLimit)); e != "" {
+				t.Logf("exemption %s", e)
+			}
 		}
 	})
 }
