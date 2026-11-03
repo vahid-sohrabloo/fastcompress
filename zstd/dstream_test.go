@@ -174,6 +174,34 @@ func TestDecompressStreamHostage(t *testing.T) {
 	}
 }
 
+// TestDecompressStreamHostageEndErr: when a short last block (frame
+// content size not reached) is flushed over several calls, the first
+// keeps the hostage byte; the call that finishes the flush returns
+// ErrFrameSizeMismatch with the whole input reported consumed, the
+// hostage byte included, and all of the block delivered.
+func TestDecompressStreamHostageEndErr(t *testing.T) {
+	raw := func(n int, last bool) malBlock {
+		return malBlock{typ: btRaw, last: last, size: n, body: bytes.Repeat([]byte{'a'}, n)}
+	}
+	frame := malFrame{hdr: malFHdr{winDesc: 0, fcsSize: 2, fcs: 2000}.bytes(), blocks: []malBlock{raw(1024, false), raw(500, true)}}.bytes()
+	d := newDCtx()
+	in := inBuffer{src: frame}
+	buf := make([]byte, 100)
+	n := 0
+	for range 100 {
+		o := outBuffer{dst: buf}
+		_, e := d.decompressStreamCode(&o, &in)
+		n += o.pos
+		if e != 0 {
+			if e != dErrFrameSizeMismatch || in.pos != len(frame) || n != 1524 {
+				t.Fatalf("err %d, in.pos %d/%d, %d bytes", e, in.pos, len(frame), n)
+			}
+			return
+		}
+	}
+	t.Fatal("no error")
+}
+
 // TestDecompressStreamNoProgress pins C's no-progress errors: the 16th
 // call in a row that moves neither input nor output fails, with
 // noForwardProgress_inputEmpty when there is no input and
@@ -473,6 +501,44 @@ func TestDecompressStreamWrapEdgeCref(t *testing.T) {
 		if k, _ := streamCref(t, frame, nil, nil, chunk, 4096); k != "accept" {
 			t.Errorf("chunk %d: %s", chunk, k)
 		}
+	}
+}
+
+// TestDecompressStreamShortcutNoAlloc: the single-pass shortcut decodes
+// in place in out.dst, and DecodeAll into a dst with the capacity, without
+// allocating, also for a frame compressing 8 MiB to under 1 KiB (whose
+// content size the reservation rule does not trust).
+func TestDecompressStreamShortcutNoAlloc(t *testing.T) {
+	in := bytes.Repeat([]byte("abcdefgh"), 1<<20)
+	frame := creftest.Run(t, in, "compress", "-level", "3", "-pledged", "1")
+	d := newDCtx()
+	out := make([]byte, len(in))
+	stream := func() {
+		o, i := outBuffer{dst: out}, inBuffer{src: frame}
+		if hint, e := d.decompressStreamCode(&o, &i); e != 0 || hint != 0 || o.pos != len(in) {
+			t.Fatalf("stream: err %d, hint %d, %d bytes", e, hint, o.pos)
+		}
+	}
+	all := func() {
+		if got, e := d.decompressFrames(out[:0], frame, nil); e != 0 || len(got) != len(in) {
+			t.Fatalf("DecodeAll: err %d, %d bytes", e, len(got))
+		}
+	}
+	for _, c := range []struct {
+		name string
+		f    func()
+	}{{"shortcut", stream}, {"DecodeAll", all}} {
+		var m0, m1 runtime.MemStats
+		c.f()
+		runtime.ReadMemStats(&m0)
+		c.f()
+		runtime.ReadMemStats(&m1)
+		if n := testing.AllocsPerRun(3, c.f); n != 0 || m1.TotalAlloc != m0.TotalAlloc {
+			t.Errorf("%s: %v allocations, %d bytes", c.name, n, m1.TotalAlloc-m0.TotalAlloc)
+		}
+	}
+	if !bytes.Equal(out, in) {
+		t.Fatal("output differs")
 	}
 }
 
@@ -829,8 +895,8 @@ func errClass(err error) string {
 // with chunks and output buffers chosen by chunkSeed (no panic), and
 // requires DecodeAll's result (decompressFrames, max window and memory
 // 64 MiB; inputs over the memory limit are skipped): the same output and
-// error class, whatever the chunking. Two exceptions, which a stream cannot
-// avoid:
+// error class, whatever the chunking. Three exceptions, which a stream
+// cannot avoid:
 //
 //   - Input cut short: one-shot decoding fails first where a block runs past
 //     the input's end (io.ErrUnexpectedEOF); the stream fails the same way

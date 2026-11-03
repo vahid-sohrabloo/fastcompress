@@ -684,6 +684,10 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 				reserve = frameCap
 			}
 		}
+		// Spare capacity dst already has is not an untrusted reservation:
+		// the frame decodes into it (up to its output space) before any
+		// growth.
+		reserve = max(reserve, min(frameCap, uint64(cap(dst)-len(dst))))
 		dst = slices.Grow(dst, int(reserve))
 		buf := dst[len(dst) : len(dst) : len(dst)+int(reserve)]
 
@@ -1376,6 +1380,9 @@ func (d *dctx) decompressStreamCode(out *outBuffer, in *inBuffer) (int, dErr) {
 			d.outStart += flushedSize
 			if flushedSize == toFlushSize { // flush completed
 				if d.endErr != 0 {
+					if d.hostageByte && ip < iend {
+						ip++ // the hostage byte (the frame's last) was consumed
+					}
 					return fail(d.endErr)
 				}
 				d.streamStage = zdssRead
