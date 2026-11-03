@@ -784,7 +784,8 @@ func FuzzDecodeDict(f *testing.F) {
 			switch ge {
 			case dErrFrameParameterWindowTooLarge: // window > 1<<29: one-shot C does not check it
 			case dErrDecodedBlockTooLarge: // a block regenerating > blockSizeMax: one-shot C accepts it
-			case dErrDecoderSizeExceeded: // maxMemory (1<<26) has no C counterpart
+			// Not dErrDecoderSizeExceeded: past the bound gate above,
+			// every frame's output space is within maxMemory (1<<26).
 			default:
 				t.Fatalf("C decodes %d bytes, Go fails: %v", len(want), ge.toError("decompress"))
 			}
