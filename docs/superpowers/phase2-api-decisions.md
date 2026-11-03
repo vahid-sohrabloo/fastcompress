@@ -103,7 +103,12 @@ C's decoder is single-threaded. The design adds threads only at points C's own s
   When the frame fits its reservation, it is decoded in place in `dst`; otherwise its grown buffer is appended (one extra copy). `dst[:len(dst)]` is never modified.
 - **Dictionary selection** (C `ZSTD_d_refMultipleDDicts` plus `ZSTD_DDictHashSet`):
   - A frame with dictID ≠ 0 uses the registered dictionary with that ID, or fails with `ErrUnknownDictionary`.
-  - A frame with dictID 0 uses the dictionary registered with ID 0 (only `WithDecoderDictRaw(0, …)` can do that), or no dictionary.
+  - A frame with dictID 0 uses the dictionary registered with ID 0, or no dictionary. Two registrations give ID 0: `WithDecoderDictRaw(0, …)`, and a zstd-format dictionary whose header ID is 0 (`createDDict` reads the ID from the header, as C's `ZSTD_getDictID_fromDDict`).
+  - Deviations from C (Task 10 ruling 3; `selectFrameDDict` in `zstd/zstd_ddict.go`):
+    - (a) **No dictID, no ID-0 dictionary.** C (`ZSTD_DCtx_selectFrameDDict`) keeps the current DDict when the ID is not found, so a frame without a dictID (e.g. `zstd --no-dictID -D A`) decodes with the last dictionary used (sticky across frames). Go decodes it with no dictionary, so it fails unless it never reads the dictionary.
+    - (b) **ID-0 shadowing.** C's `ZSTD_DDictHashSet_getDDict` stops at the first entry with ID 0 and returns it; C then sets `dctx->dictID` to the frame's ID, so a frame for X decodes with an ID-0 dictionary on X's probe path (wrong content, no entropy), and an X registered after that entry is never found. Go's lookup stops only at an empty slot or the exact ID: X is found, and an ID-0 dictionary is used only for dictID-0 frames.
+    - (c) **One-shot C uses the wrong DDict.** `ZSTD_decompressMultiFrame` begins every frame with the DDict referenced last (`ZSTD_getDDict`) and only re-points `dctx->ddict` in `ZSTD_decodeFrameHeader`, so a frame for Y decodes with X's content and tables while the ID check passes. Go selects first and then begins the frame with the selected dictionary, as streaming C does.
+    - C's probe `idx &= mask; idx++` reads one slot past the table (undefined behaviour); Go wraps to slot 0 (Task 10 ruling 2). Only the slot order differs; with (b) fixed it is not observable.
 - **Defaults** come from the doc text: max window = `MaxWindowSize` (1<<29), not C's windowLogMax 27, and max memory 64 GiB. Differential tests run cref with `-max-window-log 29`. Exception (controller ruling): `ZipDecompressor` defaults to a 128 MB max window (doc:138-140), overridable by options.
 - **`BuildDict`:**
   - ID 0 → C's XXH64-derived compliant ID.

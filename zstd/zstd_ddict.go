@@ -291,13 +291,22 @@ func (s *ddictSet) add(dd *ddict) {
 // selectFrameDDict returns the dictionary of a frame with dictionary ID
 // dictID: the one registered with that ID, or nil (no dictionary: a
 // frame with an ID then fails with dictionary_wrong).
-// C: zstd_decompress.c:ZSTD_DCtx_selectFrameDDict. Go: the decisions
-// record's selection rule. C keeps the current DDict when the ID is not
-// found (so a frame without an ID decodes with the last dictionary used),
-// and takes a dictionary of ID 0 met while probing for another ID.
+// C: zstd_decompress.c:ZSTD_DCtx_selectFrameDDict, with the decisions
+// record's selection rule (docs/superpowers/phase2-api-decisions.md).
+// Deviations from C:
+//   - C keeps the current DDict when the ID is not found, so a frame
+//     without an ID decodes with the last dictionary used; Go uses none.
+//   - C's lookup (get) stops at the first dictionary with ID 0 and returns
+//     it, which shadows a dictionary placed after it on the probe path.
+//     Go's probes the same slots (emplace's order) but stops only at an
+//     empty slot or the exact ID; the load factor (at most 0.25) ensures an
+//     empty slot.
 func (s *ddictSet) selectFrameDDict(dictID uint32) *ddict {
-	if dd := s.get(dictID); dd != nil && dd.dictID == dictID {
-		return dd
+	idxRangeMask := len(s.table) - 1
+	for idx := s.getIndex(dictID); s.table[idx] != nil; idx = (idx + 1) & idxRangeMask {
+		if s.table[idx].dictID == dictID {
+			return s.table[idx]
+		}
 	}
 	return nil
 }

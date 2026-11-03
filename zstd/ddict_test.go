@@ -373,6 +373,99 @@ func TestDDictSetProbe(t *testing.T) {
 	}
 }
 
+// collidingIDs returns n nonzero IDs whose probe starts where ID 0's does
+// in a table of size slots.
+func collidingIDs(size, n int) []uint32 {
+	s := &ddictSet{table: make([]*ddict, size)}
+	var ids []uint32
+	for id := uint32(1); len(ids) < n; id++ {
+		if s.getIndex(id) == s.getIndex(0) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// TestDDictSetShadowID0: a dictionary of ID 0 on another dictionary's
+// probe path stops C's lookup (get returns the ID-0 one), but
+// selectFrameDDict still finds every registered ID: registered after the
+// ID-0 one, after the table has grown (expand re-emplaces in slot order),
+// and with a zstd dictionary whose header ID is 0, which frames without a
+// dictionary ID then use.
+func TestDDictSetShadowID0(t *testing.T) {
+	t.Run("after ID 0", func(t *testing.T) {
+		set := newDDictSet()
+		set.add(&ddict{dictID: 0})
+		x := collidingIDs(len(set.table), 1)[0]
+		set.add(&ddict{dictID: x})
+		if dd := set.get(x); dd == nil || dd.dictID != 0 {
+			t.Fatalf("get(%d) = %v, want C's ID-0 stop", x, dd)
+		}
+		if dd := set.selectFrameDDict(x); dd == nil || dd.dictID != x {
+			t.Fatalf("selectFrameDDict(%d) = %v", x, dd)
+		}
+	})
+	t.Run("after expand", func(t *testing.T) {
+		set := newDDictSet()
+		set.add(&ddict{dictID: 0})
+		colliding := collidingIDs(2048, 4)
+		var ids []uint32
+		for _, id := range colliding {
+			set.add(&ddict{dictID: id})
+			ids = append(ids, id)
+		}
+		for id := uint32(100000); len(ids) < 300; id++ {
+			set.add(&ddict{dictID: id})
+			ids = append(ids, id)
+		}
+		if len(set.table) != 2048 {
+			t.Fatalf("table %d slots", len(set.table))
+		}
+		shadowed := 0
+		for _, id := range colliding {
+			if dd := set.get(id); dd != nil && dd.dictID == 0 {
+				shadowed++
+			}
+		}
+		if shadowed == 0 {
+			t.Fatal("no ID shadowed for C's lookup: the case is not exercised")
+		}
+		for _, id := range ids {
+			if dd := set.selectFrameDDict(id); dd == nil || dd.dictID != id {
+				t.Fatalf("selectFrameDDict(%d) = %v", id, dd)
+			}
+		}
+		if dd := set.selectFrameDDict(0); dd == nil || dd.dictID != 0 {
+			t.Fatalf("selectFrameDDict(0) = %v", dd)
+		}
+	})
+	t.Run("zstd dictionary with ID 0", func(t *testing.T) {
+		zero := slices.Clone(readTestdata(t, "train-12k.dict"))
+		binary.LittleEndian.PutUint32(zero[4:], 0)
+		dd0 := mustDDict(t, zero, false)
+		if dd0.dictID != 0 || !dd0.entropyPresent {
+			t.Fatalf("dictID %d, entropy %v", dd0.dictID, dd0.entropyPresent)
+		}
+		dicts, inputs := manyDicts(t, 1)
+		other := mustDDict(t, dicts[0], false)
+		set := newDDictSet()
+		set.add(dd0)
+		set.add(other)
+		src := dictInputsText(t, 4096)
+		frame0 := newTestEncoder(t, WithEncoderLevel(SpeedFastest), WithEncoderDict(zero)).EncodeAll(src, nil)
+		if hs, _ := frameHeaderSizeInternal(frame0); frame0[4]&3 != 0 || hs == 0 {
+			t.Fatal("the ID-0 dictionary's frame has a dictionary ID field")
+		}
+		frame1 := newTestEncoder(t, WithEncoderLevel(SpeedFastest), WithEncoderDict(dicts[0])).EncodeAll(inputs[0], nil)
+		d := newDCtx()
+		d.ddicts = set
+		got, err := d.decompressMultiFrame(nil, slices.Concat(frame0, frame1, frame0), nil)
+		if want := slices.Concat(src, inputs[0], src); err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("err %v, equal %v", err, bytes.Equal(got, want))
+		}
+	})
+}
+
 // TestInspectDictionary compares InspectDictionary with C
 // (ZSTD_getDictID_fromDict, ZSTD_loadDEntropy, through cref dictinfo) on
 // the trained dictionaries and variants, and createDDict's acceptance with
@@ -445,51 +538,71 @@ func TestInspectDictionary(t *testing.T) {
 		cases["cut"+strconv.Itoa(i)] = t12[:i]
 	}
 	for name, dict := range cases {
-		t.Run(name, func(t *testing.T) {
-			c := creftest.DictInfoCRef(t, dict)
-			dd, err := createDDict(dict, false)
-			if (err == nil) != (c["ddict"] == "ok") {
-				t.Fatalf("createDDict err %v, C ddict=%s", err, c["ddict"])
-			}
-			if err == nil && strconv.FormatUint(uint64(dd.dictID), 10) != c["ddictID"] {
-				t.Fatalf("dictID %d, C %s", dd.dictID, c["ddictID"])
-			}
-			if err == nil && !bytes.Equal(dd.content, dict) {
-				t.Fatal("ddict content is not the whole dictionary")
-			}
-			info, err := InspectDictionary(dict)
-			eSize, ok := c["entropy"]
-			if !ok || strings.HasPrefix(eSize, "err:") {
-				if err == nil {
-					t.Fatalf("InspectDictionary: no error, C entropy=%q", eSize)
-				}
-				if errors.Is(err, errDictionaryWrong) != !ok {
-					t.Fatalf("InspectDictionary: %v (C entropy=%q)", err, eSize)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			n, _ := strconv.Atoi(eSize)
-			if got := strconv.FormatUint(uint64(info.ID()), 10); got != c["dictID"] {
-				t.Errorf("ID %s, C %s", got, c["dictID"])
-			}
-			if got := strconv.Itoa(info.ContentSize()); got != c["contentSize"] {
-				t.Errorf("ContentSize %s, C %s", got, c["contentSize"])
-			}
-			if !bytes.Equal(info.Content(), dict[n:]) {
-				t.Error("Content differs")
-			}
-			o := info.Offsets()
-			if got := fmt.Sprintf("%d,%d,%d", o[0], o[1], o[2]); got != c["rep"] {
-				t.Errorf("Offsets %s, C %s", got, c["rep"])
-			}
-			if info.LitEncoder() == nil {
-				t.Error("LitEncoder is nil")
-			}
-		})
+		t.Run(name, func(t *testing.T) { checkDictInfo(t, dict, true) })
 	}
+}
+
+// checkDictInfo compares createDDict and InspectDictionary on dict with
+// `cref dictinfo`: acceptance and ID (createDDict, against
+// ZSTD_createDDict_advanced), and the error or ID, ContentSize, Content
+// and Offsets (InspectDictionary, against ZSTD_loadDEntropy). wantLit
+// requires a LitEncoder.
+func checkDictInfo(t *testing.T, dict []byte, wantLit bool) {
+	t.Helper()
+	c := creftest.DictInfoCRef(t, dict)
+	dd, err := createDDict(dict, false)
+	if (err == nil) != (c["ddict"] == "ok") {
+		t.Fatalf("createDDict err %v, C ddict=%s", err, c["ddict"])
+	}
+	if err == nil && strconv.FormatUint(uint64(dd.dictID), 10) != c["ddictID"] {
+		t.Fatalf("dictID %d, C %s", dd.dictID, c["ddictID"])
+	}
+	if err == nil && !bytes.Equal(dd.content, dict) {
+		t.Fatal("ddict content is not the whole dictionary")
+	}
+	info, err := InspectDictionary(dict)
+	eSize, ok := c["entropy"]
+	if !ok || strings.HasPrefix(eSize, "err:") {
+		if err == nil {
+			t.Fatalf("InspectDictionary: no error, C entropy=%q", eSize)
+		}
+		if errors.Is(err, errDictionaryWrong) != !ok {
+			t.Fatalf("InspectDictionary: %v (C entropy=%q)", err, eSize)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := strconv.Atoi(eSize)
+	if got := strconv.FormatUint(uint64(info.ID()), 10); got != c["dictID"] {
+		t.Errorf("ID %s, C %s", got, c["dictID"])
+	}
+	if got := strconv.Itoa(info.ContentSize()); got != c["contentSize"] {
+		t.Errorf("ContentSize %s, C %s", got, c["contentSize"])
+	}
+	if !bytes.Equal(info.Content(), dict[n:]) {
+		t.Error("Content differs")
+	}
+	o := info.Offsets()
+	if got := fmt.Sprintf("%d,%d,%d", o[0], o[1], o[2]); got != c["rep"] {
+		t.Errorf("Offsets %s, C %s", got, c["rep"])
+	}
+	if wantLit && info.LitEncoder() == nil {
+		t.Error("LitEncoder is nil")
+	}
+}
+
+// FuzzInspectDictionary: InspectDictionary and createDDict never panic,
+// and agree with C (checkDictInfo; LitEncoder may be nil).
+func FuzzInspectDictionary(f *testing.F) {
+	t12 := readTestdata(f, "train-12k.dict")
+	f.Add(t12)
+	f.Add(t12[:140])
+	f.Add(t12[:133])
+	f.Add(readTestdata(f, "train.dict")[:400])
+	f.Add([]byte("raw content"))
+	f.Fuzz(func(t *testing.T, dict []byte) { checkDictInfo(t, dict, false) })
 }
 
 // TestDDictEntropyState checks the context state a dictionary sets up
@@ -613,8 +726,9 @@ search:
 // FuzzDecodeDict decodes frame with dict loaded as ZSTD_dct_auto: no
 // panic. createDDict accepts exactly the dictionaries C's
 // ZSTD_createDDict_advanced does; when both load it, C (cref decompress)
-// and Go agree: equal output when both succeed, and Go fails when C does
-// (Go is stricter only where the error mapping table says so). Each input
+// and Go agree: equal output when both succeed, Go fails when C does, and
+// Go succeeds when C does except for the error mapping table's deviations
+// (window, block over blockSizeMax, maxMemory). Each input
 // runs cref twice: fuzz with a short -fuzzminimizetime (e.g. 2s), or
 // minimizing a large input looks like a hang.
 func FuzzDecodeDict(f *testing.F) {
@@ -648,7 +762,7 @@ func FuzzDecodeDict(f *testing.F) {
 		if err != nil {
 			return
 		}
-		got, gerr := d.decompressMultiFrame(nil, frame, dd)
+		got, ge := d.decompressFrames(nil, frame, dd)
 		if b := decompressBound(frame); b == contentSizeError || b > 1<<26 {
 			return // C's buffer would be too large
 		}
@@ -658,12 +772,22 @@ func FuzzDecodeDict(f *testing.F) {
 		}
 		want, ce := creftest.DecodeCRef(t, frame, "-dict", p)
 		switch {
-		case ce == nil && gerr == nil:
+		case ce == nil && ge == 0:
 			if !bytes.Equal(got, want) {
 				t.Fatalf("output differs from C (%d bytes, C %d)", len(got), len(want))
 			}
-		case ce != nil && gerr == nil:
+		case ce != nil && ge == 0:
 			t.Fatalf("C fails (%v), Go decodes %d bytes", ce, len(got))
+		case ce == nil:
+			// Go fails where C decodes: only the deviations of the error
+			// mapping table (docs/superpowers/phase2-api-decisions.md).
+			switch ge {
+			case dErrFrameParameterWindowTooLarge: // window > 1<<29: one-shot C does not check it
+			case dErrDecodedBlockTooLarge: // a block regenerating > blockSizeMax: one-shot C accepts it
+			case dErrDecoderSizeExceeded: // maxMemory (1<<26) has no C counterpart
+			default:
+				t.Fatalf("C decodes %d bytes, Go fails: %v", len(want), ge.toError("decompress"))
+			}
 		}
 	})
 }
