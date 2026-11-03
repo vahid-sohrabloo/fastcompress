@@ -517,6 +517,8 @@ func TestDecompressGrow(t *testing.T) {
 		t.Fatalf("FCS frame: %d bytes, FCS %d: want an untrusted FCS", len(withFCS), fh.frameContentSize)
 	}
 	small := malEncode(t, in[:1000], false)
+	prefix := growInput(1 << 20)[:1<<20-7]
+	slices.Reverse(prefix)
 	for _, c := range []struct {
 		name   string
 		prefix []byte
@@ -533,9 +535,17 @@ func TestDecompressGrow(t *testing.T) {
 		// (4.36 measured; without doubling 7.9).
 		{"multi-frame", []byte("prefix"), slices.Concat(small, noFCS, withFCS),
 			slices.Concat([]byte("prefix"), in[:1000], in, in), 5},
+		// Output already in dst: the frame decodes after it (in dst's
+		// spare capacity when there is room, then in its own grown
+		// buffer, appended); the prefix and the frame's history survive.
+		// Plus the append of the frame (3.01 and 2.87 measured).
+		{"dst prefix", prefix, noFCS, slices.Concat(prefix, in), 4},
+		{"dst prefix, spare capacity", slices.Grow(slices.Clone(prefix), 3<<20), withFCS,
+			slices.Concat(prefix, in), 4},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			alloc := uint64(math.MaxUint64)
+			saved := slices.Clone(c.prefix[:cap(c.prefix)])
 			for range 2 {
 				var ms0, ms1 runtime.MemStats
 				runtime.ReadMemStats(&ms0)
@@ -543,6 +553,9 @@ func TestDecompressGrow(t *testing.T) {
 				runtime.ReadMemStats(&ms1)
 				if err != nil || !bytes.Equal(got, c.want) {
 					t.Fatalf("(%d bytes, %v), want %d bytes, equal %v", len(got), err, len(c.want), bytes.Equal(got, c.want))
+				}
+				if !bytes.Equal(c.prefix, saved[:len(c.prefix)]) {
+					t.Fatal("dst[:len(dst)] modified")
 				}
 				alloc = min(alloc, ms1.TotalAlloc-ms0.TotalAlloc)
 			}
