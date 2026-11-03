@@ -215,7 +215,7 @@ func (d *Decoder) DecodeAll(input, dst []byte) ([]byte, error) {
 // C: ZSTD_DCtx_reset(ZSTD_reset_session_only), as a stream can be reused
 // after an error. A reader with Bytes and Len (see WithDecodeBuffersBelow)
 // may be decoded here; its error, if any, is returned by Read and WriteTo
-// after the output, never by Reset.
+// after the output, never by Reset. Reset(nil) also drops that output.
 func (d *Decoder) Reset(r io.Reader) error {
 	if d.dctxs == nil {
 		return errDecoderZero
@@ -228,6 +228,7 @@ func (d *Decoder) Reset(r io.Reader) error {
 	s.waitOldReader(r)
 	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0], edc: s.edc, escratch: s.escratch, lingering: s.lingering}
 	if r == nil {
+		s.buf = nil // nor the output decoded from it (WithDecodeBuffersBelow)
 		return nil
 	}
 	if s.dc == nil {
