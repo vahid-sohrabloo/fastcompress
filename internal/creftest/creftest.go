@@ -477,6 +477,34 @@ func DStreamCRef(t testing.TB, frame []byte, args ...string) ([]byte, *CError) {
 	return runDec(t, "dstream", frame, args...)
 }
 
+// FinalizeDictCRef runs `cref finalize-dict` (ZDICT_finalizeDictionary with
+// a capacity of len(content) + 64 KiB and notification level 0) on content
+// and samples at C level level with dictionary ID id. On a libzstd error it
+// returns the error and no dictionary.
+func FinalizeDictCRef(t testing.TB, content []byte, samples [][]byte, level int, id uint32) ([]byte, *CError) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "content")
+	if err := os.WriteFile(p, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sizes := make([]string, len(samples))
+	for i, s := range samples {
+		sizes[i] = strconv.Itoa(len(s))
+	}
+	out, cerr := runDec(t, "finalize-dict", slices.Concat(samples...), "-level", strconv.Itoa(level),
+		"-dict-id", strconv.FormatUint(uint64(id), 10), "-content", p, "-sizes", strings.Join(sizes, ","))
+	if cerr != nil {
+		return nil, cerr
+	}
+	return out, nil
+}
+
+// ZstdCLI returns the path of the C zstd program built from ref/zstd.
+func ZstdCLI(t testing.TB) string {
+	t.Helper()
+	return tool(t, "ref/zstd/programs/zstd", "run ref/fetch.sh")
+}
+
 // FHeaderCRef returns the key=value lines of `cref fheader` on in.
 func FHeaderCRef(t testing.TB, in []byte) map[string]string {
 	t.Helper()

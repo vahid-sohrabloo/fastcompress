@@ -1,7 +1,9 @@
 # Phase 2 API decisions
 
-Replaces `phase2-api-todo.md`. The list of identifiers still to port is now
-`scripts/apicheck.sh --missing` (77 lines at the start of Phase 2).
+Replaces `phase2-api-todo.md`. The list of identifiers still to port was
+`scripts/apicheck.sh --missing` (77 lines at the start of Phase 2). Task 16
+(`BuildDict`) closed it: `--missing` prints nothing, `scripts/apicheck.sh`
+in full mode prints `apicheck ok`, and CI runs the full mode.
 Line references (`doc:N`) are lines of `api/klauspost-zstd-doc.txt`
 (klauspost/compress v1.20.3, `go doc -all` output).
 
@@ -244,6 +246,9 @@ An explicit `WithDecoderConcurrency(n)` that resolves to n > 1 (0 means GOMAXPRO
   - `Level`: unset (zero value) means `SpeedBestCompression` (doc:165, controller ruling); otherwise it maps through Phase 1's table.
   - `CompatV155`: C's `ZDICT_finalizeDictionary` output already loads in zstd ≤ v1.5.5, so both values produce C's bytes. Task 16 verifies this against `/usr/bin/zstd` (v1.5.5).
   - `DebugOut` receives C's `DISPLAYLEVEL` messages at notification level 4.
+  - Output capacity: `len(History)` + 64 KiB, as `cref finalize-dict` gives C. `History` is never truncated, and an offset beyond the capacity fails with C's `dstSize_tooSmall`, which bounds the padding.
+  - Errors are C's: `*buildDictError` carries the C code (`dictionaryCreation_failed` for a history of 2 GiB - 128 KiB or more, `dstSize_tooSmall`). `BuildDict`'s own checks (level outside the four `EncoderLevel`s, an offset ≤ 0 or above `MaxUint32` when `Offsets` is not all zero) return plain errors.
+  - Empty `Contents`, empty `History` and short histories give C's dictionary (`TestBuildDictDegenerate`). A history under about 1.5 KiB gives the CDict a window below 4 KiB, so C skips every 4 KiB sample (no statistics, the flat literal table).
 - **Snappy:** each snappy chunk is decoded into a 64 KiB scratch buffer, which is needed to validate offsets and to turn copies shorter than 3 bytes into literals. Its *parse* (literal and copy elements) becomes the zstd sequences directly: `offBase = offset + 3`, no repcodes, and no match search. Those sequences are encoded with Phase 1's `entropyCompressSeqStore` as one zstd block per chunk, inside one frame (FCS unknown, window 64 KiB, no checksum). CRC-32C is checked on every chunk, since the data is decoded anyway. That is stricter than "not all CRC values are checked", but still conforming.
 - **Snappy empty input (Task 15 ruling R1):** `Convert` on empty input writes nothing and returns `0, nil`. The framing spec says a valid stream always starts with the stream identifier, so this is more lenient than the spec. The klauspost doc text says nothing about this case. Writing nothing is harmless: our `Decoder` and C both read 0 bytes as empty. A stream that holds only the identifier gives a valid empty frame.
 
@@ -269,7 +274,7 @@ An explicit `WithDecoderConcurrency(n)` that resolves to n > 1 (0 means GOMAXPRO
 | `Header.AppendTo` | Appends the encoded header; no error checking of the values. | doc:583-585 |
 | `DecodeTo` | Appends to `dst`; the maximum decoded size is 1 GiB, not counting what is already in `dst`. | doc:109-111 |
 | `ZipDecompressor` | `WithDecoderConcurrency(1)` is forced. Default max window is 128 MB (overridable by options). | doc:135-140 |
-| `InspectDictionary` | Returns an interface with `ID() uint32`, `ContentSize() int`, `Content() []byte`, `Offsets() [3]int`, `LitEncoder() *huff0.Scratch` (doc:121-127). The doc says only "loads a zstd dictionary and provides functions to inspect the content" (doc:128-129); **it states nothing about raw (non-dictionary-format) content**. Behaviour on raw content is therefore unspecified by the doc and must be decided by Task 16 (proposal: return an error, since `WithDecoderDicts` requires `zstd --train` format, doc:214-215). |
+| `InspectDictionary` | Returns an interface with `ID() uint32`, `ContentSize() int`, `Content() []byte`, `Offsets() [3]int`, `LitEncoder() *huff0.Scratch` (doc:121-127). The doc says only "loads a zstd dictionary and provides functions to inspect the content" (doc:128-129); **it states nothing about raw (non-dictionary-format) content**. Decided (see the ruling below; implemented in Task 10): raw content is an error, since `WithDecoderDicts` requires `zstd --train` format, doc:214-215. |
 | `SnappyConverter` | The converter can be reused to avoid allocations, even after errors. Deprecated in the doc. Converts directly without full decoding; no CRC is generated and not all input CRCs are checked (this port is stricter, see Snappy decision above). `Convert(in, w) (int64, error)`. | doc:604-621 |
 | `BuildDictOptions` | `ID` dictionary ID; `Contents [][]byte` content for the tables; `History []byte` history for all blocks; `Offsets [3]int` offsets to use; `CompatV155` compatible with v1.5.5 and earlier (facebook/zstd#3724); `Level EncoderLevel` builds for that level, **"If not set SpeedBestCompression will be used"**; `DebugOut io.Writer` stats and details. | doc:145-170 |
 

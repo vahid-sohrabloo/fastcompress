@@ -8,10 +8,9 @@ Status: work in progress.
 - **Phase 1, the encoder, is done:** `NewWriter`, `Encoder` (`EncodeAll`,
   the streaming `io.WriteCloser`), `EncodeTo`, `ZipCompressor` and the
   `EOption`s.
-- **Phase 2, the decoder, is in progress.** `NewReader`, `Decoder`,
-  `DecodeTo`, `BuildDict`, `ZipDecompressor` and the other decoder-side API
-  are not there yet, so the package cannot yet replace `klauspost/compress/zstd`
-  in code that decompresses.
+- **Phase 2, the decoder, is in progress.** Every identifier of
+  `klauspost/compress/zstd` is now exported (`scripts/apicheck.sh` passes in
+  full mode); the remaining Phase 2 tasks are still open.
 
 ## Encoder output
 
@@ -32,6 +31,10 @@ header (C writes none for raw content); everything after that field is C's.
   effect. Encoding is single-threaded per call (C's `nbWorkers = 0`).
   `WithEncoderConcurrency(n)` caps the number of concurrent `EncodeAll` calls;
   streams are never async.
+- `BuildDict` returns C's `ZDICT_finalizeDictionary` output. Non-zero
+  `Offsets` replace C's starting repcodes {1, 4, 8} (the history is
+  zero-padded in front up to the largest); `CompatV155` changes nothing, as
+  C's dictionaries already load in zstd v1.5.5.
 - `EncoderLevelFromZstd` maps a zstd level to the highest `EncoderLevel`
   whose C level (1, 3, 7, 11) does not exceed it.
 

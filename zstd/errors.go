@@ -178,6 +178,8 @@ var cErrorNames = map[int]string{
 	24: "Header of Literals' block doesn't respect format specification",
 	30: "Dictionary is corrupted",
 	32: "Dictionary mismatch",
+	34: "Cannot create Dictionary from provided samples",
+	64: "Allocation error : not enough memory",
 	70: "Destination buffer is too small",
 	72: "Src size is incorrect",
 	80: "Operation made no progress over multiple calls, due to output buffer being full",

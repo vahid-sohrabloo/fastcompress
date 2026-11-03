@@ -50,7 +50,7 @@ jobs:
           CGO_ENABLED: "1"
         run: go test -race -short ./...
       - name: API check
-        run: scripts/apicheck.sh --subset
+        run: scripts/apicheck.sh
 
   lint:
     runs-on: ubuntu-latest
