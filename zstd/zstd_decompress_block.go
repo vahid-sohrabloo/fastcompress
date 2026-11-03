@@ -991,6 +991,7 @@ func execSequenceEnd(out []byte, op, oend int, sequence seq,
 			return sequenceLength, 0
 		}
 		// span extDict & currentPrefixSegment
+		extDictSpans.Add(1)
 		length1 := len(extDict) - dmatch
 		copy(out[oLitEnd:oLitEnd+length1], extDict[dmatch:])
 		op = oLitEnd + length1
@@ -1040,6 +1041,7 @@ func execSequenceEndSplitLitBuffer(out []byte, op, oend, oendW int, sequence seq
 			return sequenceLength, 0
 		}
 		// span extDict & currentPrefixSegment
+		extDictSpans.Add(1)
 		length1 := len(extDict) - dmatch
 		copy(out[oLitEnd:oLitEnd+length1], extDict[dmatch:])
 		op = oLitEnd + length1
@@ -1094,6 +1096,7 @@ func execSequence(out []byte, op, oend int, sequence seq,
 			return sequenceLength, 0
 		}
 		// span extDict & currentPrefixSegment
+		extDictSpans.Add(1)
 		length1 := len(extDict) - dmatch
 		copy(out[oLitEnd:oLitEnd+length1], extDict[dmatch:])
 		op = oLitEnd + length1
@@ -1166,6 +1169,7 @@ func execSequenceSplitLitBuffer(out []byte, op, oend, oendW int, sequence seq,
 			return sequenceLength, 0
 		}
 		// span extDict & currentPrefixSegment
+		extDictSpans.Add(1)
 		length1 := len(extDict) - dmatch
 		copy(out[oLitEnd:oLitEnd+length1], extDict[dmatch:])
 		op = oLitEnd + length1
@@ -1422,6 +1426,11 @@ const (
 // seqLongBodyBlocks counts the blocks decoded by decompressSequencesLongBody
 // (test-only: it shows tests that a frame took the prefetch path).
 var seqLongBodyBlocks atomic.Int64
+
+// extDictSpans counts the matches that start in the extDict and end in
+// the current prefix (test-only: it shows tests that a frame crossed the
+// dictionary/prefix boundary).
+var extDictSpans atomic.Int64
 
 // decompressSequencesLongBody decodes the sequences ADVANCED_SEQS ahead of
 // their execution, to prefetch their matches (employed when a block has a
@@ -1706,6 +1715,7 @@ func (d *dctx) checkContinuity(dst []byte, dstSize int) {
 		len(dst) == d.previousDstEnd // C: dst == dctx->previousDstEnd
 	if !contiguous && dstSize > 0 {
 		d.extDict = d.prevDst[d.prefixStart:d.previousDstEnd] // C: dictEnd = previousDstEnd
+		d.dictEnd = d.extDict
 		d.virtualStart = len(dst) - len(d.extDict)
 		d.prefixStart = len(dst)
 		d.previousDstEnd = len(dst)

@@ -192,6 +192,16 @@
  *   "blockSize=" (return value, "err:<code>" on error), "blockOrigSize=" and
  *   "lastBlock=".
  *
+ * dictinfo             Dictionary queries on stdin (the dictionary), as
+ *   key=value lines: "dictID=" ZSTD_getDictID_fromDict; "ddict=" ok or fail,
+ *   whether ZSTD_createDDict_advanced (ZSTD_dlm_byCopy, ZSTD_dct_auto) accepts
+ *   it, and its ZSTD_getDictID_fromDDict as "ddictID=" when it does. When
+ *   stdin starts with the dictionary magic number and has at least 8 bytes:
+ *   "entropy=" the ZSTD_loadDEntropy result (the size of the header: magic,
+ *   ID and entropy tables; "err:<code>" on error) and, when it succeeds,
+ *   "rep=<r0>,<r1>,<r2>" (its repcodes) and "contentSize=" (stdin length
+ *   less the header).
+ *
  * skippable -variant V ZSTD_writeSkippableFrame(stdin, magicVariant V).
  *   Output: the skippable frame.
  *
@@ -228,6 +238,7 @@
 #include "zstd_compress_internal.h"
 #include "zstd_preSplit.h"
 #include "zdict.h"
+#include "../zstd/lib/decompress/zstd_decompress_internal.h" /* ZSTD_loadDEntropy */
 
 extern void (*ZSTD_crefHook)(const SeqStore_t*, size_t, int); /* seqdump.patch */
 
@@ -764,6 +775,31 @@ static int cmdFHeader(const unsigned char* src, size_t n) {
     return 0;
 }
 
+static int cmdDictInfo(const unsigned char* src, size_t n) {
+    printf("dictID=%u\n", ZSTD_getDictID_fromDict(src, n));
+    ZSTD_DDict* dd = ZSTD_createDDict_advanced(src, n, ZSTD_dlm_byCopy, ZSTD_dct_auto, ZSTD_defaultCMem);
+    if (dd) {
+        printf("ddict=ok\nddictID=%u\n", ZSTD_getDictID_fromDDict(dd));
+        ZSTD_freeDDict(dd);
+    } else {
+        printf("ddict=fail\n");
+    }
+    if (n >= 8 && MEM_readLE32(src) == ZSTD_MAGIC_DICTIONARY) {
+        ZSTD_entropyDTables_t* e = malloc(sizeof(*e));
+        if (!e) die("oom");
+        e->hufTable[0] = (HUF_DTable)((ZSTD_HUFFDTABLE_CAPACITY_LOG)*0x1000001); /* as ZSTD_initDDict_internal */
+        size_t r = ZSTD_loadDEntropy(e, src, n);
+        if (ZSTD_isError(r)) {
+            printf("entropy=err:%d\n", (int)ZSTD_getErrorCode(r));
+        } else {
+            printf("entropy=%zu\nrep=%u,%u,%u\ncontentSize=%zu\n", r,
+                   e->rep[0], e->rep[1], e->rep[2], n - r);
+        }
+        free(e);
+    }
+    return 0;
+}
+
 static int cmdSkippable(const Opts* o, const unsigned char* src, size_t n) {
     size_t cap = n + ZSTD_SKIPPABLEHEADERSIZE;
     unsigned char* dst = malloc(cap);
@@ -823,6 +859,7 @@ int main(int argc, char** argv) {
     else if (!strcmp(m, "decompress")) rc = cmdDecompress(&o, src, n);
     else if (!strcmp(m, "dstream"))  rc = cmdDStream(&o, src, n);
     else if (!strcmp(m, "fheader"))  rc = cmdFHeader(src, n);
+    else if (!strcmp(m, "dictinfo")) rc = cmdDictInfo(src, n);
     else if (!strcmp(m, "skippable")) rc = cmdSkippable(&o, src, n);
     else if (!strcmp(m, "finalize-dict")) rc = cmdFinalizeDict(&o, src, n);
     else { fprintf(stderr, "cref: unknown mode %s\n", m); return 2; }

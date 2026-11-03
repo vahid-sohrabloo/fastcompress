@@ -55,23 +55,18 @@ func checkSentinel(t *testing.T, what string, err, want error) {
 	}
 }
 
-// TestDecompressCref decodes every decode corpus entry without a
-// dictionary (the dictionary task covers those) and compares with Want, or
-// with C's error.
+// TestDecompressCref decodes every decode corpus entry, with its
+// dictionary if it has one, and compares with Want, or with C's error.
 func TestDecompressCref(t *testing.T) {
-	skipped := 0
 	for _, name := range creftest.FrameNames(t) {
-		if strings.HasPrefix(name, "dict/") || strings.HasPrefix(name, "dict-err/mismatch/") {
-			skipped++
-			continue
-		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := creftest.LoadFrame(t, name)
+			var dd *ddict
 			if f.Dict != nil {
-				t.Fatal("dictionary entry not skipped")
+				dd = mustDDict(t, f.Dict, f.RawDict)
 			}
-			got, err := dctxDecode(f.Data)
+			got, err := newDCtx().decompressMultiFrame(nil, f.Data, dd)
 			if f.CErr != "" {
 				if f.CErr != "Dictionary mismatch" {
 					t.Fatalf("unexpected C error %q in the corpus", f.CErr)
@@ -87,7 +82,6 @@ func TestDecompressCref(t *testing.T) {
 			}
 		})
 	}
-	t.Logf("%d dictionary entries left to the dictionary task", skipped)
 }
 
 // TestDecompressOurFrames decodes the encoder's output: every level with
@@ -153,8 +147,8 @@ func TestDecompressOurFrames(t *testing.T) {
 }
 
 // TestMaliciousCorpus decodes every malicious corpus case and checks the
-// error MANIFEST.txt records for it. Cases that need a dictionary are the
-// dictionary task's.
+// error MANIFEST.txt records for it, with the case's dictionary if it has
+// one.
 func TestMaliciousCorpus(t *testing.T) {
 	lines, _ := readManifest(t)
 	byFile := map[string]malCase{}
@@ -169,9 +163,11 @@ func TestMaliciousCorpus(t *testing.T) {
 			t.Fatalf("%s: not built by maliciousCases", file)
 		}
 		t.Run(c.name, func(t *testing.T) {
+			var dd *ddict
 			if c.dict != "" {
-				t.Skip("needs a dictionary (dictionary task)")
+				dd = mustDDict(t, readTestdata(t, c.dict), c.rawDict)
 			}
+			decode := func(src []byte) ([]byte, error) { return newDCtx().decompressMultiFrame(nil, src, dd) }
 			data := c.data
 			if !c.gen() {
 				var err error
@@ -183,10 +179,10 @@ func TestMaliciousCorpus(t *testing.T) {
 			if !ok && expect != "corrupt" {
 				t.Fatalf("unknown expectation %q", expect)
 			}
-			_, err := dctxDecode(data)
+			_, err := decode(data)
 			checkSentinel(t, c.name, err, want)
 			if c.control != nil {
-				if _, err := dctxDecode(c.control); err != nil {
+				if _, err := decode(c.control); err != nil {
 					t.Errorf("control variant: %v", err)
 				}
 			}
@@ -619,7 +615,7 @@ func TestDecompressGrowBlockOverflow(t *testing.T) {
 }
 
 // TestDecompressFrameGrowExtDict: a frame decoded after a raw-content
-// dictionary (set up as ZSTD_refDictContent does) into a buffer that
+// dictionary (set up by refDictContent) into a buffer that
 // decompressFrame must grow several times: checkContinuity, given the
 // frame's output space, makes the dictionary the extDict, and growing keeps
 // it (and every offset) valid. Task 10's dictionaries take this path.
@@ -641,9 +637,7 @@ func TestDecompressFrameGrowExtDict(t *testing.T) {
 		for _, initial := range []int{0, 1, 1000} {
 			d := newDCtx()
 			d.decompressBegin()
-			// C: ZSTD_refDictContent
-			d.prevDst = f.Dict
-			d.prefixStart, d.virtualStart, d.previousDstEnd = 0, 0, len(f.Dict)
+			d.refDictContent(f.Dict)
 			buf := make([]byte, 0, initial)
 			d.checkContinuity(buf, len(f.Want))
 			if len(d.extDict) != len(f.Dict) {
@@ -662,14 +656,15 @@ func TestDecompressFrameGrowExtDict(t *testing.T) {
 	t.Logf("%d frames", nFrames)
 }
 
-// truncCheck decodes every prefix of data (the parts concatenated) and
+// truncCheck decodes every prefix of data (the parts concatenated, with
+// the dictionary dd, nil for none) and
 // checks that the prefixes ending at a part boundary decode to the
 // concatenated wants, and every other one fails with io.ErrUnexpectedEOF.
 // With testing.Short(), inputs over 4 KiB are cut at every length only
 // within 2 KiB of either end and of a part boundary, and at every 61st
 // length elsewhere (each cut decodes everything before it, so every
 // length costs time quadratic in the input).
-func truncCheck(t *testing.T, parts, wants [][]byte) {
+func truncCheck(t *testing.T, parts, wants [][]byte, dd *ddict) {
 	t.Helper()
 	data := bytes.Join(parts, nil)
 	complete := map[int][]byte{0: {}}
@@ -696,7 +691,7 @@ func truncCheck(t *testing.T, parts, wants [][]byte) {
 		if !near(n) {
 			continue
 		}
-		got, err := d.decompressMultiFrame(buf[:0], data[:n], nil)
+		got, err := d.decompressMultiFrame(buf[:0], data[:n], dd)
 		if w, ok := complete[n]; ok {
 			if err != nil || !bytes.Equal(got, w) {
 				t.Fatalf("cut at part boundary %d: %v", n, err)
@@ -748,7 +743,7 @@ func TestTruncationsCorpus(t *testing.T) {
 			if !bytes.Equal(bytes.Join(wants, nil), f.Want) {
 				t.Fatal("frames do not decode to Want")
 			}
-			truncCheck(t, parts, wants)
+			truncCheck(t, parts, wants, nil)
 			cuts := map[int]bool{1: true, len(f.Data) - 1: true}
 			pos := 0
 			for _, p := range parts {

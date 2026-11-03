@@ -131,6 +131,10 @@ type dctx struct {
 	prefixStart    int    // start of current segment
 	virtualStart   int    // virtual start of previous segment if it was just before current one
 	extDict        []byte // the previous segment (C: virtualStart..dictEnd)
+	// dictEnd ends where C's dictEnd points (nil: NULL); it differs from
+	// extDict's end only after copyDDictParameters. Only ddictIsCold reads
+	// it.
+	dictEnd []byte
 	// prevDst is the buffer previousDstEnd and prefixStart index, up to its
 	// capacity; nil before the first output. C compares pointers to detect
 	// continuity; Go compares the buffer's start and the offset.
@@ -142,8 +146,11 @@ type dctx struct {
 	fseEntropy           bool // C: U32 fseEntropy
 	isFrameDecompression bool
 	validateChecksum     bool   // C: int validateChecksum
-	dictID               uint32 // C: U32 dictID; the dictionary task sets it
-	ddictIsCold          bool   // C: int ddictIsCold; the dictionary task sets it
+	dictID               uint32 // C: U32 dictID
+	ddictIsCold          bool   // C: int ddictIsCold
+	// ddicts, when set, picks each frame's dictionary by its ID (C:
+	// ddictSet with ZSTD_d_refMultipleDDicts).
+	ddicts *ddictSet
 
 	// parameters
 	maxWindowSize       uint64 // C: size_t maxWindowSize

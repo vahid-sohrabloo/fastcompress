@@ -341,6 +341,7 @@ func (d *dctx) decompressBegin() {
 	d.prefixStart = 0
 	d.virtualStart = 0
 	d.extDict = nil
+	d.dictEnd = nil
 	d.prevDst = nil
 	d.entropy.hufTable.Init(hufDTableCapacityLog) // C: hufTable[0] = ZSTD_HUFFDTABLE_CAPACITY_LOG * 0x1000001
 	d.litEntropy, d.fseEntropy = false, false
@@ -370,10 +371,6 @@ const (
 	frameTrustRatio = 64
 	frameGuessRatio = 4
 )
-
-// ddict is a digested decoder dictionary. C: zstd_ddict.c:ZSTD_DDict.
-// Placeholder: the dictionary task gives it its fields, in zstd_ddict.go.
-type ddict struct{}
 
 // newDCtx returns a decompression context with default parameters.
 // C: zstd_decompress.c:ZSTD_createDCtx (ZSTD_initDCtx_internal)
@@ -415,8 +412,9 @@ func (d *dctx) decodeFrameHeader(src []byte) dErr {
 	if need > 0 {
 		return dErrSrcSizeWrong // headerSize too small
 	}
-	// C: ZSTD_DCtx_selectFrameDDict when referencing multiple DDicts (the
-	// dictionary task).
+	// C selects the frame's DDict here (ZSTD_DCtx_selectFrameDDict) when
+	// referencing multiple DDicts; decompressFrames does that before
+	// beginning the frame.
 	if d.fParams.dictID != 0 && d.dictID != d.fParams.dictID {
 		return dErrDictionaryWrong
 	}
@@ -626,16 +624,27 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 			return dst, dErrPrefixUnknown
 		}
 
-		// C: ZSTD_decompressBegin_usingDDict when dd is set (the
-		// dictionary task).
-		d.decompressBegin()
+		// C: ZSTD_decompressBegin_usingDDict. With a set of dictionaries
+		// the frame's ID picks one first: C does that in
+		// ZSTD_decodeFrameHeader, which streaming C runs before beginning
+		// the frame with the chosen DDict (one-shot C begins with the DDict
+		// referenced last, then checks the ID against the chosen one).
+		var zfh frameHeader
+		need, he := getFrameHeaderAdvanced(&zfh, src)
+		headerOK := he == 0 && need == 0
+		fdd := dd
+		if d.ddicts != nil && headerOK {
+			fdd = d.ddicts.selectFrameDDict(zfh.dictID)
+		}
+		d.decompressBeginUsingDDict(fdd)
 
 		// Go: the allocation rule. The frame's output space: its frame
 		// content size, but at most what its blocks can regenerate
 		// (ZSTD_decompressBound's nbBlocks × blockSizeMax; the blocks
 		// before the walk failed when it did) and the memory left. A
 		// frame whose header fails, or declares a window too large, gets
-		// none: decompressFrame reports that before any output. Memory is
+		// none: decompressFrame reports that before any output, as it does
+		// a dictionary ID that is not the dictionary's. Memory is
 		// reserved up front for a plausible frame content size (at most
 		// frameTrustRatio times the frame's compressed size); otherwise for
 		// frameGuessRatio times the compressed size, at least
@@ -643,8 +652,7 @@ func (d *dctx) decompressFrames(dst, src []byte, dd *ddict) ([]byte, dErr) {
 		limit := min(d.maxMemory-min(d.maxMemory, uint64(len(dst)-start)), uint64(math.MaxInt-len(dst)))
 		var frameCap, reserve uint64
 		byFCS, byLimit := false, false
-		var zfh frameHeader
-		if need, e := getFrameHeaderAdvanced(&zfh, src); e == 0 && need == 0 &&
+		if headerOK && (zfh.dictID == 0 || zfh.dictID == d.dictID) &&
 			max(zfh.windowSize, 1<<windowLogAbsoluteMin) <= d.maxWindowSize {
 			fsi := findFrameSizeInfo(src)
 			frameCap = uint64(fsi.nbBlocks) * uint64(zfh.blockSizeMax)

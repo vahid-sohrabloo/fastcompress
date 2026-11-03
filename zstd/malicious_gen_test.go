@@ -1003,17 +1003,19 @@ func TestTruncationsCRef(t *testing.T) {
 			}
 			stream := f.c
 			stream.stream = true
-			if f.c.dict == "" { // the dictionary task covers dictid
-				var wants [][]byte
-				for _, p := range f.parts {
-					w, err := dctxDecode(p)
-					if err != nil {
-						t.Fatal(err)
-					}
-					wants = append(wants, w)
-				}
-				truncCheck(t, f.parts, wants)
+			var dd *ddict
+			if f.c.dict != "" {
+				dd = mustDDict(t, readTestdata(t, f.c.dict), f.c.rawDict)
 			}
+			var wants [][]byte
+			for _, p := range f.parts {
+				w, err := newDCtx().decompressMultiFrame(nil, p, dd)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wants = append(wants, w)
+			}
+			truncCheck(t, f.parts, wants, dd)
 			names := map[string]int{}
 			for n := 1; n < len(data); n++ {
 				cut := data[:n]

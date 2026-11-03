@@ -480,11 +480,24 @@ func DStreamCRef(t testing.TB, frame []byte, args ...string) ([]byte, *CError) {
 // FHeaderCRef returns the key=value lines of `cref fheader` on in.
 func FHeaderCRef(t testing.TB, in []byte) map[string]string {
 	t.Helper()
+	return keyValues(t, "fheader", in)
+}
+
+// DictInfoCRef returns the key=value lines of `cref dictinfo` on the
+// dictionary dict (ZSTD_getDictID_fromDict, ZSTD_createDDict_advanced and
+// ZSTD_loadDEntropy).
+func DictInfoCRef(t testing.TB, dict []byte) map[string]string {
+	t.Helper()
+	return keyValues(t, "dictinfo", dict)
+}
+
+func keyValues(t testing.TB, mode string, in []byte) map[string]string {
+	t.Helper()
 	m := map[string]string{}
-	for _, l := range strings.Split(strings.TrimSpace(string(Run(t, in, "fheader"))), "\n") {
+	for _, l := range strings.Split(strings.TrimSpace(string(Run(t, in, mode))), "\n") {
 		k, v, ok := strings.Cut(l, "=")
 		if !ok {
-			t.Fatalf("cref fheader: bad line %q", l)
+			t.Fatalf("cref %s: bad line %q", mode, l)
 		}
 		m[k] = v
 	}
