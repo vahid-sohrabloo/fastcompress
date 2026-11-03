@@ -329,6 +329,25 @@ func TestDecompressStreamBlockRoomCref(t *testing.T) {
 	}
 }
 
+// TestDecompressStreamResetDicts: reset(false) drops the dictionaries,
+// the default one (C: ZSTD_clearDict) and the set (C: refMultipleDDicts
+// back to ZSTD_rmd_refSingleDDict); reset(true) keeps them.
+func TestDecompressStreamResetDicts(t *testing.T) {
+	dd := mustDDict(t, readTestdata(t, "train.dict"), false)
+	set := newDDictSet()
+	set.add(dd)
+	d := newDCtx()
+	d.ddict, d.ddicts = dd, set
+	d.reset(true)
+	if d.ddict != dd || d.ddicts != set {
+		t.Fatal("reset(true) dropped a dictionary")
+	}
+	d.reset(false)
+	if d.ddict != nil || d.ddicts != nil {
+		t.Fatal("reset(false) kept a dictionary")
+	}
+}
+
 // TestDecompressStreamOversized pins C's buffer shrinking: after a frame
 // with a 1 MiB window, frames with a 1 KiB window keep its buffer sizes
 // until the 128th (ZSTD_WORKSPACETOOLARGE_MAXDURATION) in a row for which

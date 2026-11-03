@@ -391,7 +391,8 @@ func (d *dctx) reset(sessionOnly bool) {
 	d.noForwardProgress = 0
 	d.isFrameDecompression = true
 	if !sessionOnly {
-		d.ddict = nil // C: ZSTD_clearDict
+		d.ddict = nil  // C: ZSTD_clearDict
+		d.ddicts = nil // C: refMultipleDDicts = ZSTD_rmd_refSingleDDict
 		// C: ZSTD_DCtx_resetParameters
 		d.maxWindowSize = defaultMaxWindowSize
 		d.forceIgnoreChecksum = false
