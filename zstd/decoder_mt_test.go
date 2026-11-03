@@ -9,7 +9,9 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -569,6 +571,146 @@ func TestStreamStopBlockedReader(t *testing.T) {
 	}
 }
 
+// TestStreamResetSameReader pins re-review R1: Reset with the reader a
+// stopped generation's S1 is still reading waits for that Read to return,
+// so the reader is never read by two goroutines at once (-race reports
+// the blockingReader's state otherwise); Reset to another reader does not
+// wait (TestStreamStopBlockedReader).
+func TestStreamResetSameReader(t *testing.T) {
+	frame, _ := mtTestStream(t, 1<<20, 1<<20)
+	base := runtime.NumGoroutine()
+	r := &blockingReader{b: frame, first: len(frame) / 2, release: make(chan struct{}), blocked: make(chan struct{})}
+	d, err := NewReader(r, WithDecoderConcurrency(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Read(make([]byte, 100)); err != nil {
+		t.Fatal(err)
+	}
+	<-r.blocked
+	done := make(chan error, 1)
+	go func() { done <- d.Reset(r) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Reset with the same reader returned (%v) while its old Read was in progress", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(r.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// The new generation reads the rest of r (the old Read's bytes were
+	// dropped, so it fails to decode); it must not race with the old one.
+	p := make([]byte, 4096)
+	for range 10 {
+		if _, err := d.Read(p); err != nil {
+			break
+		}
+	}
+	d.Close()
+	waitGoroutines(t, "same reader", base)
+}
+
+// slowReader returns its first fast bytes in one Read, then one byte per
+// Read after a millisecond, counting the Reads made once stopped is set.
+type slowReader struct {
+	b       []byte
+	fast    int
+	pos     int
+	stopped atomic.Bool
+	after   atomic.Int64
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if r.stopped.Load() {
+		r.after.Add(1)
+	}
+	if r.pos >= len(r.b) {
+		return 0, io.EOF
+	}
+	if r.pos < r.fast {
+		n := copy(p, r.b[r.pos:r.fast])
+		r.pos += n
+		return n, nil
+	}
+	time.Sleep(time.Millisecond)
+	p[0] = r.b[r.pos]
+	r.pos++
+	return 1, nil
+}
+
+// TestStreamStoppedNoRead pins re-review R2: once a pipelined stream is
+// stopped, its S1 finishes the Read in progress and makes no other, even
+// when that read completed no unit (one byte of a large block).
+func TestStreamStoppedNoRead(t *testing.T) {
+	small := newTestEncoder(t).EncodeAll([]byte("a small first frame"), nil)
+	frame, _ := mtTestStream(t, 1<<20, 1<<20)
+	base := runtime.NumGoroutine()
+	r := &slowReader{b: append(small, frame...), fast: len(small)}
+	d, err := NewReader(r, WithDecoderConcurrency(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := d.Read(make([]byte, 100)); err != nil || n == 0 {
+		t.Fatal(n, err)
+	}
+	time.Sleep(10 * time.Millisecond) // S1 reads the large frame byte by byte
+	d.Close()
+	r.stopped.Store(true)
+	waitGoroutines(t, "stopped", base)
+	time.Sleep(50 * time.Millisecond)
+	if n := r.after.Load(); n > 1 {
+		t.Fatalf("%d Reads after the stream stopped", n)
+	}
+}
+
+// goexitReader returns its data in reads of up to step bytes and calls
+// runtime.Goexit once at bytes have been read.
+type goexitReader struct {
+	b        []byte
+	step, at int
+	pos      int
+}
+
+func (r *goexitReader) Read(p []byte) (int, error) {
+	if r.pos >= r.at {
+		runtime.Goexit()
+	}
+	n := copy(p[:min(len(p), r.step, r.at-r.pos)], r.b[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+// TestStreamReaderGoexit pins re-review R4: a reader that calls
+// runtime.Goexit in S1 ends the pipelined stream with an error (naming it,
+// with S1's stack) after the output before it, instead of leaving Read
+// waiting for S1's end forever.
+func TestStreamReaderGoexit(t *testing.T) {
+	frame, text := mtTestStream(t, 1<<20, 1<<20)
+	base := runtime.NumGoroutine()
+	d := newTestDecoder(t, WithDecoderConcurrency(4))
+	res := make(chan error, 1)
+	var got []byte
+	go func() {
+		var err error
+		got, err = readAll(t, d, &goexitReader{b: frame, step: 5000, at: len(frame) / 2}, fixedSize(4096), 0)
+		res <- err
+	}()
+	select {
+	case err := <-res:
+		if err == nil || !strings.Contains(err.Error(), "Goexit") || !strings.Contains(err.Error(), "framer") {
+			t.Fatalf("%v (want the Goexit error with S1's stack)", err)
+		}
+		if !bytes.HasPrefix(text, got) || len(got) == 0 {
+			t.Fatalf("output: %d bytes, not a prefix of the text", len(got))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read waits forever after the reader's Goexit")
+	}
+	d.Close()
+	waitGoroutines(t, "goexit", base)
+}
+
 // panicReader returns its data in reads of up to step bytes and panics
 // with its value once at bytes have been read.
 type panicReader struct {
@@ -624,8 +766,8 @@ func TestStreamReaderPanic(t *testing.T) {
 				go func() { _, err := d.Read(p); res <- err }()
 				select {
 				case err := <-res:
-					if err == nil {
-						t.Fatalf("at %d: Read after the panic: no error", at)
+					if err == nil || !strings.Contains(err.Error(), "io.Reader panicked") || !strings.Contains(err.Error(), "framer") {
+						t.Fatalf("at %d: Read after the panic: %v (want the panic and S1's stack)", at, err)
 					}
 				case <-time.After(5 * time.Second):
 					t.Fatalf("at %d: Read after the panic blocks", at)

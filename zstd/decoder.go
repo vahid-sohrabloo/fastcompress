@@ -96,6 +96,8 @@ type decStream struct {
 	pipe     *pipeline
 	edc      *dctx
 	escratch []byte
+	// Stopped pipelines' S1s that may still be in a Read (waitOldReader).
+	lingering []lingeringS1
 }
 
 // errDecoderZero is returned when a Decoder was not created by NewReader.
@@ -206,7 +208,9 @@ func (d *Decoder) DecodeAll(input, dst []byte) ([]byte, error) {
 // A pipelined stream (WithDecoderConcurrency) is stopped without waiting
 // for the previous reader: a Read of it in progress (or starting) when the
 // stream stops finishes in the background, its bytes are dropped, and no
-// further Read is made.
+// further Read is made. Only when r is that same reader (equal interface
+// values) does Reset wait for that Read to return, so that r.Read is never
+// called by two goroutines at once.
 //
 // C: ZSTD_DCtx_reset(ZSTD_reset_session_only), as a stream can be reused
 // after an error. A reader with Bytes and Len (see WithDecodeBuffersBelow)
@@ -221,7 +225,8 @@ func (d *Decoder) Reset(r io.Reader) error {
 	}
 	d.stopPipeline()
 	s := &d.s
-	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0], edc: s.edc, escratch: s.escratch}
+	s.waitOldReader(r)
+	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0], edc: s.edc, escratch: s.escratch, lingering: s.lingering}
 	if r == nil {
 		return nil
 	}

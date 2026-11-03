@@ -3,7 +3,10 @@ package zstd
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"reflect"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 )
@@ -46,6 +49,8 @@ type pipeline struct {
 	blocks chan *blockUnit // S2 → S3
 	wg     sync.WaitGroup  // S2
 	cur    *blockUnit      // S3: the unit s.in holds
+	r      io.Reader       // S1's reader
+	s1done chan struct{}   // closed when S1 returns
 }
 
 // maxReadAhead caps the units queued between S1 and S2: with two compute
@@ -120,7 +125,9 @@ func putBlock(b *decodedBlock) {
 // scratch, and the two decoded blocks (S2's and S3's), each with at most
 // blockSizeMax literals and blockSizeMax/3 sequences (a block with more
 // goes to S3 undecoded). A stopped generation's S1, until its Read
-// returns, adds its input buffer and one unit.
+// returns, adds its input buffer, the unit in its hand and up to
+// min(n, maxReadAhead) units it may still push into its (abandoned)
+// queue: send picks at random between a free queue slot and done.
 func pipelineMemBound(n int) int {
 	const pseqSize = 8 + intSize/8
 	const block = blockSizeMax + wildcopyOverlength + blockSizeMax/3*pseqSize
@@ -135,6 +142,8 @@ func (d *Decoder) startPipeline() {
 	s := &d.s
 	p := &pipeline{
 		done:   make(chan struct{}),
+		s1done: make(chan struct{}),
+		r:      s.r,
 		units:  make(chan *blockUnit, min(d.o.concurrent, maxReadAhead)),
 		blocks: make(chan *blockUnit),
 	}
@@ -152,13 +161,15 @@ func (d *Decoder) startPipeline() {
 }
 
 // stopPipeline stops the stream's pipeline, if it runs: it waits for S2
-// to return, not for S1 (see pipeline).
+// to return, not for S1 (see pipeline), which it keeps in s.lingering for
+// Reset (see waitOldReader).
 func (d *Decoder) stopPipeline() {
 	s := &d.s
 	p := s.pipe
 	if p == nil {
 		return
 	}
+	s.lingering = append(s.lingering, lingeringS1{p.r, p.s1done})
 	close(p.done)
 	p.wg.Wait()
 	for n := len(p.units); n > 0; n-- {
@@ -186,6 +197,41 @@ func (d *Decoder) stopPipeline() {
 // asked for input) whenever it has input and room for output.
 var errPipelineInput = errors.New("zstd: internal error: stream input left before a pipeline unit")
 
+// lingeringS1 is the S1 of a stopped generation, which may still be in a
+// Read of r.
+type lingeringS1 struct {
+	r    io.Reader
+	done chan struct{} // closed when S1 returns
+}
+
+// waitOldReader waits for the stopped generations' S1s that read r to
+// return, so that two goroutines never call r.Read at once (Reset with the
+// same reader). It does not wait for those of other readers: they linger
+// until their Read returns. It forgets those that have returned.
+func (s *decStream) waitOldReader(r io.Reader) {
+	keep := s.lingering[:0]
+	for _, l := range s.lingering {
+		if r != nil && sameReader(l.r, r) {
+			<-l.done
+			continue
+		}
+		select {
+		case <-l.done:
+		default:
+			keep = append(keep, l)
+		}
+	}
+	clear(s.lingering[len(keep):])
+	s.lingering = keep
+}
+
+// sameReader reports whether a and b are the same reader: equal interface
+// values (false when their dynamic type is not comparable).
+func sameReader(a, b io.Reader) bool {
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	return ta == tb && ta != nil && ta.Comparable() && a == b
+}
+
 // readUnit is readInput for a pipelined stream: it makes the next unit
 // the input, or sets eof, or returns the io.Reader's error (S1 read it as
 // readInput does). A panic of the io.Reader's Read is raised again here.
@@ -203,7 +249,7 @@ func (s *decStream) readUnit() error {
 		err, panicked, pv := u.err, u.panicked, u.panicVal
 		putUnit(u)
 		if panicked {
-			s.err = errReaderPanicked // sticky; fill stops the pipeline
+			s.err = err // sticky (with S1's stack); fill stops the pipeline
 			panic(pv)
 		}
 		if err == nil {
@@ -219,10 +265,6 @@ func (s *decStream) readUnit() error {
 	s.inPos, s.inEnd = 0, len(s.in)
 	return nil
 }
-
-// errReaderPanicked is the sticky error of a stream whose io.Reader
-// panicked (the panic itself goes to the caller of Read or WriteTo).
-var errReaderPanicked = errors.New("zstd: io.Reader panicked")
 
 // pipeExec is the S3 state of a stream context a pipeline feeds.
 type pipeExec struct {
@@ -364,17 +406,29 @@ const (
 
 // run cuts the input into units and sends them to S2, then a unitEnd.
 func (f *framer) run() {
+	sentEnd := false
 	defer func() {
+		defer close(f.p.s1done)
 		// Go: a panic of the io.Reader's Read (the only code here that is
 		// not the decoder's) is carried to S3, which raises it on the
 		// caller's goroutine, where n == 1 raises it. The one recover() of
 		// the decoder files (scripts/decodercheck.sh allows it here only);
 		// a decoder bug panicking in cut() is raised there too, not hidden.
-		if r := recover(); r != nil {
-			end := getUnit(unitEnd, nil)
-			end.panicked, end.panicVal = true, r
-			f.send(end)
+		r := recover()
+		if sentEnd {
+			return
 		}
+		// Every exit sends the end, so S3 never waits for one: a panic,
+		// or runtime.Goexit in the reader (recover gives nil), which
+		// becomes an error.
+		end := getUnit(unitEnd, nil)
+		if r != nil {
+			end.panicked, end.panicVal = true, r
+			end.err = fmt.Errorf("zstd: io.Reader panicked: %v\n%s", r, debug.Stack())
+		} else {
+			end.err = fmt.Errorf("zstd: io.Reader's Read exited its goroutine (runtime.Goexit)\n%s", debug.Stack())
+		}
+		f.send(end)
 	}()
 	f.buf = make([]byte, 0, 2*dStreamInSize)
 	for {
@@ -384,6 +438,7 @@ func (f *framer) run() {
 				break
 			}
 			if !f.send(u) {
+				sentEnd = true // stopped: no one waits for the end
 				return
 			}
 		}
@@ -395,6 +450,7 @@ func (f *framer) run() {
 				u := getUnit(unitBytes, f.buf[f.pos:f.pos+n])
 				f.pos += n
 				if !f.send(u) {
+					sentEnd = true // stopped: no one waits for the end
 					return
 				}
 			}
@@ -403,6 +459,7 @@ func (f *framer) run() {
 		}
 		end := getUnit(unitEnd, nil)
 		end.err = err
+		sentEnd = true
 		f.send(end)
 		return
 	}
