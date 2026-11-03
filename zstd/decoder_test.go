@@ -1235,6 +1235,7 @@ func TestErrorsIs(t *testing.T) {
 			checkSentinel(t, "WriteTo", err, c.want)
 		})
 	}
+	t.Run("Snappy", testSnappyErrorsIs)
 	t.Run("ErrDecoderSizeExceeded", func(t *testing.T) {
 		w1k := newTestEncoder(t, WithWindowSize(MinWindowSize)).EncodeAll(malText(5000), nil)
 		d := newTestDecoder(t, WithDecoderMaxMemory(4999))
