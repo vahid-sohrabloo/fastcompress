@@ -69,6 +69,9 @@ var crefTests = []struct {
 	{"ConcurrentBlocks", TestConcurrentBlocks},
 	{"AsmEquivParams", TestAsmEquivParams},
 	{"RowDictMinMatch3Cref", TestRowDictMinMatch3Cref},
+	{"DecompressCref", TestDecompressCref},
+	{"DecompressDictCref", TestDecompressDictCref},
+	{"DecompressStreamCref", TestDecompressStreamCref},
 }
 
 // TestAsmEquiv runs every C-reference test with the assembly routines off,
