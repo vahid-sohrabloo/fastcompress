@@ -13,11 +13,21 @@
 // -iters counted windows and at least -secs seconds of timed passes (compare.sh
 // passes -secs equal to zstd's -i).
 //
+// With -mode d, gobench measures decompression instead: each block is
+// compressed once as above, decoded once and checked against the input, and
+// the timed pass is one DecodeAll per block on one Decoder
+// (WithDecoderConcurrency(1)) into a reused output buffer. benchzstd.c's
+// local_defaultDecompress calls ZSTD_decompressStream with the whole frame
+// and a full-size output buffer, which takes C's single-pass shortcut
+// (ZSTD_decompressFrame straight into dst): the same work as DecodeAll.
+//
 // Output (stdout, one line): "<MB/s> <ratio>", with MB/s = 1e6 bytes/s of
-// input and ratio = input/compressed, with the number of decimals zstd prints.
+// input (decoded output in -mode d) and ratio = input/compressed, with the
+// number of decimals zstd prints.
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -28,6 +38,7 @@ import (
 )
 
 func main() {
+	mode := flag.String("mode", "c", "c (compression) or d (decompression)")
 	level := flag.Int("level", 1, "C compression level: 1, 3, 7 or 11")
 	block := flag.Int("block", 0, "independent block size in bytes (0 = whole file)")
 	iters := flag.Int("iters", 1, "minimum number of counted ~1 s windows")
@@ -36,16 +47,20 @@ func main() {
 	hugePages := flag.Bool("hugepages", false, "back the large match tables with huge pages (WithHugePages)")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: gobench [-level N] [-block N] [-iters N] [-secs S] [-cpuprofile F] [-hugepages] FILE")
+		fmt.Fprintln(os.Stderr, "usage: gobench [-mode c|d] [-level N] [-block N] [-iters N] [-secs S] [-cpuprofile F] [-hugepages] FILE")
 		os.Exit(2)
 	}
-	if err := run(*level, *block, *iters, *secs, *cpuprofile, *hugePages, flag.Arg(0)); err != nil {
+	if *mode != "c" && *mode != "d" {
+		fmt.Fprintf(os.Stderr, "gobench: unknown -mode %q (want c or d)\n", *mode)
+		os.Exit(2)
+	}
+	if err := run(*mode == "d", *level, *block, *iters, *secs, *cpuprofile, *hugePages, flag.Arg(0)); err != nil {
 		fmt.Fprintln(os.Stderr, "gobench:", err)
 		os.Exit(1)
 	}
 }
 
-func run(level, block, iters int, secs float64, cpuprofile string, hugePages bool, path string) (err error) {
+func run(decode bool, level, block, iters int, secs float64, cpuprofile string, hugePages bool, path string) (err error) {
 	var l zstd.EncoderLevel
 	switch level {
 	case 1:
@@ -91,6 +106,33 @@ func run(level, block, iters int, secs float64, cpuprofile string, hugePages boo
 	}
 
 	csize := pass() // untimed warm-up: allocates the pooled cctx, faults in pages
+	if decode {
+		frames := make([][]byte, 0, (len(src)+block-1)/block)
+		for off := 0; off < len(src); off += block {
+			frames = append(frames, enc.EncodeAll(src[off:min(off+block, len(src))], nil))
+		}
+		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return err
+		}
+		defer dec.Close()
+		out := make([]byte, 0, block)
+		for i, fr := range frames {
+			got, err := dec.DecodeAll(fr, out[:0])
+			if err != nil {
+				return fmt.Errorf("block %d: %w", i, err)
+			}
+			if !bytes.Equal(got, src[i*block:min((i+1)*block, len(src))]) {
+				return fmt.Errorf("block %d: decoded output differs from the input", i)
+			}
+		}
+		pass = func() int {
+			for _, fr := range frames {
+				out, _ = dec.DecodeAll(fr, out[:0])
+			}
+			return 0
+		}
+	}
 	if cpuprofile != "" {
 		f, err := os.Create(cpuprofile)
 		if err != nil {

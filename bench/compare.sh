@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compare gobench (this port) against `zstd -b<level>` from C zstd v1.5.7.
 #
-#   bench/compare.sh [-l "1 3 7 11"] [-f "FILE[:BLOCK]..."] [-i SECS] [-g SECS] [-n RUNS] [-hp "7 11"] -label NAME
+#   bench/compare.sh [-mode c|d] [-l "1 3 7 11"] [-f "FILE[:BLOCK]..."] [-i SECS] [-g SECS] [-n RUNS] [-hp "7 11"] -label NAME
 #
 # Writes bench/results/<date>-<label>.md. Each row: taskset -c $CPU, RUNS
 # (default 3) interleaved C/Go runs, median speed reported. Both sides report
@@ -11,6 +11,8 @@
 # flagged "MISMATCH" (the port must be byte-identical, so ratios must be equal).
 # -hp LEVELS adds, for those levels, a third interleaved run per round with
 # gobench -hugepages (WithHugePages) and two more columns; "-" elsewhere.
+# -mode d compares decompression speed (zstd -b's third number, gobench -mode d)
+# instead of compression (-mode c, the default).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,6 +23,7 @@ CSECS=5   # zstd -i: seconds per benchmark pass (it times compression and decomp
 GSECS=5   # gobench -secs: minimum seconds of timed passes (same budget as zstd -i)
 RUNS=3
 HPLEVELS=""
+MODE=c
 CPU=${CPU:-2}
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,11 +33,14 @@ while [ $# -gt 0 ]; do
     -g) GSECS=$2; shift 2 ;;
     -n) RUNS=$2; shift 2 ;;
     -hp) HPLEVELS=$2; shift 2 ;;
+    -mode) MODE=$2; shift 2 ;;
     -label) LABEL=$2; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$LABEL" ] || { echo "usage: $0 [-l \"1 3\"] [-f FILES] [-i SECS] [-g SECS] [-n RUNS] [-hp \"7 11\"] -label NAME" >&2; exit 2; }
+case "$MODE" in c|d) ;; *) echo "-mode must be c or d" >&2; exit 2 ;; esac
+[ "$MODE" = c ] || [ -z "$HPLEVELS" ] || { echo "-hp applies to -mode c only" >&2; exit 2; }
+[ -n "$LABEL" ] || { echo "usage: $0 [-mode c|d] [-l \"1 3\"] [-f FILES] [-i SECS] [-g SECS] [-n RUNS] [-hp \"7 11\"] -label NAME" >&2; exit 2; }
 
 ZSTD=ref/zstd/programs/zstd
 [ -x "$ZSTD" ] || { echo "missing $ZSTD; run ref/fetch.sh" >&2; exit 1; }
@@ -59,7 +65,8 @@ fi
 
 # C: `zstd -b` redraws its progress line with carriage returns; the final
 # result is the last line containing "(xRATIO), C MB/s, D MB/s". Convert CR to
-# LF and take that line's ratio and compression speed. -qq would print nothing.
+# LF and take that line's ratio and compression speed (-mode c) or
+# decompression speed (-mode d). -qq would print nothing.
 # -T1 is required: without it the CLI benchmarks with worker threads (even under
 # taskset), whose multi-job output differs from ZSTD_compress2 single-threaded
 # (different size, and not what this port reproduces).
@@ -67,10 +74,12 @@ c_bench() { # level block file -> "MBps xRatio"
   local args=(-b"$1" -i"$CSECS" -T1)
   [ "$2" != 0 ] && args+=(-B"$2")
   taskset -c "$CPU" "$ZSTD" "${args[@]}" "$3" 2>&1 | tr '\r' '\n' \
-    | sed -nE 's/.*\(x([0-9.]+)\), *([0-9.]+) MB\/s, .*/\2 \1/p' | tail -1
+    | sed -nE 's/.*\(x([0-9.]+)\), *([0-9.]+) MB\/s, *([0-9.]+) MB\/s.*/\2 \3 \1/p' | tail -1 \
+    | awk -v m="$MODE" '{print (m == "d" ? $2 : $1), $3}'
+
 }
 go_bench() { # level block file [flags] -> "MBps ratio" ; non-zero exit on failure
-  taskset -c "$CPU" "$BIN/gobench" -level "$1" -block "$2" -secs "$GSECS" "${@:4}" "$3"
+  taskset -c "$CPU" "$BIN/gobench" -mode "$MODE" -level "$1" -block "$2" -secs "$GSECS" "${@:4}" "$3"
 }
 median() { sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
 
@@ -81,9 +90,16 @@ mkdir -p bench/results
   echo
   echo "- date: $(date -Is); host: $(uname -n); cpu: $(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //'), pinned to CPU $CPU"
   echo "- C: $($ZSTD -V | head -1); \`zstd -b<L> -i$CSECS [-B<block>]\`; Go: \`gobench -secs $GSECS\`; both report the best ~1 s window (mean per pass), CRC off"
-  echo "- median of $RUNS interleaved runs per cell; MB/s = 1e6 bytes/s of input (compression only)"
+  if [ "$MODE" = d ]; then
+    echo "- median of $RUNS interleaved runs per cell; MB/s = 1e6 bytes/s of decoded output (decompression only; Go: one DecodeAll per block, WithDecoderConcurrency(1))"
+  else
+    echo "- median of $RUNS interleaved runs per cell; MB/s = 1e6 bytes/s of input (compression only)"
+  fi
   echo
-  if [ -n "$HPLEVELS" ]; then
+  if [ "$MODE" = d ]; then
+    echo "| file | level | block | C D-MB/s | Go D-MB/s | % of C | C ratio | Go ratio |"
+    echo "|---|---|---|---|---|---|---|---|"
+  elif [ -n "$HPLEVELS" ]; then
     echo "| file | level | block | C MB/s | Go MB/s | % of C | Go huge pages MB/s | huge pages % of C | C ratio | Go ratio |"
     echo "|---|---|---|---|---|---|---|---|---|---|"
   else
