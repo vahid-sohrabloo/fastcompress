@@ -319,19 +319,29 @@ x1_exit:
 // BOUNDS:
 // (1) Reads: as decompress4X1FastAsmLoop (1); ip[i] only decreases from
 //     iend[i] - 8 <= len(src) - 8.
+// TABLE INVARIANT, which (2) and (3) rely on, unlike X1, whose safety holds
+//     for any table contents: every entry of dt.x2[:2048] has length 1 or
+//     2 and nbBits <= 11. It holds because buildDEltX2U32 only stores level
+//     1 or 2, and ReadStats only accepts a complete tree, so
+//     fillDTableX2 writes every one of the 2048 entries and leaves no
+//     zero (length 0) entry. TestHUFX2TableInvariant and every table
+//     FuzzHUFAsmEquiv and TestHUFAsmEquiv build (readFastTable) assert it.
+//     A length-0 entry would stall op[3] short of olimit while streams 0-2
+//     keep reading below ilowest and writing past oend; length > 2 breaks
+//     (3) directly.
 // (2) At each olimit computation ip[i] >= ip[0] for i = 1..3 (checked,
-//     else exit) and iters <= (ip[0] - ilowest) / 7. Every entry of an
-//     11-bit X2 table has nbBits <= 11, so an iteration consumes at most 55
+//     else exit) and iters <= (ip[0] - ilowest) / 7. Every entry has
+//     nbBits <= 11 (TABLE INVARIANT), so an iteration consumes at most 55
 //     bits per stream and ip[i] drops by at most 7 bytes. op[3] advances by
-//     at least 5 per iteration (length >= 1), so at most iters iterations
-//     run before op[3] >= olimit = op[3] + 5 * iters, and ip[i] >=
-//     ilowest = &src[0] throughout.
+//     at least 5 per iteration (length >= 1, TABLE INVARIANT), so at most
+//     iters iterations run before op[3] >= olimit = op[3] + 5 * iters, and
+//     ip[i] >= ilowest = &src[0] throughout.
 // (3) Writes: each stream's oend[i] is op[i+1] at entry (oend[3] = oend =
 //     &dst[len(dst)]), and iters <= min_i (oend[i] - op[i]) / 10. An
 //     iteration writes 2 bytes at op[i] five times, advancing op[i] by at
-//     most 2 each time, so the last byte written is below op[i] + 10 and
-//     op[i] stays <= oend[i] <= oend. Per-stream /10 bounds every stream,
-//     not only op[3].
+//     most 2 each time (length <= 2, TABLE INVARIANT), so the last byte
+//     written is below op[i] + 10 and op[i] stays <= oend[i] <= oend.
+//     Per-stream /10 bounds every stream, not only op[3].
 // (4) The table index is bits >> 53 < 2048, and x2 has 1 << TableLogMax
 //     = 4096 entries. The fast path only runs when dtLog == 11.
 // (5) Only AX..R15 are used, BP saved and restored by the frame; no stack

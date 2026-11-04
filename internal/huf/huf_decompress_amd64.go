@@ -5,9 +5,11 @@ package huf
 import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
 
 // useHuf4X1Asm and useHuf4X2Asm select the assembly fast loops, which need
-// BMI2 (SHRX/SHLX). Without it the Go loops run, as in C, where
-// DYNAMIC_BMI2 picks HUF_decompress4X{1,2}_usingDTable_internal_fast_asm_loop
-// only with HUF_flags_bmi2.
+// BMI2 (SHRX/SHLX). Without BMI2 the Go fast loops
+// (HUF_decompress4X{1,2}_usingDTable_internal_fast_c_loop) run, as in a C
+// build without DYNAMIC_BMI2. C's DYNAMIC_BMI2 dispatch differs: without
+// HUF_flags_bmi2 it skips the fast loop and runs the fallback body. The
+// output is identical either way.
 var useHuf4X1Asm, useHuf4X2Asm bool
 
 func init() {

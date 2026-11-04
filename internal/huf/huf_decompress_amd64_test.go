@@ -4,6 +4,8 @@ package huf
 
 import (
 	"bytes"
+	"fmt"
+	"os"
 	"testing"
 	"unsafe"
 
@@ -50,7 +52,9 @@ func withHufAsm(on bool, fn func()) {
 
 // readFastTable reads table as an X1 (x2 false) or X2 table into a fresh
 // DTable; ok reports success with tableLog 11 (the fast loops' only one).
-func readFastTable(table []byte, x2 bool) (dt *DTable, hSize int, ok bool) {
+// It fails t if an X2 table breaks the X2 assembly's TABLE INVARIANT.
+func readFastTable(t *testing.T, table []byte, x2 bool) (dt *DTable, hSize int, ok bool) {
+	t.Helper()
 	dt = new(DTable)
 	dt.Init(TableLogMax)
 	var err error
@@ -59,7 +63,94 @@ func readFastTable(table []byte, x2 bool) (dt *DTable, hSize int, ok bool) {
 	} else {
 		hSize, err = ReadDTableX1(dt, table, 0)
 	}
-	return dt, hSize, err == nil && dt.desc.tableLog == decoderFastTableLog
+	ok = err == nil && dt.desc.tableLog == decoderFastTableLog
+	if ok && x2 {
+		if v := x2TableViolation(dt); v != "" {
+			t.Fatalf("X2 table breaks the asm's TABLE INVARIANT: %s", v)
+		}
+	}
+	return dt, hSize, ok
+}
+
+// x2TableViolation describes the first entry of dt.x2[:2048] that breaks
+// the TABLE INVARIANT of huf_decompress_amd64.s (length 1 or 2, nbBits <=
+// 11), or returns "".
+func x2TableViolation(dt *DTable) string {
+	for i, e := range dt.x2[:1<<decoderFastTableLog] {
+		if length, nbBits := e>>24, (e>>16)&0xFF; length < 1 || length > 2 || nbBits > decoderFastTableLog {
+			return fmt.Sprintf("x2[%d] = %#08x: length %d, nbBits %d", i, e, length, nbBits)
+		}
+	}
+	return ""
+}
+
+// TestHUFX2TableInvariant checks the X2 TABLE INVARIANT on every
+// tableLog-11 X2 table built from the test streams, and that
+// x2TableViolation catches tables that break it.
+func TestHUFX2TableInvariant(t *testing.T) {
+	var good *DTable
+	for _, s := range hufStreams(t) {
+		if dt, _, ok := readFastTable(t, s.comp, true); ok {
+			good = dt
+		}
+	}
+	if good == nil {
+		t.Fatal("no tableLog-11 X2 table among the test streams")
+	}
+	for _, m := range []struct {
+		name   string
+		mutate func(e uint32) uint32
+	}{
+		{"length3", func(e uint32) uint32 { return e&0x00FFFFFF | 3<<24 }},
+		{"length0", func(e uint32) uint32 { return 0 }}, // an unfilled entry
+		{"nbBits12", func(e uint32) uint32 { return e&0xFF00FFFF | 12<<16 }},
+	} {
+		for _, i := range []int{0, 1<<decoderFastTableLog - 1} {
+			bad := *good
+			bad.x2[i] = m.mutate(bad.x2[i])
+			if x2TableViolation(&bad) == "" {
+				t.Errorf("%s at x2[%d] not caught", m.name, i)
+			}
+		}
+	}
+}
+
+// TestHUFAsmRegistered checks the predicates registered with
+// cpu.RegisterAsm: both fast loops are registered with their switches, are
+// off without BMI2 (SetAsmMode("nobmi2")) and follow the detected BMI2
+// otherwise.
+func TestHUFAsmRegistered(t *testing.T) {
+	want := map[string]*bool{"huf.decompress4X1Fast": &useHuf4X1Asm, "huf.decompress4X2Fast": &useHuf4X2Asm}
+	found := 0
+	for _, r := range cpu.AsmRoutines() {
+		if p, ok := want[r.Name]; ok {
+			found++
+			if r.Use != p {
+				t.Errorf("%s registered with the wrong switch", r.Name)
+			}
+		}
+	}
+	if found != len(want) {
+		t.Fatalf("found %d of %d huf fast-loop registrations", found, len(want))
+	}
+	defer func() {
+		if err := cpu.SetAsmMode(os.Getenv("FASTZSTD_FUZZ_ASM")); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	if err := cpu.SetAsmMode("on"); err != nil {
+		t.Fatal(err)
+	}
+	bmi2 := cpu.X86.HasBMI2
+	if useHuf4X1Asm != bmi2 || useHuf4X2Asm != bmi2 {
+		t.Errorf("mode on, BMI2 %v: X1 asm %v, X2 asm %v", bmi2, useHuf4X1Asm, useHuf4X2Asm)
+	}
+	if err := cpu.SetAsmMode("nobmi2"); err != nil {
+		t.Fatal(err)
+	}
+	if useHuf4X1Asm || useHuf4X2Asm {
+		t.Errorf("mode nobmi2: X1 asm %v, X2 asm %v, want both off", useHuf4X1Asm, useHuf4X2Asm)
+	}
 }
 
 // checkFastLoops runs the Go and the assembly fast loop of the X1 or X2
@@ -168,7 +259,7 @@ func TestHUFAsmEquiv(t *testing.T) {
 				continue
 			}
 			for _, x2 := range []bool{false, true} {
-				dt, h, ok := readFastTable(s.comp, x2)
+				dt, h, ok := readFastTable(t, s.comp, x2)
 				if !ok {
 					continue
 				}
@@ -215,7 +306,7 @@ func FuzzHUFAsmEquiv(f *testing.F) {
 	f.Fuzz(func(t *testing.T, table, data []byte, dstSize uint32) {
 		size := int(dstSize % (2 * BlockSizeMax))
 		for _, x2 := range []bool{false, true} {
-			dt, _, ok := readFastTable(table, x2)
+			dt, _, ok := readFastTable(t, table, x2)
 			if !ok {
 				continue
 			}
