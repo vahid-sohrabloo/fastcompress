@@ -121,9 +121,18 @@
 // iLitEnd > litEnd or oMatchEnd > oend - WILDCOPY_OVERLENGTH
 // (execSequenceEnd), or offset > oLitEnd - prefixStart as unsigned
 // (the extDict path, or offset beyond history). Preconditions
-// (sequencesFast, runAsm): the bitstream, states and tables are
-// initSeqState's or later ones of the same block; len(src) >= 1;
-// oend <= len(out); litEnd + 32 <= len(lits); 0 <= prefixStart.
+// (sequencesFast checks the last five, seqFast.asmOK; runAsm passes the
+// rest):
+//   - the bitstream, states and tables are initSeqState's or later ones
+//     of the same block; len(src) >= 1;
+//   - each table has 1 << tableLog cells after its header, and every cell
+//     has nextState + (1 << nbBits) <= 1 << tableLog
+//     (TestBuildFSETableBound);
+//   - 1 <= len(out) and oend <= len(out);
+//   - litEnd + 32 <= len(lits);
+//   - op <= oend;
+//   - litPtr <= litEnd;
+//   - 0 <= prefixStart <= op.
 //
 // BOUNDS:
 // (1) Bitstream reads are the 8 bytes at ptr. DStream.Init leaves ptr <=
@@ -150,6 +159,9 @@
 //     32 bytes past their end.
 // (6) Match reads: match = oLitEnd - offset >= prefixStart >= 0 (offset >
 //     oLitEnd - prefixStart is handed back), below the bytes being written.
+//     The compare is unsigned: it bounds match only because
+//     prefixStart <= op <= oLitEnd (precondition), so oLitEnd - prefixStart
+//     does not wrap.
 // (7) Frame $112-8: one pointer argument, no results; the slots above.
 //
 // TABLE INVARIANT: an offset cell with nbAdditionalBits 1 has baseValue 1

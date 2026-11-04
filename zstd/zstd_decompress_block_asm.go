@@ -7,11 +7,9 @@ package zstd
 // sequencesFast runs the assembly fast loop while f.nbSeq > 1, executing
 // with execSequence each sequence the loop decodes but hands back (one that
 // takes execSequenceEnd or the extDict path). It does nothing when the
-// assembly is off, or when the buffers lack the room the loop's BOUNDS
-// rely on: out must hold oend, and lits WILDCOPY_OVERLENGTH bytes past
-// litEnd (every literal buffer placement leaves them; see execSequence).
+// assembly is off, or when f fails the loop's preconditions (asmOK).
 func sequencesFast(st *seqState, f *seqFast, extDict []byte) dErr {
-	if !useSeqDecAsm || len(f.out) == 0 || f.oend > len(f.out) || f.litEnd+wildcopyOverlength > len(f.lits) {
+	if !useSeqDecAsm || !f.asmOK() {
 		return 0
 	}
 	for f.nbSeq > 1 {
@@ -27,6 +25,18 @@ func sequencesFast(st *seqState, f *seqFast, extDict []byte) dErr {
 		f.nbSeq--
 	}
 	return 0
+}
+
+// asmOK reports whether f meets the preconditions the loop's BOUNDS rely
+// on (zstd_decompress_block_amd64.s): out holds oend, lits holds
+// WILDCOPY_OVERLENGTH bytes past litEnd (every literal buffer placement
+// that reaches decompressSequencesBody leaves them; see execSequence),
+// op <= oend, litPtr <= litEnd and 0 <= prefixStart <= op. op only grows
+// and every executed sequence keeps op <= oend and litPtr <= litEnd, so
+// checking them once per block is enough.
+func (f *seqFast) asmOK() bool {
+	return len(f.out) != 0 && f.oend <= len(f.out) && f.litEnd+wildcopyOverlength <= len(f.lits) &&
+		f.op <= f.oend && f.litPtr <= f.litEnd && 0 <= f.prefixStart && f.prefixStart <= f.op
 }
 
 // runAsm runs decodeExecSeqsAsm once from st and f, and stores the state it
