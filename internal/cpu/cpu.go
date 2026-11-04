@@ -40,6 +40,9 @@ type AsmRoutine struct {
 var (
 	asmRoutines []AsmRoutine
 	asmOff      bool // SetAsmMode("off"): switches registered later start off
+	// detectedBMI2 is X86.HasBMI2 as detected at start-up, which
+	// SetAsmMode("on") restores after "nobmi2".
+	detectedBMI2 bool
 )
 
 // RegisterAsm records an assembly routine's switch and sets it to
@@ -53,12 +56,14 @@ func RegisterAsm(name string, use *bool, available func() bool) {
 }
 
 // SetAsmMode sets every assembly switch, including those registered later,
-// for the fuzz tests (FASTZSTD_FUZZ_ASM): "on" or "" to available(),
-// "nobmi2" to available() after clearing X86.HasBMI2, "off" to false.
+// for the fuzz tests (FASTZSTD_FUZZ_ASM): "on" or "" to available() with
+// X86.HasBMI2 as detected, "nobmi2" to available() after clearing
+// X86.HasBMI2, "off" to false.
 func SetAsmMode(mode string) error {
 	switch mode {
 	case "", "on":
 		asmOff = false
+		X86.HasBMI2 = detectedBMI2
 	case "nobmi2":
 		asmOff = false
 		X86.HasBMI2 = false

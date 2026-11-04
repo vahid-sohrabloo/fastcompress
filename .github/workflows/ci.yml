@@ -50,11 +50,43 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race -short ./...
+      - name: API check (full)
+        run: scripts/apicheck.sh
+
+  fuzz-coverage:
+    # Its own job: about 40 minutes of coverage plus 7 of fuzzing, run in
+    # parallel with test.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cache C reference (zstd source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/zstd
+          key: zstd-${{ env.ZSTD_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch C zstd and build CLI (no corpus)
+        run: ref/fetch.sh --no-corpus
+      - name: Build cref
+        run: make -C ref/cref
       - name: Fuzz (20s per target)
-        if: runner.arch == 'X64'
         run: scripts/fuzz.sh -t 20s
+      - name: Collect failing inputs
+        if: failure() || cancelled()
+        run: |
+          mkdir -p fuzz-findings
+          git ls-files -z --others --exclude-standard -- '*/testdata/fuzz/*' | xargs -0 -r cp --parents -t fuzz-findings
+      - name: Upload failing inputs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: fuzz-findings
+          if-no-files-found: ignore
       - name: Coverage gate (decoder files, 95% of statements)
-        if: runner.arch == 'X64'
         run: |
           # -short: the full zstd suite under coverage runs over 90 minutes.
           go test -short -timeout 60m -coverprofile=cover.out ./zstd ./internal/huf
@@ -62,8 +94,9 @@ jobs:
             FNR == 1 { next }
             {
               split($1, a, ":"); f = a[1]
-              if (f !~ /\/zstd\/zstd_decompress[^\/]*\.go$/ && f !~ /\/internal\/huf\/huf_decompress\.go$/) next
-              if (!(f in files)) nf++
+              if (f ~ /\/zstd\/zstd_decompress[^\/]*\.go$/) nz++
+              else if (f ~ /\/internal\/huf\/huf_decompress[^\/]*\.go$/) nh++
+              else next
               n[f, $1] = $2; files[f] = 1
               if ($3 > 0) hit[f, $1] = 1
             }
@@ -75,11 +108,10 @@ jobs:
                 printf "%-72s %6.2f%% (%d/%d)\n", f, pct, cov[f], tot[f]
                 if (pct < 95) { print "  below 95%"; bad = 1 }
               }
-              if (nf == 0) { print "no decoder files in the profile"; bad = 1 }
+              if (nz == 0) { print "no zstd/zstd_decompress*.go in the profile"; bad = 1 }
+              if (nh == 0) { print "no internal/huf/huf_decompress*.go in the profile"; bad = 1 }
               exit bad
             }' cover.out
-      - name: API check (full)
-        run: scripts/apicheck.sh
 
   lint:
     runs-on: ubuntu-latest

@@ -4,7 +4,10 @@
 # Runs every Fuzz* target (found with go test -list '^Fuzz') of each package
 # for -fuzztime DURATION (default 30s), one target at a time. -p limits the
 # run to the given packages (repeatable; default ./...). FuzzTrainDict runs
-# at most 60s: each of its execs trains a dictionary, in Go and in cref.
+# at most 60s (when -t parses to more): each of its execs trains a
+# dictionary, in Go and in cref. A package with Fuzz targets must have a
+# fuzzasm_test.go (the FASTZSTD_FUZZ_ASM hook), and a package whose test
+# binary fails to build or list counts as failed.
 #
 # Every go test runs with -parallel 2 -fuzzminimizetime 2s. Outside CI (CI
 # unset) and when systemd-run exists, each also runs in a scope capped at
@@ -52,14 +55,13 @@ gotest() {
 }
 
 # seconds DURATION prints DURATION in seconds when it is a whole number of
-# s, m or h, and nothing otherwise (e.g. 1000x).
+# hours, minutes and seconds (e.g. 30s, 10m, 1m30s), and nothing otherwise
+# (e.g. 500ms, 1000x).
 seconds() {
-  case $1 in
-    *[0-9]s) [[ ${1%s} =~ ^[0-9]+$ ]] && echo "${1%s}" ;;
-    *[0-9]m) [[ ${1%m} =~ ^[0-9]+$ ]] && echo $((${1%m} * 60)) ;;
-    *[0-9]h) [[ ${1%h} =~ ^[0-9]+$ ]] && echo $((${1%h} * 3600)) ;;
-  esac
-  return 0
+  if [[ $1 =~ ^([0-9]+h)?([0-9]+m)?([0-9]+s)?$ && -n $1 ]]; then
+    local h=${BASH_REMATCH[1]%h} m=${BASH_REMATCH[2]%m} s=${BASH_REMATCH[3]%s}
+    echo $((10#${h:-0} * 3600 + 10#${m:-0} * 60 + 10#${s:-0}))
+  fi
 }
 
 log=$(mktemp)
@@ -68,11 +70,22 @@ failed=()
 ntargets=0
 for pkg in $(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' "${pkgs[@]}"); do
   dir=$(go list -f '{{.Dir}}' "$pkg")
-  for target in $(gotest -list '^Fuzz' "$pkg" | grep '^Fuzz' || true); do
+  if ! out=$(gotest -list '^Fuzz' "$pkg" 2>&1); then
+    printf '%s\n' "$out" >&2
+    failed+=("$pkg (go test -list)")
+    continue
+  fi
+  targets=$(grep '^Fuzz' <<<"$out" || true)
+  # The FASTZSTD_FUZZ_ASM hook: without it the asm modes do nothing here.
+  if [[ -n $targets && ! -f $dir/fuzzasm_test.go ]]; then
+    echo "fuzz.sh: $pkg has Fuzz targets but no fuzzasm_test.go" >&2
+    failed+=("$pkg (no fuzzasm_test.go)")
+  fi
+  for target in $targets; do
     t=$fuzztime
     if [[ $target == FuzzTrainDict ]]; then
       s=$(seconds "$t")
-      if [[ -z $s || $s -gt 60 ]]; then
+      if [[ -n $s && $s -gt 60 ]]; then
         t=60s
       fi
     fi
@@ -88,13 +101,13 @@ for pkg in $(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{en
   done
 done
 
-if [[ $ntargets == 0 ]]; then
-  echo "fuzz.sh: no Fuzz targets found" >&2
+if [[ ${#failed[@]} != 0 ]]; then
+  echo "fuzz.sh: ${#failed[@]} failure(s) ($ntargets targets run):" >&2
+  printf '  %s\n' "${failed[@]}" >&2
   exit 1
 fi
-if [[ ${#failed[@]} != 0 ]]; then
-  echo "fuzz.sh: ${#failed[@]} of $ntargets target(s) failed:" >&2
-  printf '  %s\n' "${failed[@]}" >&2
+if [[ $ntargets == 0 ]]; then
+  echo "fuzz.sh: no Fuzz targets found" >&2
   exit 1
 fi
 echo "fuzz.sh: ok ($ntargets targets, $fuzztime each)"

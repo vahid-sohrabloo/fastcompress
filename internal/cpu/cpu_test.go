@@ -35,10 +35,10 @@ func TestDetect(t *testing.T) {
 }
 
 func TestSetAsmMode(t *testing.T) {
-	savedX86, savedRoutines, savedOff := X86, asmRoutines, asmOff
-	defer func() { X86, asmRoutines, asmOff = savedX86, savedRoutines, savedOff }()
+	savedX86, savedRoutines, savedOff, savedDetected := X86, asmRoutines, asmOff, detectedBMI2
+	defer func() { X86, asmRoutines, asmOff, detectedBMI2 = savedX86, savedRoutines, savedOff, savedDetected }()
 	asmRoutines, asmOff = nil, false
-	X86.HasBMI2 = true
+	X86.HasBMI2, detectedBMI2 = true, true
 	var base, bmi2, late bool
 	RegisterAsm("base", &base, func() bool { return true })
 	RegisterAsm("bmi2", &bmi2, func() bool { return X86.HasBMI2 })
@@ -61,13 +61,14 @@ func TestSetAsmMode(t *testing.T) {
 		t.Fatalf("off: base=%v bmi2=%v late=%v, want all false", base, bmi2, late)
 	}
 
-	X86.HasBMI2 = true
-	for _, mode := range []string{"on", ""} {
+	for _, mode := range []string{"on", "nobmi2", ""} {
 		if err := SetAsmMode(mode); err != nil {
 			t.Fatal(err)
 		}
-		if !base || !bmi2 || !late {
-			t.Fatalf("%q: base=%v bmi2=%v late=%v, want all true", mode, base, bmi2, late)
+		want := mode != "nobmi2"
+		if X86.HasBMI2 != want || !base || bmi2 != want || !late {
+			t.Fatalf("%q after nobmi2: HasBMI2=%v base=%v bmi2=%v late=%v, want %v true %v true",
+				mode, X86.HasBMI2, base, bmi2, late, want, want)
 		}
 	}
 

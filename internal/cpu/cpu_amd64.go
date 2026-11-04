@@ -31,4 +31,5 @@ func init() {
 	X86.HasBMI1 = ebx7&(1<<3) != 0
 	X86.HasAVX2 = ebx7&(1<<5) != 0 && osYMM
 	X86.HasBMI2 = ebx7&(1<<8) != 0
+	detectedBMI2 = X86.HasBMI2
 }

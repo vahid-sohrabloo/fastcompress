@@ -44,12 +44,12 @@ jobs:
           FASTZSTD_FUZZ_ASM: ${{ matrix.asm }}
         run: scripts/fuzz.sh -t 10m
       - name: Collect failing inputs
-        if: failure()
+        if: failure() || cancelled()
         run: |
           mkdir -p fuzz-findings
           git ls-files -z --others --exclude-standard -- '*/testdata/fuzz/*' | xargs -0 -r cp --parents -t fuzz-findings
       - name: Upload failing inputs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-findings-${{ matrix.runner }}-${{ matrix.asm }}
