@@ -89,7 +89,7 @@ mkdir -p bench/results
   echo "# $LABEL"
   echo
   echo "- date: $(date -Is); host: $(uname -n); cpu: $(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //'), pinned to CPU $CPU"
-  echo "- C: $($ZSTD -V | head -1); \`zstd -b<L> -i$CSECS [-B<block>]\`; Go: \`gobench -secs $GSECS\`; both report the best ~1 s window (mean per pass), CRC off"
+  echo "- C: $($ZSTD -V | head -1); \`zstd -b<L> -i$CSECS [-B<block>]\`; Go: \`gobench -mode $MODE -secs $GSECS\`; both report the best ~1 s window (mean per pass), CRC off"
   if [ "$MODE" = d ]; then
     echo "- median of $RUNS interleaved runs per cell; MB/s = 1e6 bytes/s of decoded output (decompression only; Go: one DecodeAll per block, WithDecoderConcurrency(1))"
   else

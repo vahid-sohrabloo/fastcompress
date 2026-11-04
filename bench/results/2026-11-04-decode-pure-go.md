@@ -25,7 +25,7 @@ Range: 37.3% (dickens L3) to 56.1% (sao L1). The lowest rows are text with short
 ## Results table
 
 - date: 2026-11-04T09:13:05+01:00; host: vahid-Zenbook-UX6404VV-UX6404VV; cpu: 13th Gen Intel(R) Core(TM) i9-13900H, pinned to CPU 2
-- C: *** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***; `zstd -b<L> -i5 [-B<block>]`; Go: `gobench -secs 5`; both report the best ~1 s window (mean per pass), CRC off
+- C: *** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***; `zstd -b<L> -i5 [-B<block>]`; Go: `gobench -mode d -secs 5`; both report the best ~1 s window (mean per pass), CRC off
 - median of 3 interleaved runs per cell; MB/s = 1e6 bytes/s of decoded output (decompression only; Go: one DecodeAll per block, WithDecoderConcurrency(1))
 
 | file | level | block | C D-MB/s | Go D-MB/s | % of C | C ratio | Go ratio |

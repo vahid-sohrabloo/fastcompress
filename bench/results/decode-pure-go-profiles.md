@@ -7,7 +7,7 @@ Top 15 functions by flat time, from `gobench -mode d -level L -block B -secs 10 
 - Sequence decoding dominates at every level and block size. `decompressSequencesBody` is 61% to 84% cumulative. Within it, `decodeSequence` is 15% to 22% flat (35% to 47% cumulative) and `execSequence` is 8% to 14% flat. `copy16` plus `wildcopy` (match and literal copies) are 11% to 27% flat combined. The share is highest at L11 whole (27%, of which 21% is `copy16`), and copies grow with level on whole files. The bitstream reader (`Reload`, `LookBits`, `ReadBits`, `LookBitsFast`, `SkipBits`) is 19% to 24% flat combined, mostly inlined into `decodeSequence`.
 - Huffman literals: `decompress4X1FastCLoop` plus `decompress4X2FastCLoop` are 8% to 25% flat (counting the top 15 only). The share is largest at L1 (20% to 25%, with X2 heavy on whole and 1M blocks) and at 16K (15% to 20%).
 - At 16K, per-block table building shows up: `buildFSETable` is 5.5% to 7.1% flat, `huf.ReadDTableX1` 5% to 7% cumulative and `fse.ReadNCount` about 1.5%, so roughly 12% to 14% together. For 1M and whole blocks it is under 6%.
-- Allocations: `BenchmarkDecodeAll/silesia.tar/3/16K` reports 12485 allocs/op (about one per 16K frame, 1.6 MB/op). `xml/3/whole` reports 43 allocs/op. The CPU profiles show no GC or malloc functions in the top 15.
+- Allocations: `BenchmarkDecodeAll/silesia.tar/3/16K` reports 12485 allocs/op (1.6 MB/op) and `xml/3/whole` 43. That is one per Huffman table header, from `internal/fse/fse_decompress.go:51` via `DecompressWksp`. Each FSE-compressed Huffman weight description builds a fresh FSE decoding table; at 16K every frame is one block with its own tree. The CPU profiles show no GC or malloc functions in the top 15.
 
 ## L1 silesia.tar whole (745.3 MB/s)
 

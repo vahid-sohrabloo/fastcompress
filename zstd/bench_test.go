@@ -56,7 +56,9 @@ func BenchmarkEncodeAll(b *testing.B) {
 //
 //	go test ./zstd -run xxx -bench 'DecodeAll/silesia.tar/3/16K' -cpuprofile cpu.prof
 //
-// bench/cmd/gobench -mode d is the harness against C.
+// The frames are encoded once per sub-benchmark (b.Loop runs the setup once,
+// untimed); -short keeps level 1 only. bench/cmd/gobench -mode d is the
+// harness against C.
 func BenchmarkDecodeAll(b *testing.B) {
 	files, _ := filepath.Glob(filepath.Join("..", "bench", "corpus", "silesia", "*"))
 	if len(files) == 0 {
@@ -77,6 +79,9 @@ func BenchmarkDecodeAll(b *testing.B) {
 		l    EncoderLevel
 	}{
 		{"1", SpeedFastest}, {"3", SpeedDefault}, {"7", SpeedBetterCompression}, {"11", SpeedBestCompression},
+	}
+	if testing.Short() {
+		levels = levels[:1]
 	}
 	dec, err := NewReader(nil, WithDecoderConcurrency(1))
 	if err != nil {
@@ -111,8 +116,7 @@ func BenchmarkDecodeAll(b *testing.B) {
 						out := make([]byte, 0, block)
 						b.SetBytes(int64(len(src)))
 						b.ReportAllocs()
-						b.ResetTimer()
-						for i := 0; i < b.N; i++ {
+						for b.Loop() {
 							for _, fr := range frames {
 								if out, err = dec.DecodeAll(fr, out[:0]); err != nil {
 									b.Fatal(err)

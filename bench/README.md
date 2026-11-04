@@ -40,7 +40,9 @@ Mirrors the above: one `Encoder` (pooling its cctx), one `EncodeAll` per indepen
 
     go run ./bench/cmd/gobench -mode d -level 3 -block 0 [-secs S] [-cpuprofile F] FILE
 
-Compresses each block once with `EncodeAll(WithEncoderLevel, WithEncoderCRC(false))` (the same frames `zstd -b` decodes), decodes each once and checks the output equals the input, then times passes of one `DecodeAll(frame, out[:0])` per block on one `NewReader(nil, WithDecoderConcurrency(1))` with a reused `out`, in the same benchfn.c windows. Prints `<decoded MB/s> <ratio>`.
+Compresses each block once with `EncodeAll(WithEncoderLevel, WithEncoderCRC(false))` (the same frames `zstd -b` decodes), decodes each once and checks the output equals the input, then times passes of one `DecodeAll(frame, out[:0])` per block on one `NewReader(nil, WithDecoderConcurrency(1))` with a reused `out`, in the same benchfn.c windows. Prints `<decoded MB/s> <ratio>`. `-hugepages` is rejected in this mode.
+
+Go reuses one block-sized output buffer for every block, while C decodes block *i* into its own region of one file-sized buffer (`benchzstd.c`). The Task 18 review measured the effect at under 1% (at most about 0.5%, at 1M blocks; none at 16K).
 
 ## pprof
 

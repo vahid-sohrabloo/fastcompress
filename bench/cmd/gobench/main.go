@@ -54,6 +54,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "gobench: unknown -mode %q (want c or d)\n", *mode)
 		os.Exit(2)
 	}
+	if *mode == "d" && *hugePages {
+		fmt.Fprintln(os.Stderr, "gobench: -hugepages applies to -mode c only")
+		os.Exit(2)
+	}
 	if err := run(*mode == "d", *level, *block, *iters, *secs, *cpuprofile, *hugePages, flag.Arg(0)); err != nil {
 		fmt.Fprintln(os.Stderr, "gobench:", err)
 		os.Exit(1)
@@ -105,11 +109,14 @@ func run(decode bool, level, block, iters int, secs float64, cpuprofile string, 
 		return csize
 	}
 
-	csize := pass() // untimed warm-up: allocates the pooled cctx, faults in pages
-	if decode {
+	var csize int
+	if !decode {
+		csize = pass() // untimed warm-up: allocates the pooled cctx, faults in pages
+	} else {
 		frames := make([][]byte, 0, (len(src)+block-1)/block)
 		for off := 0; off < len(src); off += block {
 			frames = append(frames, enc.EncodeAll(src[off:min(off+block, len(src))], nil))
+			csize += len(frames[len(frames)-1])
 		}
 		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
 		if err != nil {
@@ -117,7 +124,7 @@ func run(decode bool, level, block, iters int, secs float64, cpuprofile string, 
 		}
 		defer dec.Close()
 		out := make([]byte, 0, block)
-		for i, fr := range frames {
+		for i, fr := range frames { // also the untimed warm-up
 			got, err := dec.DecodeAll(fr, out[:0])
 			if err != nil {
 				return fmt.Errorf("block %d: %w", i, err)
