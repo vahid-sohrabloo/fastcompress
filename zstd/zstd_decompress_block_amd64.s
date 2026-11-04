@@ -131,7 +131,7 @@
 //   - 1 <= len(out) and oend <= len(out);
 //   - litEnd + 32 <= len(lits);
 //   - op <= oend;
-//   - litPtr <= litEnd;
+//   - 0 <= litPtr <= litEnd;
 //   - 0 <= prefixStart <= op.
 //
 // BOUNDS:
@@ -152,7 +152,8 @@
 //     1..3 (3 reads none), is read only when the offset cell has
 //     nbAdditionalBits 1 and baseValue 1; other cells with
 //     nbAdditionalBits 1 stop the loop first.
-// (4) Literal reads: copy16 and wildcopy read below iLitEnd + 32 <=
+// (4) Literal reads: copy16 and wildcopy read at litPtr >= 0
+//     (precondition; litPtr only grows) and below iLitEnd + 32 <=
 //     litEnd + 32 <= len(lits) (iLitEnd > litEnd is handed back).
 // (5) Writes: below oMatchEnd + 32 <= oend <= len(out) (oMatchEnd >
 //     oendW is handed back); wildcopy and the 8-byte copies write less than

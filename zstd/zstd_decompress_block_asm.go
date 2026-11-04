@@ -31,12 +31,12 @@ func sequencesFast(st *seqState, f *seqFast, extDict []byte) dErr {
 // on (zstd_decompress_block_amd64.s): out holds oend, lits holds
 // WILDCOPY_OVERLENGTH bytes past litEnd (every literal buffer placement
 // that reaches decompressSequencesBody leaves them; see execSequence),
-// op <= oend, litPtr <= litEnd and 0 <= prefixStart <= op. op only grows
+// op <= oend, 0 <= litPtr <= litEnd and 0 <= prefixStart <= op. op only grows
 // and every executed sequence keeps op <= oend and litPtr <= litEnd, so
 // checking them once per block is enough.
 func (f *seqFast) asmOK() bool {
 	return len(f.out) != 0 && f.oend <= len(f.out) && f.litEnd+wildcopyOverlength <= len(f.lits) &&
-		f.op <= f.oend && f.litPtr <= f.litEnd && 0 <= f.prefixStart && f.prefixStart <= f.op
+		f.op <= f.oend && 0 <= f.litPtr && f.litPtr <= f.litEnd && 0 <= f.prefixStart && f.prefixStart <= f.op
 }
 
 // runAsm runs decodeExecSeqsAsm once from st and f, and stores the state it

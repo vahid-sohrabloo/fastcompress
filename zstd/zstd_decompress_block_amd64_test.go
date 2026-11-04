@@ -67,7 +67,9 @@ func (f *seqFast) runGo(st *seqState) (seq, bool) {
 // seqArm is a branch of decodeExecSeqsAsm. runGo counts the ones it takes
 // in seqArmHits (atomic: safe if the tests ever run in parallel), and the
 // equivalence tests require each to be reached (checkSeqArms), since Go
-// coverage does not see the assembly.
+// coverage does not see the assembly. Loop back-edges (a second litLoop,
+// matchLoop or copy8Loop pass) are not counted: each loop is only
+// asserted to be entered.
 type seqArm int
 
 const (
@@ -84,6 +86,8 @@ const (
 	armRep2                        // ofBits 1, offset 2 (also ll0 with bit 0)
 	armRep3                        // ofBits 1, offset 3: prevOffset[0] - 1 (ll0)
 	armReload1                     // totalBits >= 31: the first reload
+	armMLBits0                     // ML cell nbAdditionalBits 0: no ML bits read
+	armLLBits0                     // LL cell nbAdditionalBits 0: no LL bits read
 	armReload1Skip                 // totalBits < 31
 	armOverflow                    // a reload in overflow (bitsConsumed > 64)
 	armLit16                       // litLength <= 16: one copy16
@@ -101,7 +105,7 @@ var seqArmNames = [numSeqArms]string{
 	"stop nbSeq<=1", "stop ptr<16", "stop table invariant",
 	"pending iLitEnd>litEnd", "pending oMatchEnd>oendW", "pending offset>oLitEnd-prefixStart",
 	"offset ofBits>1", "repeat ofBits 0", "repeat ofBits 0 ll0", "repeat offset 1", "repeat offset 2",
-	"repeat offset 3", "reload1", "reload1 skipped", "reload in overflow",
+	"repeat offset 3", "reload1", "mlBits 0", "llBits 0", "reload1 skipped", "reload in overflow",
 	"litLength<=16", "litLength 17..32", "litLength>32",
 	"offset<8", "offset 8..15", "offset>=16", "matchLoop", "copy8Loop",
 }
@@ -116,11 +120,11 @@ var seqArmHits [numSeqArms]atomic.Int64
 // or overflow; the synthetic block's matches are short.
 var (
 	equivArms = []seqArm{armStopPtr, armPendLit, armPendOffset, armOfNew, armRep0, armRep0LL0,
-		armRep1, armRep2, armRep3, armReload1Skip, armLit16, armLit32, armLitLoop,
+		armRep1, armRep2, armRep3, armMLBits0, armLLBits0, armReload1Skip, armLit16, armLit32, armLitLoop,
 		armOffLt8, armOff8To15, armOff16, armMatchLoop, armCopy8Loop}
 	syntheticArms = []seqArm{armStopNbSeq, armStopPtr, armStopInvariant, armPendLit, armPendOend,
 		armPendOffset, armOfNew, armRep0, armRep0LL0, armRep1, armRep2, armRep3, armReload1,
-		armReload1Skip, armOverflow, armLit16, armLit32, armLitLoop, armOffLt8, armOff8To15,
+		armMLBits0, armLLBits0, armReload1Skip, armOverflow, armLit16, armLit32, armLitLoop, armOffLt8, armOff8To15,
 		armOff16, armCopy8Loop}
 )
 
@@ -158,6 +162,12 @@ func countDecodeArms(st *seqState) {
 	default:
 		ds := st.dStream // the bit decodeSequence reads first
 		seqArmHits[armRep1+seqArm(ll0)+seqArm(ds.ReadBitsFast(1))].Add(1)
+	}
+	if ml.nbAdditionalBits == 0 {
+		seqArmHits[armMLBits0].Add(1)
+	}
+	if ll.nbAdditionalBits == 0 {
+		seqArmHits[armLLBits0].Add(1)
 	}
 	if ll.nbAdditionalBits+ml.nbAdditionalBits+of.nbAdditionalBits >= 31 {
 		seqArmHits[armReload1].Add(1)
@@ -344,6 +354,7 @@ func TestSeqAsmGuard(t *testing.T) {
 			{"prefixStart<0", func(f *seqFast) { f.prefixStart = -1 }},
 			{"op>oend", func(f *seqFast) { f.op = f.oend + 1; f.prefixStart = 0 }},
 			{"litPtr>litEnd", func(f *seqFast) { f.litPtr = f.litEnd + 1 }},
+			{"litPtr<0", func(f *seqFast) { f.litPtr = -1 }},
 			{"oend>len(out)", func(f *seqFast) { f.out = f.out[:f.oend-1] }},
 			{"litEnd+32>len(lits)", func(f *seqFast) { f.lits = f.lits[:f.litEnd+wildcopyOverlength-1] }},
 		} {
