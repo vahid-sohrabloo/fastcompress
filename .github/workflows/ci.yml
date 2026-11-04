@@ -35,6 +35,7 @@ jobs:
         run: make -C ref/cref
       - name: Test
         run: go test -timeout 60m ./...
+      # Also runs every Fuzz target's seed corpus with the assembly compiled out.
       - name: Test (noasm)
         run: go test -timeout 60m -tags noasm ./...
       - name: Test (386, short)
@@ -49,7 +50,35 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race -short ./...
-      - name: API check
+      - name: Fuzz (20s per target)
+        if: runner.arch == 'X64'
+        run: scripts/fuzz.sh -t 20s
+      - name: Coverage gate (decoder files, 95% of statements)
+        if: runner.arch == 'X64'
+        run: |
+          # -short: the full zstd suite under coverage runs over 90 minutes.
+          go test -short -timeout 60m -coverprofile=cover.out ./zstd ./internal/huf
+          awk '
+            FNR == 1 { next }
+            {
+              split($1, a, ":"); f = a[1]
+              if (f !~ /\/zstd\/zstd_decompress[^\/]*\.go$/ && f !~ /\/internal\/huf\/huf_decompress\.go$/) next
+              if (!(f in files)) nf++
+              n[f, $1] = $2; files[f] = 1
+              if ($3 > 0) hit[f, $1] = 1
+            }
+            END {
+              for (k in n) { split(k, p, SUBSEP); tot[p[1]] += n[k]; if (k in hit) cov[p[1]] += n[k] }
+              bad = 0
+              for (f in files) {
+                pct = 100 * cov[f] / tot[f]
+                printf "%-72s %6.2f%% (%d/%d)\n", f, pct, cov[f], tot[f]
+                if (pct < 95) { print "  below 95%"; bad = 1 }
+              }
+              if (nf == 0) { print "no decoder files in the profile"; bad = 1 }
+              exit bad
+            }' cover.out
+      - name: API check (full)
         run: scripts/apicheck.sh
 
   lint:

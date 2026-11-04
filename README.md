@@ -20,6 +20,36 @@ The output is byte-identical to C zstd v1.5.7 with the same parameters,
 except that `WithEncoderDictRaw` writes its dictionary ID into the frame
 header (C writes none for raw content); everything after that field is C's.
 
+## Decoder
+
+`NewReader` and `Decoder` (`DecodeAll`, the streaming `io.Reader`,
+`WriteTo`), dictionaries, `ZipDecompressor` and `SnappyConverter` are
+ported from C's `zstd_decompress*.c` and `huf_decompress.c`. Output and
+error class are checked against C v1.5.7 by differential tests over a
+corpus of C-made frames, and fuzz targets compare the paths against each
+other (`DecodeAll`, streaming at any input cut, concurrent streaming, and
+any `dst` capacity). C errors map to the klauspost sentinels; the table
+and the deliberate deviations from C are in
+[docs/superpowers/phase2-api-decisions.md](docs/superpowers/phase2-api-decisions.md).
+
+### Safety
+
+The decoder is written for untrusted input: corrupt, truncated or hostile
+data returns an error, never a panic or an out-of-bounds access, and memory
+is bounded by `WithDecoderMaxMemory`. CI enforces this:
+
+- `scripts/decodercheck.sh`: no decoder file imports `unsafe` or calls
+  `recover` (one exception: the streaming pipeline re-raises a panic of the
+  caller's `io.Reader` on the caller's goroutine). Decoder assembly needs a
+  `// BOUNDS:` proof per routine and a fuzz target comparing it with the Go
+  code.
+- `scripts/fuzz.sh`: every fuzz target runs for 20 s per push (amd64),
+  and for 10 minutes nightly on amd64 and arm64, with the assembly on, off
+  and (amd64) without BMI2. Every target's seed corpus also runs as a test,
+  with and without the `noasm` tag.
+- A coverage gate: `zstd_decompress*.go` and `huf_decompress.go` must each
+  stay at 95% statement coverage or more.
+
 ## Deliberate API differences
 
 - `WithHugePages` is an extension (not a klauspost option): it backs the

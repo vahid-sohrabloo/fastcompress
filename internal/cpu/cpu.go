@@ -4,6 +4,8 @@
 // disabled (build tags noasm, purego, appengine, or a non-gc compiler).
 package cpu
 
+import "fmt"
+
 // X86 holds the features detected at start-up. Tests may clear them (see
 // DisableBMI2 and DisableAVX2) to exercise the baseline paths.
 var X86 struct {
@@ -35,15 +37,40 @@ type AsmRoutine struct {
 	Available func() bool // whether the CPU supports it (reads X86)
 }
 
-var asmRoutines []AsmRoutine
+var (
+	asmRoutines []AsmRoutine
+	asmOff      bool // SetAsmMode("off"): switches registered later start off
+)
 
 // RegisterAsm records an assembly routine's switch and sets it to
-// available(). Packages call it from init in their <file>_amd64.go. A
-// routine with BMI2 and baseline variants registers the BMI2 one's switch
-// separately, with an available func that checks X86.HasBMI2.
+// available() (false after SetAsmMode("off")). Packages call it from init
+// in their <file>_amd64.go. A routine with BMI2 and baseline variants
+// registers the BMI2 one's switch separately, with an available func that
+// checks X86.HasBMI2.
 func RegisterAsm(name string, use *bool, available func() bool) {
-	*use = available()
+	*use = !asmOff && available()
 	asmRoutines = append(asmRoutines, AsmRoutine{name, use, available})
+}
+
+// SetAsmMode sets every assembly switch, including those registered later,
+// for the fuzz tests (FASTZSTD_FUZZ_ASM): "on" or "" to available(),
+// "nobmi2" to available() after clearing X86.HasBMI2, "off" to false.
+func SetAsmMode(mode string) error {
+	switch mode {
+	case "", "on":
+		asmOff = false
+	case "nobmi2":
+		asmOff = false
+		X86.HasBMI2 = false
+	case "off":
+		asmOff = true
+	default:
+		return fmt.Errorf("cpu: unknown asm mode %q (want off, nobmi2 or on)", mode)
+	}
+	for _, r := range asmRoutines {
+		*r.Use = !asmOff && r.Available()
+	}
+	return nil
 }
 
 // AsmRoutines returns the registered assembly routines.

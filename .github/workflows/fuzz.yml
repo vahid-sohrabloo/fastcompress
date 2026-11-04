@@ -1,0 +1,57 @@
+name: fuzz
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZSTD_TAG: v1.5.7
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.runner }}, asm=${{ matrix.asm }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        asm: ["on", "off", nobmi2]
+        exclude:
+          # BMI2 is x86 only: on arm64 nobmi2 is the same run as on.
+          - runner: ubuntu-24.04-arm
+            asm: nobmi2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cache C reference (zstd source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/zstd
+          key: zstd-${{ env.ZSTD_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch C zstd and build CLI (no corpus)
+        run: ref/fetch.sh --no-corpus
+      - name: Build cref
+        run: make -C ref/cref
+      - name: Fuzz (10m per target)
+        env:
+          FASTZSTD_FUZZ_ASM: ${{ matrix.asm }}
+        run: scripts/fuzz.sh -t 10m
+      - name: Collect failing inputs
+        if: failure()
+        run: |
+          mkdir -p fuzz-findings
+          git ls-files -z --others --exclude-standard -- '*/testdata/fuzz/*' | xargs -0 -r cp --parents -t fuzz-findings
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings-${{ matrix.runner }}-${{ matrix.asm }}
+          path: fuzz-findings
+          if-no-files-found: ignore

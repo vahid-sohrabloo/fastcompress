@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
@@ -466,6 +467,11 @@ func FuzzTrainDict(f *testing.F) {
 			}
 			var ce *buildDictError
 			if errors.As(err, &ce) && ce.notPorted {
+				// Only the two refusals may skip C: a missing strategy
+				// (errStrategyUnsupported) and long-distance matching.
+				if !strings.Contains(ce.err, errStrategyUnsupported.Error()) && !strings.Contains(ce.err, "long-distance matching") {
+					t.Fatalf("not-ported refusal from an unexpected path: %v", err)
+				}
 				return
 			}
 		}

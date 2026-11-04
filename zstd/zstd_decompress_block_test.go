@@ -1660,7 +1660,7 @@ func TestDecompressBlockOffsetInfo(t *testing.T) {
 		{5, []uint8{23, 24}, 16, 24},
 		{0, []uint8{30}, 256, 30},
 	} {
-		dt := make([]seqSymbol, 1+1<<c.tableLog)
+		dt := make([]seqSymbol, seqSymbolTableSize(int(c.tableLog)))
 		dt[0].baseValue = c.tableLog
 		for i, b := range c.bits {
 			dt[1+i].nbAdditionalBits = b

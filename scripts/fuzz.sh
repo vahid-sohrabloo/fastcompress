@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# fuzz.sh [-t DURATION] [-p PKG]...
+#
+# Runs every Fuzz* target (found with go test -list '^Fuzz') of each package
+# for -fuzztime DURATION (default 30s), one target at a time. -p limits the
+# run to the given packages (repeatable; default ./...). FuzzTrainDict runs
+# at most 60s: each of its execs trains a dictionary, in Go and in cref.
+#
+# Every go test runs with -parallel 2 -fuzzminimizetime 2s. Outside CI (CI
+# unset) and when systemd-run exists, each also runs in a scope capped at
+# MemoryMax=4G, no swap, GOMEMLIMIT=2GiB; FASTZSTD_FUZZ_CAP=0 turns the cap
+# off, FASTZSTD_FUZZ_CAP=1 requires it.
+#
+# FASTZSTD_FUZZ_ASM=off|nobmi2|on is passed through to the tests, whose
+# init switches the assembly routines accordingly (internal/cpu SetAsmMode).
+#
+# Exits non-zero when a target fails, after running the remaining ones, and
+# prints the testdata/fuzz path of each failing input found.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+fuzztime=30s
+pkgs=()
+while getopts t:p: opt; do
+  case $opt in
+    t) fuzztime=$OPTARG ;;
+    p) pkgs+=("$OPTARG") ;;
+    *)
+      echo "usage: $0 [-t DURATION] [-p PKG]..." >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ ${#pkgs[@]} == 0 ]]; then
+  pkgs=(./...)
+fi
+
+cap=()
+case ${FASTZSTD_FUZZ_CAP:-} in
+  0) ;;
+  1) cap=(systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=0 env GOMEMLIMIT=2GiB) ;;
+  *)
+    if [[ -z ${CI:-} ]] && command -v systemd-run >/dev/null; then
+      cap=(systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=0 env GOMEMLIMIT=2GiB)
+    fi
+    ;;
+esac
+
+gotest() {
+  ${cap[@]+"${cap[@]}"} go test -p 1 "$@"
+}
+
+# seconds DURATION prints DURATION in seconds when it is a whole number of
+# s, m or h, and nothing otherwise (e.g. 1000x).
+seconds() {
+  case $1 in
+    *[0-9]s) [[ ${1%s} =~ ^[0-9]+$ ]] && echo "${1%s}" ;;
+    *[0-9]m) [[ ${1%m} =~ ^[0-9]+$ ]] && echo $((${1%m} * 60)) ;;
+    *[0-9]h) [[ ${1%h} =~ ^[0-9]+$ ]] && echo $((${1%h} * 3600)) ;;
+  esac
+  return 0
+}
+
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+failed=()
+ntargets=0
+for pkg in $(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' "${pkgs[@]}"); do
+  dir=$(go list -f '{{.Dir}}' "$pkg")
+  for target in $(gotest -list '^Fuzz' "$pkg" | grep '^Fuzz' || true); do
+    t=$fuzztime
+    if [[ $target == FuzzTrainDict ]]; then
+      s=$(seconds "$t")
+      if [[ -z $s || $s -gt 60 ]]; then
+        t=60s
+      fi
+    fi
+    ntargets=$((ntargets + 1))
+    echo "=== $pkg $target ($t, FASTZSTD_FUZZ_ASM=${FASTZSTD_FUZZ_ASM:-on})"
+    if ! gotest -run '^$' -fuzz "^${target}\$" -fuzztime "$t" -parallel 2 -fuzzminimizetime 2s "$pkg" 2>&1 | tee "$log"; then
+      failed+=("$pkg $target")
+      # go test prints "Failing input written to testdata/fuzz/<target>/<id>".
+      sed -n 's|.*Failing input written to \(testdata/fuzz/[^ ]*\).*|\1|p' "$log" | while IFS= read -r p; do
+        echo "fuzz.sh: $target: failing input: ${dir#"$PWD"/}/$p"
+      done
+    fi
+  done
+done
+
+if [[ $ntargets == 0 ]]; then
+  echo "fuzz.sh: no Fuzz targets found" >&2
+  exit 1
+fi
+if [[ ${#failed[@]} != 0 ]]; then
+  echo "fuzz.sh: ${#failed[@]} of $ntargets target(s) failed:" >&2
+  printf '  %s\n' "${failed[@]}" >&2
+  exit 1
+fi
+echo "fuzz.sh: ok ($ntargets targets, $fuzztime each)"
