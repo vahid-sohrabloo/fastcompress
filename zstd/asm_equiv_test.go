@@ -72,6 +72,7 @@ var crefTests = []struct {
 	{"DecompressCref", TestDecompressCref},
 	{"DecompressDictCref", TestDecompressDictCref},
 	{"DecompressStreamCref", TestDecompressStreamCref},
+	{"DecompressBlockCref", TestDecompressBlockCref},
 }
 
 // TestAsmEquiv runs every C-reference test with the assembly routines off,

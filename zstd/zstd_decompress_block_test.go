@@ -864,6 +864,12 @@ const (
 	bmStream
 )
 
+// compressedBlockHook, when set, sees each compressed block decodeFrameByBlocks
+// is about to decode, with d and the arguments of its decompressBlockInternal
+// call; checkContinuity says whether the decoder calls d.checkContinuity(dst,
+// dstCap) first (it may not have yet). The hook must not change d.
+var compressedBlockHook func(d *dctx, dst []byte, dstCap int, block []byte, streaming streamingOperation, checkContinuity bool)
+
 // decodeFrameByBlocks decodes the single frame in frame block by block,
 // test-locally, with no checksum check. The output is total bytes (C's
 // dstCapacity), written after pad bytes of garbage. From block index
@@ -937,6 +943,16 @@ func decodeFrameByBlocks(d *dctx, frame []byte, total, pad, segAt int, mode bloc
 			}
 		default:
 			d.ddictIsCold = cold
+			if compressedBlockHook != nil {
+				switch mode {
+				case bmBlock:
+					compressedBlockHook(d, buf[:len(buf):cap(buf)], rest, block, notStreaming, true)
+				case bmFrame:
+					compressedBlockHook(d, buf, rest, block, notStreaming, false)
+				case bmStream:
+					compressedBlockHook(d, buf, min(rest, d.blockSizeMax()), block, isStreaming, true)
+				}
+			}
 			switch mode {
 			case bmBlock:
 				n, e = d.decompressBlock(buf[:len(buf):cap(buf)], block)

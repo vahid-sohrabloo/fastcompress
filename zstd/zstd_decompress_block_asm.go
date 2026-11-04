@@ -1,0 +1,64 @@
+//go:build amd64 && !appengine && !noasm && !purego && gc
+
+// The Go side of the sequence fast loop's assembly.
+
+package zstd
+
+// sequencesFast runs the assembly fast loop while f.nbSeq > 1, executing
+// with execSequence each sequence the loop decodes but hands back (one that
+// takes execSequenceEnd or the extDict path). It does nothing when the
+// assembly is off, or when the buffers lack the room the loop's BOUNDS
+// rely on: out must hold oend, and lits WILDCOPY_OVERLENGTH bytes past
+// litEnd (every literal buffer placement leaves them; see execSequence).
+func sequencesFast(st *seqState, f *seqFast, extDict []byte) dErr {
+	if !useSeqDecAsm || len(f.out) == 0 || f.oend > len(f.out) || f.litEnd+wildcopyOverlength > len(f.lits) {
+		return 0
+	}
+	for f.nbSeq > 1 {
+		sequence, pending := f.runAsm(st)
+		if !pending {
+			break
+		}
+		oneSeqSize, e := execSequence(f.out, f.op, f.oend, sequence, f.lits, &f.litPtr, f.litEnd, f.prefixStart, extDict)
+		if e != 0 {
+			return e
+		}
+		f.op += oneSeqSize
+		f.nbSeq--
+	}
+	return 0
+}
+
+// runAsm runs decodeExecSeqsAsm once from st and f, and stores the state it
+// leaves back into them. It returns the sequence the loop stopped on, if
+// any (pending). Preconditions: sequencesFast's.
+func (f *seqFast) runAsm(st *seqState) (seq, bool) {
+	src, ptr, container, consumed := st.dStream.Raw()
+	a := seqAsmArgs{
+		bitContainer: container,
+		bitsConsumed: uint64(consumed),
+		ptr:          ptr,
+		src:          &src[0],
+		stateLL:      st.stateLL.state,
+		stateML:      st.stateML.state,
+		stateOf:      st.stateOffb.state,
+		tableLL:      &st.stateLL.table[0],
+		tableML:      &st.stateML.table[0],
+		tableOf:      &st.stateOffb.table[0],
+		rep:          st.prevOffset,
+		out:          &f.out[0],
+		op:           f.op,
+		oendW:        f.oend - wildcopyOverlength,
+		lits:         &f.lits[0],
+		litPtr:       f.litPtr,
+		litEnd:       f.litEnd,
+		prefixStart:  f.prefixStart,
+		nbSeq:        f.nbSeq,
+	}
+	decodeExecSeqsAsm(&a)
+	st.dStream.SetRaw(src, a.ptr, a.bitContainer, uint32(a.bitsConsumed))
+	st.stateLL.state, st.stateML.state, st.stateOffb.state = a.stateLL, a.stateML, a.stateOf
+	st.prevOffset = a.rep
+	f.op, f.litPtr, f.nbSeq = a.op, a.litPtr, a.nbSeq
+	return seq{litLength: a.litLength, matchLength: a.matchLength, offset: a.offset}, a.pending != 0
+}

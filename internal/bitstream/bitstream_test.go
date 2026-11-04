@@ -163,3 +163,14 @@ func TestReloadOverflowKeepsContainer(t *testing.T) {
 		t.Fatal("EndOfDStream true after overflow")
 	}
 }
+
+// TestRawRoundTrip: Raw returns the state SetRaw sets.
+func TestRawRoundTrip(t *testing.T) {
+	src := make([]byte, 16)
+	var d DStream
+	d.SetRaw(src, 5, 0x0123456789abcdef, 13)
+	s, ptr, c, n := d.Raw()
+	if &s[0] != &src[0] || len(s) != len(src) || ptr != 5 || c != 0x0123456789abcdef || n != 13 {
+		t.Fatalf("Raw = len %d, %d, %#x, %d", len(s), ptr, c, n)
+	}
+}

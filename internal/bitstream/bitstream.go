@@ -268,6 +268,12 @@ func (d *DStream) BitsConsumed() uint32 { return d.bitsConsumed }
 // C: BIT_DStream_t.bitsConsumed (set directly by HUF_decodeLastSymbolX2)
 func (d *DStream) SetBitsConsumed(n uint32) { d.bitsConsumed = n }
 
+// Raw returns the reader's state, as SetRaw takes it. It is how the zstd
+// sequence decoder hands a stream to its assembly loop.
+func (d *DStream) Raw() (src []byte, ptr int, container uint64, bitsConsumed uint32) {
+	return d.src, d.ptr, d.bitContainer, d.bitsConsumed
+}
+
 // SetRaw sets the reader's state directly: src (C: start = src), the read
 // offset ptr (0 <= ptr <= len(src)-8), the container and the consumed bit
 // count. It is how the HUF fast decoders hand a stream back to the generic

@@ -1355,6 +1355,19 @@ func (d *dctx) decompressSequencesBodySplitLitBuffer(out []byte, ostart, maxDstS
 	return op - ostart, 0
 }
 
+// seqFast is decompressSequencesBody's execution state, which the sequence
+// fast loop (sequencesFast) advances: the output out[op:oend], the literals
+// lits[litPtr:litEnd], the prefix start in out, and the sequences left.
+type seqFast struct {
+	out         []byte
+	op, oend    int
+	lits        []byte
+	litPtr      int
+	litEnd      int
+	prefixStart int
+	nbSeq       int
+}
+
 // decompressSequencesBody decodes the sequences when the literals are not
 // split (in dst after the block's output, or elsewhere).
 // C: zstd_decompress_block.c:ZSTD_decompressSequences_body
@@ -1377,6 +1390,15 @@ func (d *dctx) decompressSequencesBody(out []byte, ostart, maxDstSize int,
 		if e := d.initSeqState(&seqState, seqSrc); e != 0 {
 			return 0, e
 		}
+
+		// Where the assembly fast loop runs, it takes the sequences while
+		// it can; the loop below finishes the block.
+		f := seqFast{out: out, op: op, oend: oend, lits: lits, litPtr: litPtr, litEnd: litEnd,
+			prefixStart: prefixStart, nbSeq: nbSeq}
+		if e := sequencesFast(&seqState, &f, extDict); e != 0 {
+			return 0, e
+		}
+		op, litPtr, nbSeq = f.op, f.litPtr, f.nbSeq
 
 		for ; nbSeq != 0; nbSeq-- {
 			sequence := decodeSequence(&seqState, isLongOffset, nbSeq == 1)
