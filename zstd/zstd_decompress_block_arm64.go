@@ -15,7 +15,7 @@ func init() {
 }
 
 // decAsmAvailable reports whether the CPU runs the decoder's sequence
-// assembly.
+// assembly (the fast loop and the table builder).
 func decAsmAvailable() bool { return true }
 
 // decodeExecSeqsAsm is seqFast.runGo (zstd_decompress_block_asm_test.go)
@@ -34,10 +34,18 @@ func decodeExecSeqsAsm(a *seqAsmArgs)
 //go:noescape
 func decodeExecSeqsSplitAsm(a *seqAsmArgs)
 
-// useFSETableAsm stays false: buildFSETable has no arm64 assembly yet, so
-// buildFSETableFast never calls buildFSETableAsm.
+// useFSETableAsm selects the assembly sequence-table builder (baseline
+// arm64). C has no assembly here either.
 var useFSETableAsm bool
 
-func buildFSETableAsm(_ *seqSymbol, _ *int16, _ uint, _ *uint32, _ *uint8, _ uint, _ *buildFSETableWksp) bool {
-	return false
+func init() {
+	cpu.RegisterAsm("buildFSETable", &useFSETableAsm, decAsmAvailable)
 }
+
+// buildFSETableAsm is buildFSETable in assembly. It returns false, leaving
+// the table to the Go body, when norm is not a valid distribution (see
+// zstd_decompress_block_arm64.s). Preconditions: buildFSETableFast's.
+// C: zstd_decompress_block.c:ZSTD_buildFSETable_body
+//
+//go:noescape
+func buildFSETableAsm(dt *seqSymbol, norm *int16, maxSV1 uint, baseValue *uint32, nbAdd *uint8, tableLog uint, wksp *buildFSETableWksp) bool

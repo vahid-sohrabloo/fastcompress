@@ -1,4 +1,4 @@
-//go:build amd64 && !appengine && !noasm && !purego && gc
+//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
 
 package zstd
 
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"unsafe"
@@ -476,7 +477,8 @@ func TestBuildFSETableAsmLayout(t *testing.T) {
 
 // TestBuildFSETableAsmRegistered checks the predicate registered with
 // cpu.RegisterAsm: the builder is registered once with its switch, follows
-// the detected BMI2 in SetAsmMode("on"), and is off in "nobmi2" and "off".
+// the detected BMI2 in SetAsmMode("on"), and is off in "off" and, on
+// amd64, in "nobmi2" (arm64 is baseline: on).
 func TestBuildFSETableAsmRegistered(t *testing.T) {
 	found := 0
 	for _, r := range cpu.AsmRoutines() {
@@ -503,12 +505,12 @@ func TestBuildFSETableAsmRegistered(t *testing.T) {
 	for _, m := range []struct {
 		mode string
 		want bool
-	}{{"nobmi2", false}, {"off", false}, {"on", true}} {
+	}{{"nobmi2", runtime.GOARCH == "arm64"}, {"off", false}, {"on", true}} {
 		if err := cpu.SetAsmMode(m.mode); err != nil {
 			t.Fatal(err)
 		}
 		if m.mode == "on" {
-			m.want = cpu.X86.HasBMI2
+			m.want = cpu.X86.HasBMI2 || runtime.GOARCH == "arm64"
 		}
 		if useFSETableAsm != m.want {
 			t.Errorf("mode %s: asm %v", m.mode, useFSETableAsm)

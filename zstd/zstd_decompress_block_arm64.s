@@ -257,3 +257,237 @@ exit:
 	MOVD a+0(FP), R23
 	SEQ_EXIT
 	RET
+
+// func buildFSETableAsm(dt *seqSymbol, norm *int16, maxSV1 uint, baseValue *uint32, nbAdd *uint8, tableLog uint, wksp *buildFSETableWksp) bool
+//
+// C: zstd_decompress_block.c:ZSTD_buildFSETable_body (Go: buildFSETable),
+// as buildFSETableAsm of zstd_decompress_block_amd64.s, stage for stage:
+// the init loop (symbolNext, the low-probability cells from the top down,
+// the header), the spread (C's 8-byte lay-down then the 2-way unrolled
+// scatter when no symbol has count -1, the step walk skipping the
+// low-probability area otherwise), and the cells loop (nbBits = tableLog -
+// highbit(nextState) with CLZW, nextState with LSLW, then the four fields
+// stored one by one). It returns false, having written at most symbolNext
+// and the baseValue of some low-probability cells (which the Go body then
+// rebuilds), when norm is not a valid distribution: a count below -1, or
+// counts (-1 counted as 1) not summing to 1 << tableLog. C presumes a
+// valid one (fse.ReadNCount's), and so does the Go body; only valid ones
+// reach either from the decoder. Preconditions (buildFSETableFast checks
+// them): 5 <= tableLog <= maxFSELog (C's FSE_MIN_TABLELOG; BOUNDS (6)
+// needs an odd step, which tableLog >= 4 gives: at 3 it is 8), 1 <= maxSV1
+// <= maxSeq + 1, and norm, baseValue and nbAdd have maxSV1 entries, dt
+// 1 + (1 << tableLog) cells.
+//
+// Registers: dt R0, norm R1, maxSV1 R2, baseValue R3, nbAdd R4,
+// symbolNext R5 (wksp; spread is at wksp + 106, C's symbolNext + MaxSeq +
+// 1), tableSize R6, highThreshold R7 (signed), tableLog R8, s R9, the sum
+// R10, the count R11, the OR of the counts R12, step R13, spread R14,
+// tableMask R15, position R16; R17, R19, R20 scratch.
+//
+// BOUNDS:
+// (1) Init: s < maxSV1 <= len(norm), <= maxSeq + 1 = len(symbolNext). A
+//     count -1 writes tableDecode[highThreshold] only after checking
+//     highThreshold >= 0 (else false); highThreshold starts at
+//     tableSize - 1 and only decreases, so the cell is in dt.
+// (2) Validation: the init loop returns false at a count below -1, and
+//     after it, before the header or anything else is written, so does a
+//     sum (-1 as 1) other than tableSize. Then highThreshold + 1 = the sum
+//     of the positive counts (it is -1 when every count is -1).
+// (3) Lay-down (no count -1): the 8-byte stores for symbol s are at pos + i,
+//     i < max(n, 1) in steps of 8, where pos is the sum of the earlier
+//     counts; so they end at most at tableSize + 8 <= (1 << maxFSELog) +
+//     8 = len(spread) (C: the +8 of ZSTD_BUILD_FSE_TABLE_WKSP_SIZE). spread[0, tableSize) then
+//     holds each symbol s < maxSV1 count[s] times.
+// (4) Scatter: reads spread[0, tableSize), writes tableDecode[position &
+//     (tableSize - 1)].
+// (5) Step walk: writes tableDecode[position], position masked to the
+//     table. The walk runs only for a positive count, so then
+//     highThreshold >= 0 (2) and its skip loop ends: position 0 <=
+//     highThreshold is reached.
+// (6) Cells: u < tableSize. Every cell holds a symbol < maxSV1 written by
+//     this call: the step is odd (tableLog >= 5), so the scatter is a
+//     permutation of the table, and the walk visits each of
+//     [0, highThreshold] once in its first highThreshold + 1 = sum of
+//     positive counts stores (2); the cells above highThreshold are the
+//     -1 symbols' (1). nextState = symbolNext[symbol] >= 1 for every
+//     symbol in a cell, so CLZW's input is never 0. So symbolNext[symbol], baseValue[symbol] and
+//     nbAdd[symbol] are in bounds (the lengths are preconditions).
+// (7) Frame $0-57 (NOFRAME): seven 8-byte arguments and the bool result;
+//     no calls, no globals, no stack writes; only R0-R17, R19 and R20 are
+//     written.
+TEXT ·buildFSETableAsm(SB), NOSPLIT|NOFRAME, $0-57
+	MOVD dt+0(FP), R0
+	MOVD norm+8(FP), R1
+	MOVD maxSV1+16(FP), R2
+	MOVD baseValue+24(FP), R3
+	MOVD nbAdd+32(FP), R4
+	MOVD tableLog+40(FP), R8
+	MOVD wksp+48(FP), R5
+	MOVD $1, R6
+	LSL  R8, R6, R6
+	SUB  $1, R6, R7
+
+	// Init: R9 s, R10 the sum, R11 the count, R12 the OR of the counts
+	// other than -1: below largeLimit (a power of two) exactly when each
+	// of them is.
+	MOVD ZR, R9
+	MOVD ZR, R10
+	MOVD ZR, R12
+
+fseInit:
+	MOVH (R1)(R9<<1), R11
+	CMN  $1, R11
+	BEQ  fseLowProb
+	BLT  fseFail
+	ORR  R11, R12, R12
+	ADD  R11, R10, R10
+	MOVH R11, (R5)(R9<<1)
+	ADD  $1, R9, R9
+	CMP  R2, R9
+	BLT  fseInit
+	B    fseInitDone
+
+fseLowProb:
+	TBNZ $63, R7, fseFail
+	ADD  R7<<3, R0, R17
+	MOVW R9, 12(R17)       // tableDecode[highThreshold].baseValue = s
+	SUB  $1, R7, R7
+	MOVD $1, R17
+	MOVH R17, (R5)(R9<<1)
+	ADD  $1, R10, R10
+	ADD  $1, R9, R9
+	CMP  R2, R9
+	BLT  fseInit
+
+fseInitDone:
+	CMP R6, R10
+	BNE fseFail
+
+	// Header (C: ZSTD_seqSymbol_header): fastMode in nextState, 1 unless
+	// a count is >= largeLimit = tableSize / 2; tableLog in baseValue.
+	LSR  $1, R6, R17
+	CMP  R17, R12
+	CSET LT, R17
+	ORR  R8<<32, R17, R17
+	MOVD R17, (R0)
+
+	// R13 = step (C: FSE_TABLESTEP), R14 = spread, R15 = tableMask.
+	LSR $1, R6, R13
+	ADD R6>>3, R13, R13
+	ADD $3, R13, R13
+	ADD $106, R5, R14
+	SUB $1, R6, R15
+	CMP R15, R7
+	BNE fseSlow
+
+	// Lay down the symbols in order, 8 bytes at a time: R16 = spread + pos,
+	// R17 = s * 0x0101010101010101, R19 = 0x0101010101010101, R11 = n,
+	// R20 the inner loop's i (C: i = 8; i < n; i += 8).
+	MOVD R14, R16
+	MOVD ZR, R17
+	MOVD ZR, R9
+	MOVD $0x0101010101010101, R19
+
+fseLay:
+	MOVH (R1)(R9<<1), R11
+	MOVD R17, (R16)
+	CMP  $8, R11
+	BLE  fseLayNext
+	MOVD $8, R20
+
+fseLayInner:
+	MOVD R17, (R16)(R20)
+	ADD  $8, R20, R20
+	CMP  R11, R20
+	BLT  fseLayInner
+
+fseLayNext:
+	ADD R11, R16, R16
+	ADD R19, R17, R17
+	ADD $1, R9, R9
+	CMP R2, R9
+	BLT fseLay
+
+	// Spread the positions across the table, unrolled twice (C's
+	// unroll = 2): R16 = position, R9 = s, R20 = spread + s.
+	MOVD ZR, R16
+	MOVD ZR, R9
+
+fseScatter:
+	ADD   R9, R14, R20
+	MOVBU (R20), R11
+	AND   R15, R16, R17
+	ADD   R17<<3, R0, R17
+	MOVW  R11, 12(R17)
+	ADD   R13, R16, R16
+	MOVBU 1(R20), R11
+	AND   R15, R16, R17
+	ADD   R17<<3, R0, R17
+	MOVW  R11, 12(R17)
+	ADD   R13, R16, R16
+	AND   R15, R16, R16
+	ADD   $2, R9, R9
+	CMP   R6, R9
+	BLT   fseScatter
+	B     fseCells
+
+	// Step walk: R16 = position, R9 = s, R11 = the count left.
+fseSlow:
+	MOVD ZR, R16
+	MOVD ZR, R9
+
+fseSlowSym:
+	MOVH (R1)(R9<<1), R11
+	CMP  $0, R11
+	BLE  fseSlowNext
+
+fseSlowCell:
+	ADD  R16<<3, R0, R17
+	MOVW R9, 12(R17)
+
+fseSlowStep:
+	ADD  R13, R16, R16
+	AND  R15, R16, R16
+	CMP  R7, R16
+	BHI  fseSlowStep
+	SUBS $1, R11, R11
+	BNE  fseSlowCell
+
+fseSlowNext:
+	ADD $1, R9, R9
+	CMP R2, R9
+	BLT fseSlowSym
+
+	// Cells: R14 = &tableDecode[u], R13 = its end, R11 = symbol, R16 =
+	// nextState then the cell's, R17 = nbBits.
+fseCells:
+	ADD $8, R0, R14
+	ADD R6<<3, R14, R13
+
+fseCell:
+	MOVWU 4(R14), R11
+	MOVHU (R5)(R11<<1), R16
+	ADD   $1, R16, R17
+	MOVH  R17, (R5)(R11<<1)
+	CLZW  R16, R17
+	ADD   R8, R17, R17
+	SUB   $31, R17, R17     // nbBits = tableLog - (31 - clz32(nextState))
+	LSLW  R17, R16, R16
+	SUBW  R6, R16, R16
+	MOVB  R17, 3(R14)
+	MOVH  R16, (R14)
+	MOVBU (R4)(R11), R17
+	MOVB  R17, 2(R14)
+	MOVWU (R3)(R11<<2), R17
+	MOVW  R17, 4(R14)
+	ADD   $8, R14, R14
+	CMP   R13, R14
+	BNE   fseCell
+
+	MOVD $1, R17
+	MOVB R17, ret+56(FP)
+	RET
+
+fseFail:
+	MOVB ZR, ret+56(FP)
+	RET
