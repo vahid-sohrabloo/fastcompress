@@ -62,6 +62,38 @@
 // offset DX; AX CX BP scratch. BP is free to use: the frame is non-empty,
 // so the assembler saves BP in the prologue and restores it before RET.
 
+// SEQ_PENDING stores the pending sequence, SEQ_EXIT the loop's state,
+// into the arguments at AX (each entry reloads AX = a+0(FP) first, in
+// the .s, where go vet's asmdecl checks it). Clobbers CX, R10, R11, R12.
+#define SEQ_PENDING \
+	MOVQ SI, ARGS_LL(AX); \
+	MOVQ DI, ARGS_ML(AX); \
+	MOVQ DX, ARGS_OFF(AX); \
+	MOVQ $1, ARGS_PENDING(AX)
+
+#define SEQ_EXIT \
+	MOVQ R8, ARGS_BC(AX); \
+	MOVQ R9, ARGS_CONSUMED(AX); \
+	SUBQ ARGS_SRC(AX), R10; \
+	MOVQ R10, ARGS_PTR(AX); \
+	MOVQ STLL(SP), CX; \
+	MOVQ CX, ARGS_STLL(AX); \
+	MOVQ STML(SP), CX; \
+	MOVQ CX, ARGS_STML(AX); \
+	MOVQ STOF(SP), CX; \
+	MOVQ CX, ARGS_STOF(AX); \
+	MOVQ BX, ARGS_REP+0(AX); \
+	MOVQ REP1(SP), CX; \
+	MOVQ CX, ARGS_REP+8(AX); \
+	MOVQ REP2(SP), CX; \
+	MOVQ CX, ARGS_REP+16(AX); \
+	SUBQ ARGS_OUT(AX), R11; \
+	MOVQ R11, ARGS_OP(AX); \
+	SUBQ ARGS_LITS(AX), R12; \
+	MOVQ R12, ARGS_LITPTR(AX); \
+	MOVQ NBSEQ(SP), CX; \
+	MOVQ CX, ARGS_NBSEQ(AX)
+
 // BYTE_OF(cell, shift, r): r = (cell >> shift) & 0xFF.
 #define BYTE_OF(cell, shift, r) \
 	MOVQ    cell, r; \
@@ -168,12 +200,24 @@
 //     prefixStart <= op <= oLitEnd (precondition), so oLitEnd - prefixStart
 //     does not wrap.
 // (7) Frame $112-8: one pointer argument, no results; the slots above.
+//     The argument is read only here (a+0(FP)), where go vet's asmdecl
+//     checks it; the #included body uses registers and frame slots.
 //
 // TABLE INVARIANT: an offset cell with nbAdditionalBits 1 has baseValue 1
 // (OF_base[1]: buildFSETable and buildSeqTableRLE take both from the code,
 // OF_bits[1] == 1). The loop checks it before using prevOffset[offset].
 TEXT ·decodeExecSeqsAsm(SB), NOSPLIT, $112-8
+	MOVQ a+0(FP), AX
 #include "zstd_decompress_block_seqloop_amd64.h"
+
+pending:
+	MOVQ a+0(FP), AX
+	SEQ_PENDING
+
+exit:
+	MOVQ a+0(FP), AX
+	SEQ_EXIT
+	RET
 
 
 // func decodeExecSeqsSplitAsm(a *seqAsmArgs)
@@ -207,9 +251,19 @@ TEXT ·decodeExecSeqsAsm(SB), NOSPLIT, $112-8
 //     Memory safety does not depend on this: (4) and (5) bound every
 //     access with or without split, and with lits != out.
 TEXT ·decodeExecSeqsSplitAsm(SB), NOSPLIT, $112-8
+	MOVQ a+0(FP), AX
 #define SEQ_SPLIT
 #include "zstd_decompress_block_seqloop_amd64.h"
 #undef SEQ_SPLIT
+
+pending:
+	MOVQ a+0(FP), AX
+	SEQ_PENDING
+
+exit:
+	MOVQ a+0(FP), AX
+	SEQ_EXIT
+	RET
 
 // func buildFSETableAsm(dt *seqSymbol, norm *int16, maxSV1 uint, baseValue *uint32, nbAdd *uint8, tableLog uint, wksp *buildFSETableWksp) bool
 //

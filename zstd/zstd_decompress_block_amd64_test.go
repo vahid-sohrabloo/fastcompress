@@ -458,6 +458,11 @@ func newSeqFastRun(t testing.TB, d *dctx, out []byte, ostart, dstCap int, seqSrc
 	isSplit := d.litBufferLocation == split
 	if isSplit {
 		litEnd = ostart + d.litBufferEnd
+		// decodeExecSeqsSplitAsm's oend - 32 hand-back never fires
+		// before its iLitEnd - 32 one: iLitEnd <= litEnd <= oend - 32.
+		if litEnd > oend-wildcopyOverlength {
+			t.Fatalf("split layout: litEnd %d > oend %d - %d", litEnd, oend, wildcopyOverlength)
+		}
 		r.extra = alloc(len(d.litExtraBuffer), false)
 		copy(r.extra, d.litExtraBuffer[:])
 	}
@@ -777,7 +782,7 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 	}
 	rng := rand.New(rand.NewPCG(9, 9))
 	arms := seqArmCounts()
-	ran := 0
+	ran, glue := 0, 0
 	for iter := 0; iter < 3000; iter++ {
 		d := newTestDctx(blockSizeMax)
 		dstCap := blockSizeMax + 2*wildcopyOverlength + rng.IntN(1<<17)
@@ -801,9 +806,20 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 		if iter%5 == 0 {
 			nbSeq = min(nbSeq, 2+rng.IntN(8)) // the loop reaches nbSeq 1
 		}
-		runs := [2]*seqFastRun{
+		// Split (decompressSequencesBodySplitLitBuffer's first loop): the
+		// literals at out[litPtr:litEnd], up to 1 KiB ahead of op, then
+		// in extra (random bytes, the same on both sides). Split states
+		// also run sequencesFastSplit itself (runs[2]) against the Go
+		// loop (runs[3]): checkSplitGlue.
+		isSplit := iter%6 == 1
+		runs := []*seqFastRun{
 			newSeqFastRun(t, d, out, hist, dstCap, block[litCSize+hSize:], nbSeq, true, iter&2 != 0, iter&8 != 0),
 			newSeqFastRun(t, d, out, hist, dstCap, block[litCSize+hSize:], nbSeq, false, false, false),
+		}
+		if isSplit {
+			runs = append(runs,
+				newSeqFastRun(t, d, out, hist, dstCap, block[litCSize+hSize:], nbSeq, true, iter&2 != 0, iter&8 != 0),
+				newSeqFastRun(t, d, out, hist, dstCap, block[litCSize+hSize:], nbSeq, false, false, false))
 		}
 		var ofTable []seqSymbol
 		switch iter % 7 {
@@ -834,10 +850,6 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 			consumed = uint32(rng.IntN(80))
 		}
 		op := hist + rng.IntN(runs[0].f.oend-hist+1)
-		// Split (decompressSequencesBodySplitLitBuffer's first loop): the
-		// literals at out[litPtr:litEnd], up to 1 KiB ahead of op, then
-		// in extra (random bytes, the same on both sides).
-		isSplit := iter%6 == 1
 		lim := len(out) - wildcopyOverlength
 		litPtr := min(op+rng.IntN(1024), lim)
 		litEnd := litPtr + rng.IntN(lim-litPtr+1)
@@ -862,10 +874,56 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 				}
 			}
 		}
+		if isSplit {
+			glue += checkSplitGlue(t, runs[2], runs[3])
+		}
 		ran += compareSeqFast(t, runs[0], runs[1], nil)
 	}
-	t.Logf("%d sequences through the fast loops", ran)
+	t.Logf("%d sequences through the fast loops, %d through sequencesFastSplit", ran, glue)
+	if cpu.X86.HasBMI2 && glue == 0 {
+		t.Error("sequencesFastSplit executed no sequence")
+	}
 	checkSeqArms(t, arms, syntheticArms...)
+}
+
+// checkSplitGlue runs sequencesFastSplit, the production glue, from p
+// (split) with the assembly on, and the Go loop from o, in the same state,
+// as sequencesFastSplit does (runGo, execPending until the break, an
+// error or the loop's stop), and fails t unless both end in the same
+// state with the same result. With the assembly unavailable (no BMI2,
+// FASTZSTD_FUZZ_ASM) sequencesFastSplit must do nothing. It returns the
+// number of sequences sequencesFastSplit executed.
+func checkSplitGlue(t testing.TB, p, o *seqFastRun) int {
+	t.Helper()
+	before := p.f.nbSeq
+	var psq seq
+	var pbrk, on bool
+	var pe dErr
+	withAsm(t, true, func() {
+		on = useSeqDecAsm
+		psq, pbrk, pe = sequencesFastSplit(&p.st, &p.f, nil)
+	})
+	var osq seq
+	var obrk bool
+	var oe dErr
+	for on && o.f.nbSeq > 1 {
+		sq, pending := o.f.runGo(&o.st)
+		if !pending {
+			break
+		}
+		if o.f.litPtr+sq.litLength > o.f.litEnd {
+			osq, obrk = sq, true
+			break
+		}
+		if oe = o.execPending(sq, nil); oe != 0 {
+			break
+		}
+	}
+	if pe != oe || pbrk != obrk || psq != osq {
+		t.Fatalf("sequencesFastSplit: err %d break %v %+v, Go: err %d break %v %+v", pe, pbrk, psq, oe, obrk, osq)
+	}
+	sameSeqFastState(t, "sequencesFastSplit", p, o)
+	return before - p.f.nbSeq
 }
 
 // FuzzSeqAsmEquiv decodes hostile blocks as FuzzDecompressBlock does (same

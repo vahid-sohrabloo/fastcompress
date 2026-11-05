@@ -60,10 +60,12 @@ func sequencesFastSplit(st *seqState, f *seqFast, extDict []byte) (sequence seq,
 	return seq{}, false, 0
 }
 
-// asmOK reports whether f meets the preconditions the loop's BOUNDS rely
-// on (zstd_decompress_block_amd64.s): out holds oend, lits holds
-// WILDCOPY_OVERLENGTH bytes past litEnd (every literal buffer placement
-// that reaches decompressSequencesBody leaves them; see execSequence),
+// asmOK reports whether f meets the preconditions the loops' BOUNDS rely
+// on (zstd_decompress_block_amd64.s, both entries): out holds oend, lits
+// holds WILDCOPY_OVERLENGTH bytes past litEnd (every literal buffer
+// placement that reaches decompressSequencesBody leaves them, see
+// execSequence; so does the split layout, lits = out with litEnd =
+// litBufferEnd = expectedWriteSize - WILDCOPY_OVERLENGTH),
 // op <= oend, 0 <= litPtr <= litEnd and 0 <= prefixStart <= op. op only grows
 // and every executed sequence keeps op <= oend and litPtr <= litEnd, so
 // checking them once per block is enough.
@@ -72,9 +74,10 @@ func (f *seqFast) asmOK() bool {
 		f.op <= f.oend && 0 <= f.litPtr && f.litPtr <= f.litEnd && 0 <= f.prefixStart && f.prefixStart <= f.op
 }
 
-// runAsm runs decodeExecSeqsAsm once from st and f, and stores the state it
-// leaves back into them. It returns the sequence the loop stopped on, if
-// any (pending). Preconditions: sequencesFast's.
+// runAsm runs the assembly loop once from st and f (decodeExecSeqsSplitAsm
+// with f.split, else decodeExecSeqsAsm), and stores the state it leaves
+// back into them. It returns the sequence the loop stopped on, if any
+// (pending). Preconditions: sequencesFast's, or sequencesFastSplit's.
 func (f *seqFast) runAsm(st *seqState) (seq, bool) {
 	src, ptr, container, consumed := st.dStream.Raw()
 	a := seqAsmArgs{

@@ -1,12 +1,13 @@
 // The body of decodeExecSeqsAsm and decodeExecSeqsSplitAsm
 // (zstd_decompress_block_amd64.s, which has their BOUNDS and includes this
-// right after each TEXT line; labels are local to each TEXT symbol). With
-// SEQ_SPLIT defined it adds ZSTD_execSequenceSplitLitBuffer's oMatchEnd >
-// oend_w hand-back. Two entries keep decodeExecSeqsAsm's loop exactly as
-// it was: a run-time switch in the shared loop cost 1 to 2% on blocks
-// that never split.
-
-	MOVQ a+0(FP), AX
+// in each TEXT symbol; labels are local to each symbol). With SEQ_SPLIT
+// defined it adds ZSTD_execSequenceSplitLitBuffer's oMatchEnd > oend_w
+// hand-back. Two entries keep decodeExecSeqsAsm's loop exactly as it was:
+// a run-time switch in the shared loop cost 1 to 2% on blocks that never
+// split. On entry AX is the argument a; the including TEXT supplies the
+// pending and exit labels (SEQ_PENDING, SEQ_EXIT). No a+0(FP) here: go
+// vet's asmdecl does not read #included files, so every FP reference stays
+// in the .s, where it checks them.
 
 	MOVQ ARGS_BC(AX), R8
 	MOVQ ARGS_CONSUMED(AX), R9
@@ -296,34 +297,3 @@ seqDone:
 	DECQ NBSEQ(SP)
 	JMP  loop
 
-pending:
-	MOVQ a+0(FP), AX
-	MOVQ SI, ARGS_LL(AX)
-	MOVQ DI, ARGS_ML(AX)
-	MOVQ DX, ARGS_OFF(AX)
-	MOVQ $1, ARGS_PENDING(AX)
-
-exit:
-	MOVQ a+0(FP), AX
-	MOVQ R8, ARGS_BC(AX)
-	MOVQ R9, ARGS_CONSUMED(AX)
-	SUBQ ARGS_SRC(AX), R10
-	MOVQ R10, ARGS_PTR(AX)
-	MOVQ STLL(SP), CX
-	MOVQ CX, ARGS_STLL(AX)
-	MOVQ STML(SP), CX
-	MOVQ CX, ARGS_STML(AX)
-	MOVQ STOF(SP), CX
-	MOVQ CX, ARGS_STOF(AX)
-	MOVQ BX, ARGS_REP+0(AX)
-	MOVQ REP1(SP), CX
-	MOVQ CX, ARGS_REP+8(AX)
-	MOVQ REP2(SP), CX
-	MOVQ CX, ARGS_REP+16(AX)
-	SUBQ ARGS_OUT(AX), R11
-	MOVQ R11, ARGS_OP(AX)
-	SUBQ ARGS_LITS(AX), R12
-	MOVQ R12, ARGS_LITPTR(AX)
-	MOVQ NBSEQ(SP), CX
-	MOVQ CX, ARGS_NBSEQ(AX)
-	RET
