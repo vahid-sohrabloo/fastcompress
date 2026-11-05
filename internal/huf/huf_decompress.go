@@ -2,7 +2,7 @@
 // Meta Platforms, Inc. and affiliates; BSD/GPLv2 dual license): for the
 // single-symbol (X1) and double-symbol (X2) decoders, the decoding table
 // reader, the 1X and 4X bodies and the fast 4X path (its loops are in
-// huf_decompress_generic.go and huf_decompress_amd64.s); then the
+// huf_decompress_generic.go and huf_decompress_{amd64,arm64}.s); then the
 // decoder selector and the entry points the literals decoder calls.
 //
 // The port has 64-bit semantics on every GOARCH: the 64-bit bit container
@@ -527,8 +527,8 @@ func decompress4X1Fast(dst, src []byte, dt *DTable, flags int) (int, error) {
 // C: huf_decompress.c:HUF_decompress4X1_usingDTable_internal — with
 // DYNAMIC_BMI2 (x86-64) C runs only the body when HUF_flags_bmi2 is unset;
 // here FlagBMI2 is ignored and the decoder behaves as C on a BMI2 CPU (or on
-// targets without DYNAMIC_BMI2). The fast loop is the amd64 assembly when
-// the CPU has BMI2 and flags lacks FlagDisableAsm, else the Go loop.
+// targets without DYNAMIC_BMI2). The fast loop is the assembly (amd64 with
+// BMI2, or arm64) when flags lacks FlagDisableAsm, else the Go loop.
 func Decompress4X1UsingDTable(dst, src []byte, dt *DTable, flags int) error {
 	if flags&FlagDisableFast == 0 {
 		ret, err := decompress4X1Fast(dst, src, dt, flags)

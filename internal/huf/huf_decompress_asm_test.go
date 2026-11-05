@@ -1,4 +1,4 @@
-//go:build amd64 && !appengine && !noasm && !purego && gc
+//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
 
 package huf
 
@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 	"unsafe"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
 )
 
-// TestHUFFastArgsLayout checks the offsets huf_decompress_amd64.s uses:
+// TestHUFFastArgsLayout checks the offsets huf_decompress_{amd64,arm64}.s use:
 // fastArgs has C's HUF_DecompressFastArgs layout (plus dst), and the
 // DTable's x1 and x2.
 func TestHUFFastArgsLayout(t *testing.T) {
@@ -40,12 +41,13 @@ func TestHUFFastArgsLayout(t *testing.T) {
 	}
 }
 
-// withHufAsm runs fn with the fast-loop assembly on (where cpu.X86, as it is
-// now, has BMI2) or off, then restores the switches.
+// withHufAsm runs fn with the fast-loop assembly on (where
+// hufFastAsmAvailable, as cpu.X86 is now, allows it: BMI2 on amd64, always
+// on arm64) or off, then restores the switches.
 func withHufAsm(on bool, fn func()) {
 	s1, s2 := useHuf4X1Asm, useHuf4X2Asm
-	useHuf4X1Asm = on && cpu.X86.HasBMI2
-	useHuf4X2Asm = on && cpu.X86.HasBMI2
+	useHuf4X1Asm = on && hufFastAsmAvailable()
+	useHuf4X2Asm = on && hufFastAsmAvailable()
 	defer func() { useHuf4X1Asm, useHuf4X2Asm = s1, s2 }()
 	fn()
 }
@@ -73,7 +75,7 @@ func readFastTable(t *testing.T, table []byte, x2 bool) (dt *DTable, hSize int, 
 }
 
 // x2TableViolation describes the first entry of dt.x2[:2048] that breaks
-// the TABLE INVARIANT of huf_decompress_amd64.s (length 1 or 2, nbBits <=
+// the TABLE INVARIANT of huf_decompress_{amd64,arm64}.s (length 1 or 2, nbBits <=
 // 11), or returns "".
 func x2TableViolation(dt *DTable) string {
 	for i, e := range dt.x2[:1<<decoderFastTableLog] {
@@ -116,9 +118,9 @@ func TestHUFX2TableInvariant(t *testing.T) {
 }
 
 // TestHUFAsmRegistered checks the predicates registered with
-// cpu.RegisterAsm: both fast loops are registered with their switches, are
-// off without BMI2 (SetAsmMode("nobmi2")) and follow the detected BMI2
-// otherwise.
+// cpu.RegisterAsm: both fast loops are registered with their switches; on
+// amd64 they are off without BMI2 (SetAsmMode("nobmi2")) and follow the
+// detected BMI2 otherwise; on arm64 (baseline) they are always on.
 func TestHUFAsmRegistered(t *testing.T) {
 	want := map[string]*bool{"huf.decompress4X1Fast": &useHuf4X1Asm, "huf.decompress4X2Fast": &useHuf4X2Asm}
 	found := 0
@@ -146,15 +148,16 @@ func TestHUFAsmRegistered(t *testing.T) {
 	if err := cpu.SetAsmMode("on"); err != nil {
 		t.Fatal(err)
 	}
-	bmi2 := cpu.X86.HasBMI2
-	if useHuf4X1Asm != bmi2 || useHuf4X2Asm != bmi2 {
-		t.Errorf("mode on, BMI2 %v: X1 asm %v, X2 asm %v", bmi2, useHuf4X1Asm, useHuf4X2Asm)
+	on := cpu.X86.HasBMI2 || runtime.GOARCH == "arm64"
+	if useHuf4X1Asm != on || useHuf4X2Asm != on {
+		t.Errorf("mode on, BMI2 %v: X1 asm %v, X2 asm %v", cpu.X86.HasBMI2, useHuf4X1Asm, useHuf4X2Asm)
 	}
 	if err := cpu.SetAsmMode("nobmi2"); err != nil {
 		t.Fatal(err)
 	}
-	if useHuf4X1Asm || useHuf4X2Asm {
-		t.Errorf("mode nobmi2: X1 asm %v, X2 asm %v, want both off", useHuf4X1Asm, useHuf4X2Asm)
+	on = runtime.GOARCH == "arm64"
+	if useHuf4X1Asm != on || useHuf4X2Asm != on {
+		t.Errorf("mode nobmi2: X1 asm %v, X2 asm %v, want both %v", useHuf4X1Asm, useHuf4X2Asm, on)
 	}
 }
 
@@ -254,7 +257,7 @@ func TestHUFAsmEquiv(t *testing.T) {
 		restore()
 	}
 
-	if !cpu.X86.HasBMI2 {
+	if !hufFastAsmAvailable() {
 		t.Log("no BMI2: the direct loop comparison runs the Go loop twice")
 	}
 	withHufAsm(true, func() {

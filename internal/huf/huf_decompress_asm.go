@@ -1,8 +1,26 @@
-//go:build amd64 && !appengine && !noasm && !purego && gc
+//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
 
-// The Go side of the fast 4X loops' assembly.
+// The Go side of the fast 4X loops' assembly, shared by amd64 and arm64.
 
 package huf
+
+// fastArgs has the layout of C's HUF_DecompressFastArgs (checked by
+// TestHUFFastArgsLayout), which huf_decompress_{amd64,arm64}.s read at fixed
+// offsets, plus dst. ip, op and oend hold offsets into src and dst, not
+// pointers: the loops add ilowest (&src[0]) and dst on entry and subtract
+// them again before returning, so the Go side never handles a pointer one
+// past the end of dst. dt is the whole table; the loops add the offset of
+// x1 or x2. iend is not read by the loops and stays zero.
+type fastArgs struct {
+	ip      [4]int    // 0
+	op      [4]int    // 32
+	bits    [4]uint64 // 64
+	dt      *DTable   // 96
+	ilowest *byte     // 104
+	oend    int       // 112
+	iend    [4]int    // 120
+	dst     *byte     // 152 (not in C)
+}
 
 // decompress4X1FastLoop runs the assembly fast loop when it is on and flags
 // lacks FlagDisableAsm, else decompress4X1FastCLoop.

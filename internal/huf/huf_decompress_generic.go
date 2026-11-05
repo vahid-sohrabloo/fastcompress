@@ -1,7 +1,7 @@
 // Port of libzstd v1.5.7 lib/decompress/huf_decompress.c (Copyright (c)
 // Meta Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the Go fast
 // 4X loops (HUF_decompress4X{1,2}_usingDTable_internal_fast_c_loop), which
-// run where the assembly loops of huf_decompress_amd64.s do not.
+// run where the assembly loops of huf_decompress_{amd64,arm64}.s do not.
 
 package huf
 
