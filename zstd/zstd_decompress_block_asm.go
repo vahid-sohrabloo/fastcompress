@@ -1,8 +1,11 @@
 //go:build amd64 && !appengine && !noasm && !purego && gc
 
-// The Go side of the sequence fast loop's assembly.
+// The Go side of the sequence fast loop's and the sequence-table
+// builder's assembly.
 
 package zstd
+
+import "github.com/vahid-sohrabloo/fastzstd/internal/fse"
 
 // sequencesFast runs the assembly fast loop while f.nbSeq > 1, executing
 // with execSequence each sequence the loop decodes but hands back (one that
@@ -71,4 +74,17 @@ func (f *seqFast) runAsm(st *seqState) (seq, bool) {
 	st.prevOffset = a.rep
 	f.op, f.litPtr, f.nbSeq = a.op, a.litPtr, a.nbSeq
 	return seq{litLength: a.litLength, matchLength: a.matchLength, offset: a.offset}, a.pending != 0
+}
+
+// buildFSETableFast builds the table with buildFSETableAsm, and reports
+// whether it did. It does nothing when the assembly is off or the
+// arguments break its preconditions: fse.MinTableLog <= tableLog <=
+// maxFSELog, 1 <= maxSV1 <= maxSeq+1, and norm, baseValue and nbAdd with
+// maxSV1 entries, dt with 1+(1<<tableLog) cells.
+func buildFSETableFast(dt []seqSymbol, norm []int16, maxSV1 uint, baseValue []uint32, nbAdd []uint8, tableLog uint, wksp *buildFSETableWksp) bool {
+	if !useFSETableAsm || tableLog < fse.MinTableLog || tableLog > maxFSELog || maxSV1 == 0 || maxSV1 > maxSeq+1 ||
+		uint(len(norm)) < maxSV1 || uint(len(baseValue)) < maxSV1 || uint(len(nbAdd)) < maxSV1 || uint(len(dt)) < 1+1<<tableLog {
+		return false
+	}
+	return buildFSETableAsm(&dt[0], &norm[0], maxSV1, &baseValue[0], &nbAdd[0], tableLog, wksp)
 }

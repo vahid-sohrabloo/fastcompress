@@ -53,3 +53,20 @@ type seqAsmArgs struct {
 //
 //go:noescape
 func decodeExecSeqsAsm(a *seqAsmArgs)
+
+// useFSETableAsm selects the assembly sequence-table builder, which needs
+// BMI2 (SHLX). Without it buildFSETable's Go body builds every table. C has
+// no assembly here either.
+var useFSETableAsm bool
+
+func init() {
+	cpu.RegisterAsm("buildFSETable", &useFSETableAsm, func() bool { return cpu.X86.HasBMI2 })
+}
+
+// buildFSETableAsm is buildFSETable in assembly. It returns false, leaving
+// the table to the Go body, when norm is not a valid distribution (see
+// zstd_decompress_block_amd64.s). Preconditions: buildFSETableFast's.
+// C: zstd_decompress_block.c:ZSTD_buildFSETable_body
+//
+//go:noescape
+func buildFSETableAsm(dt *seqSymbol, norm *int16, maxSV1 uint, baseValue *uint32, nbAdd *uint8, tableLog uint, wksp *buildFSETableWksp) bool

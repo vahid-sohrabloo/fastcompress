@@ -410,6 +410,9 @@ func buildSeqTableRLE(dt []seqSymbol, baseValue uint32, nbAddBits uint8) {
 // C: zstd_decompress_block.c:ZSTD_buildFSETable (ZSTD_buildFSETable_body)
 func buildFSETable(dt []seqSymbol, normalizedCounter []int16, maxSymbolValue uint,
 	baseValue []uint32, nbAdditionalBits []uint8, tableLog uint, wksp *buildFSETableWksp) {
+	if buildFSETableFast(dt, normalizedCounter, maxSymbolValue+1, baseValue, nbAdditionalBits, tableLog, wksp) {
+		return
+	}
 	tableDecode := dt[1:]
 	maxSV1 := maxSymbolValue + 1
 	tableSize := uint32(1) << tableLog
