@@ -126,6 +126,16 @@ func fillFSEState(dt []seqSymbol, wksp *buildFSETableWksp, seed uint64) {
 	}
 }
 
+// fseSeed returns fillFSEState's seed for c: its table log and every count
+// (FNV-1a), so cases differ in starting garbage, not only in length.
+func fseSeed(c fseTableCase) uint64 {
+	h := uint64(14695981039346656037) ^ uint64(c.tableLog)
+	for _, v := range c.norm {
+		h = (h ^ uint64(uint16(v))) * 1099511628211
+	}
+	return h
+}
+
 // checkFSETableAsm builds c's table with the Go body and with
 // buildFSETableAsm (its inputs and outputs against guard pages: after one,
 // then before one) from the same starting state, and fails t unless the
@@ -137,7 +147,7 @@ func checkFSETableAsm(t testing.TB, what string, c fseTableCase) {
 	maxSV1 := uint(len(c.norm))
 	var want [1 + 1<<maxFSELog]seqSymbol
 	var wantW buildFSETableWksp
-	fillFSEState(want[:], &wantW, uint64(len(c.norm))<<8|uint64(c.tableLog))
+	fillFSEState(want[:], &wantW, fseSeed(c))
 	func() {
 		saved := useFSETableAsm
 		defer func() { useFSETableAsm = saved }()
@@ -154,7 +164,7 @@ func checkFSETableAsm(t testing.TB, what string, c fseTableCase) {
 		copy(base, c.base)
 		copy(bits, c.bits)
 		var full [1 + 1<<maxFSELog]seqSymbol
-		fillFSEState(full[:], wksp, uint64(len(c.norm))<<8|uint64(c.tableLog))
+		fillFSEState(full[:], wksp, fseSeed(c))
 		copy(dt, full[:])
 		if useFSETableAsm {
 			if !buildFSETableAsm(&dt[0], &norm[0], maxSV1, &base[0], &bits[0], c.tableLog, wksp) {
@@ -172,6 +182,55 @@ func checkFSETableAsm(t testing.TB, what string, c fseTableCase) {
 			t.Fatalf("%s: norm %v tableLog %d: workspaces differ", what, c.norm, c.tableLog)
 		}
 		checkTableBound(t, what, dt)
+	}
+}
+
+// checkFSERejected runs buildFSETableAsm on the invalid norm with its
+// buffers against guard pages (after one, then before one), from random
+// starting bytes, and fails t unless it rejects norm having written only
+// what its init loop writes before failing: symbolNext[s] (the count, 1
+// for -1) for each symbol s before the failing one, and the baseValue of
+// the top cell for each -1 symbol among them; the header, the other cells
+// and spread stay as they were.
+func checkFSERejected(t testing.TB, what string, norm []int16, tableLog uint) {
+	t.Helper()
+	n := len(norm)
+	tableSize := 1 << tableLog
+	for _, before := range []bool{false, true} {
+		dt := guardSlice[seqSymbol](t, 1+tableSize, before)
+		gn := guardSlice[int16](t, n, before)
+		copy(gn, norm)
+		base := guardSlice[uint32](t, n, before)
+		bits := guardSlice[uint8](t, n, before)
+		wksp := guardWksp(t, before)
+		var full [1 + 1<<maxFSELog]seqSymbol
+		fillFSEState(full[:], wksp, fseSeed(fseTableCase{norm: norm, tableLog: tableLog}))
+		copy(dt, full[:])
+		wantDT := append([]seqSymbol(nil), dt...)
+		wantW := *wksp
+		ht := tableSize - 1
+		for s, c := range norm {
+			if c < -1 || (c == -1 && ht < 0) {
+				break
+			}
+			if c == -1 {
+				wantDT[1+ht].baseValue = uint32(s)
+				ht--
+				c = 1
+			}
+			wantW.symbolNext[s] = uint16(c)
+		}
+		if buildFSETableAsm(&dt[0], &gn[0], uint(n), &base[0], &bits[0], tableLog, wksp) {
+			t.Fatalf("%s: invalid norm %v at tableLog %d accepted", what, norm, tableLog)
+		}
+		for i := range dt {
+			if dt[i] != wantDT[i] {
+				t.Fatalf("%s: norm %v tableLog %d: rejected, but cell %d is %+v, want %+v", what, norm, tableLog, i-1, dt[i], wantDT[i])
+			}
+		}
+		if *wksp != wantW {
+			t.Fatalf("%s: norm %v tableLog %d: rejected, but the workspace has other writes", what, norm, tableLog)
+		}
 	}
 }
 
@@ -369,16 +428,7 @@ func TestBuildFSETableAsmGuard(t *testing.T) {
 
 		bad := func(name string, norm []int16, tableLog uint) {
 			t.Helper()
-			for _, before := range []bool{false, true} {
-				d := guardSlice[seqSymbol](t, 1+1<<tableLog, before)
-				n := guardSlice[int16](t, len(norm), before)
-				copy(n, norm)
-				base := guardSlice[uint32](t, len(norm), before)
-				bits := guardSlice[uint8](t, len(norm), before)
-				if buildFSETableAsm(&d[0], &n[0], uint(len(norm)), &base[0], &bits[0], tableLog, guardWksp(t, before)) {
-					t.Errorf("%s: accepted", name)
-				}
-			}
+			checkFSERejected(t, name, norm, tableLog)
 		}
 		over := append([]int16(nil), llDefaultNorm[:]...)
 		over[0]++
@@ -461,11 +511,15 @@ func TestBuildFSETableAsmRegistered(t *testing.T) {
 	}
 }
 
-// FuzzBuildFSETableAsmEquiv builds tables from two kinds of input: the
+// FuzzBuildFSETableAsmEquiv builds tables from three kinds of input: the
 // counts fse.ReadNCount reads from data (valid ones: checkFSETableAsm
-// compares the assembly with Go on guard pages), and the counts taken raw
-// from data's 16-bit words (mostly invalid: the assembly, on guard pages,
-// must accept exactly the valid ones and then match Go).
+// compares the assembly with Go on guard pages); the counts taken raw from
+// data's 16-bit words (mostly invalid); and, for logSel >= 128, the
+// ReadNCount counts with one count changed (kind>>2 picks it, logSel&3
+// how: +1, -1, -2 with the sum kept, or -1), which are mostly near-valid.
+// On the last two the assembly, on guard pages, must accept exactly the
+// valid ones and then match Go, and reject the others writing only what
+// checkFSERejected allows.
 func FuzzBuildFSETableAsmEquiv(f *testing.F) {
 	for _, s := range []struct {
 		data []byte
@@ -484,45 +538,60 @@ func FuzzBuildFSETableAsmEquiv(f *testing.F) {
 		}
 		f.Add(raw, byte(i), []byte{6, 5, 6}[i]) // tableLog 5 + logSel%5
 	}
+	for op := byte(0); op < 4; op++ {
+		f.Add([]byte{0x30, 0x6f, 0x9b, 0x03, 0x00, 0x00, 0x00, 0x00}, op<<2, 128+op) // perturbed
+	}
 	f.Fuzz(func(t *testing.T, data []byte, kind, logSel byte) {
 		maxSVs := [3]uint{maxLL, maxOff, maxML}
 		k := int(kind % 3)
 		base, bits := fseCodeTables(k, 0)
-		if logSel < 3 {
+		var norm []int16
+		var tableLog uint
+		what := "raw"
+		if logSel < 3 || logSel >= 128 {
 			maxSV := maxSVs[k]
-			var norm [maxSeq + 1]int16
-			tableLog, _, err := fse.ReadNCount(norm[:maxSV+1], &maxSV, data)
-			if err != nil || tableLog > maxFSELog {
+			var counts [maxSeq + 1]int16
+			tl, _, err := fse.ReadNCount(counts[:maxSV+1], &maxSV, data)
+			if err != nil || tl > maxFSELog {
 				return
 			}
-			checkFSETableAsm(t, "readNCount", fseTableCase{norm[:maxSV+1], tableLog, base, bits})
-			return
-		}
-		tableLog := uint(fse.MinTableLog) + uint(logSel)%(maxFSELog-fse.MinTableLog+1)
-		n := min(len(data)/2, int(maxSVs[k])+1)
-		if n == 0 {
-			return
-		}
-		norm := make([]int16, n)
-		for i := range norm {
-			norm[i] = int16(binary.LittleEndian.Uint16(data[2*i:]))
+			norm, tableLog = counts[:maxSV+1], tl
+			if logSel < 3 {
+				checkFSETableAsm(t, "readNCount", fseTableCase{norm, tableLog, base, bits})
+				return
+			}
+			what = "perturbed"
+			i := int(kind>>2) % len(norm)
+			switch logSel & 3 {
+			case 0:
+				norm[i]++
+			case 1:
+				norm[i]--
+			case 2:
+				if j := (i + 1) % len(norm); j != i {
+					norm[j] += norm[i] + 2
+				}
+				norm[i] = -2
+			case 3:
+				norm[i] = -1
+			}
+		} else {
+			tableLog = uint(fse.MinTableLog) + uint(logSel)%(maxFSELog-fse.MinTableLog+1)
+			n := min(len(data)/2, int(maxSVs[k])+1)
+			if n == 0 {
+				return
+			}
+			norm = make([]int16, n)
+			for i := range norm {
+				norm[i] = int16(binary.LittleEndian.Uint16(data[2*i:]))
+			}
 		}
 		if validFSENorm(norm, tableLog) {
-			checkFSETableAsm(t, "raw", fseTableCase{norm, tableLog, base, bits})
+			checkFSETableAsm(t, what, fseTableCase{norm, tableLog, base, bits})
 			return
 		}
-		if !useFSETableAsm {
-			return
-		}
-		for _, before := range []bool{false, true} {
-			dt := guardSlice[seqSymbol](t, 1+1<<tableLog, before)
-			gn := guardSlice[int16](t, n, before)
-			copy(gn, norm)
-			gb := guardSlice[uint32](t, n, before)
-			gbits := guardSlice[uint8](t, n, before)
-			if buildFSETableAsm(&dt[0], &gn[0], uint(n), &gb[0], &gbits[0], tableLog, guardWksp(t, before)) {
-				t.Fatalf("invalid norm %v at tableLog %d accepted", norm, tableLog)
-			}
+		if useFSETableAsm {
+			checkFSERejected(t, what, norm, tableLog)
 		}
 	})
 }

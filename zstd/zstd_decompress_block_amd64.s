@@ -493,10 +493,11 @@ exit:
 // step walk skipping the low-probability area otherwise), and the cells
 // loop (nbBits with BSR, nextState with SHLX, then the four fields stored
 // one by one as gcc -O3 does). It returns false, having written at most
-// symbolNext and some low-probability cells (both of which buildFSETable
-// rewrites with the same values), when norm is not a valid distribution: a count below
-// -1, or counts (-1 counted as 1) not summing to 1 << tableLog. C presumes
-// a valid one (fse.ReadNCount's). Preconditions (buildFSETableFast checks
+// symbolNext and the baseValue of some low-probability cells (which the Go
+// body then rebuilds), when norm is not a valid distribution: a count
+// below -1, or counts (-1 counted as 1) not summing to 1 << tableLog. C
+// presumes a valid one (fse.ReadNCount's), and so does the Go body; only
+// valid ones reach either from the decoder. Preconditions (buildFSETableFast checks
 // them): 5 <= tableLog <= maxFSELog (C's FSE_MIN_TABLELOG; BOUNDS (6)
 // needs an odd step, which tableLog >= 4 gives: at 3 it is 8), 1 <= maxSV1
 // <= maxSeq + 1, and norm, baseValue and nbAdd have maxSV1 entries, dt
@@ -518,8 +519,8 @@ exit:
 //     of the positive counts (it is -1 when every count is -1).
 // (3) Lay-down (no count -1): the 8-byte stores for symbol s are at pos + i,
 //     i < max(n, 1) in steps of 8, where pos is the sum of the earlier
-//     counts; so they end at most at tableSize + 8 = len(spread) (C:
-//     the +8 of ZSTD_BUILD_FSE_TABLE_WKSP_SIZE). spread[0, tableSize) then
+//     counts; so they end at most at tableSize + 8 <= (1 << maxFSELog) +
+//     8 = len(spread) (C: the +8 of ZSTD_BUILD_FSE_TABLE_WKSP_SIZE). spread[0, tableSize) then
 //     holds each symbol s < maxSV1 count[s] times.
 // (4) Scatter: reads spread[0, tableSize), writes tableDecode[position &
 //     (tableSize - 1)].
