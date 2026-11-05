@@ -27,8 +27,10 @@
 
 // Registers: op[0..3] R0-R3, ip[0..3] R4-R7, bits[0..3] R8-R11, dtable
 // R12, olimit R13. X1: oend R14, ilowest R15, scratch R16, R17, R19-R25.
-// X2: oend[0..3] R14-R17, scratch R19-R26. R18 (platform), R27 (REGTMP),
-// R28 (g), R29 (FP) and R30 (LR) are not touched.
+// X2: oend[0..3] R14-R17, scratch R19-R26. R18 (platform), R28 (g), R29
+// (FP) and R30 (LR) are not touched. R27 (REGTMP) is not used explicitly,
+// but the assembler uses it for X2's ADD $DTABLE_X2 (8196 does not fit an
+// ADD immediate); nothing is live in it.
 
 // LOAD_ARGS(dtOff) loads fastArgs (in R26) into the registers above,
 // adding ilowest to ip[] and dst to op[]; it leaves dst in R16 and ilowest
@@ -126,8 +128,10 @@
 //     below src + len(src).
 // (2) At each olimit computation ip[i] >= ip[0] for i = 1..3 (checked,
 //     else exit) and iters <= (ip[0] - ilowest) / 7. An iteration consumes
-//     at most 5 * 11 = 55 bits per stream and the reload keeps fewer than 8
-//     consumed, so ctz <= 62 and ip[i] drops by at most 7 bytes. op[3]
+//     at most 5 * 11 = 55 bits per stream (X1 TABLE INVARIANT: every
+//     entry's nbBits, entry & 63, is <= 11, as the builder caps it at
+//     tableLog == 11) and the reload keeps fewer than 8 consumed, so ctz
+//     <= 62 and ip[i] drops by at most 7 bytes. op[3]
 //     advances exactly 5 per iteration, so exactly iters iterations run
 //     before op[3] == olimit, and ip[i] >= ip[0] - 7 * iters >= ilowest =
 //     &src[0] throughout.
@@ -228,8 +232,8 @@ x1_exit:
 // BOUNDS:
 // (1) Reads: as decompress4X1FastAsmLoop (1); ip[i] only decreases from
 //     iend[i] - 8 <= len(src) - 8.
-// TABLE INVARIANT, which (2) and (3) rely on, unlike X1, whose safety holds
-//     for any table contents: every entry of dt.x2[:2048] has length 1 or
+// TABLE INVARIANT, which (2) and (3) rely on (X1 needs only its nbBits
+//     <= 11 invariant): every entry of dt.x2[:2048] has length 1 or
 //     2 and nbBits <= 11. It holds because buildDEltX2U32 only stores level
 //     1 or 2, and ReadStats only accepts a complete tree, so
 //     fillDTableX2 writes every one of the 2048 entries and leaves no
@@ -254,7 +258,8 @@ x1_exit:
 //     (min_i(x_i) / 10 == min_i(x_i / 10) for unsigned x_i).
 // (4) The table index is bits >> 53 < 2048, and x2 has 1 << TableLogMax
 //     = 4096 entries. The fast path only runs when dtLog == 11.
-// (5) Only R0-R17 and R19-R26 are written; no frame and no stack writes
+// (5) Only R0-R17, R19-R26 and the assembler's R27 (REGTMP, for ADD
+//     $DTABLE_X2) are written; no frame and no stack writes
 //     (NOFRAME, LR untouched).
 TEXT ·decompress4X2FastAsmLoop(SB), NOSPLIT|NOFRAME, $0-8
 	MOVD args+0(FP), R26

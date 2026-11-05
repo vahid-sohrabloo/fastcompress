@@ -140,8 +140,10 @@
 //     below src + len(src).
 // (2) At each olimit computation ip[i] >= ip[0] for i = 1..3 (checked,
 //     else exit) and iters <= (ip[0] - ilowest) / 7. An iteration consumes
-//     at most 5 * 11 = 55 bits per stream and the reload keeps fewer than 8
-//     consumed, so ctz <= 62 and ip[i] drops by at most 7 bytes. op[3]
+//     at most 5 * 11 = 55 bits per stream (X1 TABLE INVARIANT: every
+//     entry's nbBits, entry & 63, is <= 11, as the builder caps it at
+//     tableLog == 11) and the reload keeps fewer than 8 consumed, so ctz
+//     <= 62 and ip[i] drops by at most 7 bytes. op[3]
 //     advances exactly 5 per iteration, so exactly iters iterations run
 //     before op[3] == olimit, and ip[i] >= ip[0] - 7 * iters >= ilowest =
 //     &src[0] throughout.
@@ -319,8 +321,8 @@ x1_exit:
 // BOUNDS:
 // (1) Reads: as decompress4X1FastAsmLoop (1); ip[i] only decreases from
 //     iend[i] - 8 <= len(src) - 8.
-// TABLE INVARIANT, which (2) and (3) rely on, unlike X1, whose safety holds
-//     for any table contents: every entry of dt.x2[:2048] has length 1 or
+// TABLE INVARIANT, which (2) and (3) rely on (X1 needs only its nbBits
+//     <= 11 invariant): every entry of dt.x2[:2048] has length 1 or
 //     2 and nbBits <= 11. It holds because buildDEltX2U32 only stores level
 //     1 or 2, and ReadStats only accepts a complete tree, so
 //     fillDTableX2 writes every one of the 2048 entries and leaves no
