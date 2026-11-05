@@ -19,7 +19,11 @@ const (
 	MinTableLog     = 5  // C: FSE_MIN_TABLELOG
 	DefaultTableLog = 11 // C: FSE_DEFAULT_TABLELOG
 	MaxTableLog     = 12 // C: FSE_MAX_TABLELOG
-	nCountBound     = 512
+	// MaxTableLogForHuffHeader is the FSE tableLog of the Huffman weight
+	// header. C: MAX_FSE_TABLELOG_FOR_HUFF_HEADER (huf_compress.c; the literal 6
+	// in HUF_readStats).
+	MaxTableLogForHuffHeader = 6
+	nCountBound              = 512
 )
 
 // Errors, mirroring the C error codes returned at the same points.

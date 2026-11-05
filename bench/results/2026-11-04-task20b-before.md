@@ -3,7 +3,7 @@
 - date: 2026-11-04T23:19:11+01:00; host: vahid-Zenbook-UX6404VV-UX6404VV; cpu: 13th Gen Intel(R) Core(TM) i9-13900H, pinned to CPU 2
 - C: *** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***; `zstd -b<L> -i5 [-B<block>]`; Go: `gobench -mode d -secs 5`; both report the best ~1 s window (mean per pass), CRC off
 - median of 3 interleaved runs per cell; MB/s = 1e6 bytes/s of decoded output (decompression only; Go: one DecodeAll per block, WithDecoderConcurrency(1))
-- tree: 59c35a4 (Task 20a and its N1/N2 follow-up; the "before" of Task 20b), the 7 rows below 95% in `2026-11-04-asm-seq.md` plus control rows. One `bench/compare.sh -mode d -l "1 3 7 11" -f "silesia.tar:16384 silesia.tar:131072 silesia/nci silesia/dickens" -label task20b-before` run, 23:19 to about 23:37, under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0`. AC power on. load1 1.31 at the start and 2.89 at the end (desktop background: Chrome, clickhouse-server).
+- tree: 59c35a4 (Task 20a and its N1/N2 follow-up; the "before" of Task 20b), the 7 rows below 95% in `2026-11-04-asm-seq.md` plus control rows. One `bench/compare.sh -mode d -l "1 3 7 11" -f "silesia.tar:16384 silesia.tar:131072 silesia/nci silesia/dickens" -label task20b-before` run, 23:19 to about 23:37, under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0`. AC power on. load1 1.31 at the start and 2.89 at the end (desktop background: Chrome, clickhouse-server). The load1 rule is < 2: this run breached it (load1 was above 2 for much of the run, up to 2.89), so absolute numbers carry that noise.
 
 | file | level | block | C D-MB/s | Go D-MB/s | % of C | C ratio | Go ratio |
 |---|---|---|---|---|---|---|---|

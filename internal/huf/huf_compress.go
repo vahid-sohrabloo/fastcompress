@@ -110,7 +110,7 @@ func highbit32(v uint32) uint32 { return uint32(bits.Len32(v)) - 1 } // C: bits.
 // Table description (weights) compression
 // ---------------------------------------------------------------------------
 
-const maxFSETableLogForHuffHeader = 6 // C: MAX_FSE_TABLELOG_FOR_HUFF_HEADER
+const maxFSETableLogForHuffHeader = fse.MaxTableLogForHuffHeader // C: MAX_FSE_TABLELOG_FOR_HUFF_HEADER
 
 // compressWeights. C: huf_compress.c:HUF_compressWeights. It returns 0 for
 // "not compressible", 1 for RLE (single symbol), else the compressed size.

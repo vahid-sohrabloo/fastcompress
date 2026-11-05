@@ -151,25 +151,102 @@ func TestHUFReadDTableX1(t *testing.T) {
 // nothing: the weight reader's FSE table lives on the stack (C keeps it in
 // the caller's workspace).
 func TestHUFReadDTableX1NoAlloc(t *testing.T) {
-	var comp []byte
-	for _, s := range hufStreams(t) {
-		if s.comp[0] < 128 { // FSE-compressed weights
-			comp = s.comp
-			break
-		}
-	}
-	if comp == nil {
-		t.Fatal("no stream with FSE-compressed weights")
-	}
 	var dt DTable
-	if n := testing.AllocsPerRun(10, func() {
-		dt.Init(TableLogMax - 1)
-		if _, err := ReadDTableX1(&dt, comp, 0); err != nil {
-			t.Fatal(err)
+	check := func(name string, comp []byte) uint {
+		var w [SymbolValueMax + 1]byte
+		var rank [TableLogMax + 1]uint32
+		if _, _, _, err := ReadStats(w[:], rank[:], comp); err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
-	}); n != 0 {
-		t.Fatalf("%v allocations per ReadDTableX1", n)
+		fseLog := fseTableLog(t, comp)
+		if n := testing.AllocsPerRun(10, func() {
+			dt.Init(TableLogMax - 1)
+			if _, err := ReadDTableX1(&dt, comp, 0); err != nil {
+				t.Fatal(err)
+			}
+		}); n != 0 {
+			t.Fatalf("%s: %v allocations per ReadDTableX1", name, n)
+		}
+		return fseLog
 	}
+	sawLog6 := false
+	for _, s := range hufStreams(t) {
+		if s.comp[0] >= 128 { // not FSE-compressed weights
+			continue
+		}
+		if check(s.name, s.comp) == fse.MaxTableLogForHuffHeader {
+			sawLog6 = true
+		}
+		// The encoder picks FSE tableLog 5 for these weights; re-encode
+		// the same weights at tableLog 6, the largest the reader accepts.
+		if comp := reencodeWeightsLog6(t, s.comp); comp != nil {
+			if check(s.name+"/log6", comp) == fse.MaxTableLogForHuffHeader {
+				sawLog6 = true
+			}
+		}
+	}
+	if !sawLog6 {
+		t.Fatal("no stream whose FSE weight table has tableLog 6")
+	}
+}
+
+// reencodeWeightsLog6 rewrites the FSE weight header of the Huffman stream
+// comp (compressWeights, C: HUF_compressWeights, with tableLog forced to
+// 6) and returns it followed by comp's payload; nil if the weights do not
+// suit FSE.
+func reencodeWeightsLog6(t *testing.T, comp []byte) []byte {
+	t.Helper()
+	var w [SymbolValueMax + 1]byte
+	var rank [TableLogMax + 1]uint32
+	nbSymbols, _, hSize, err := ReadStats(w[:], rank[:], comp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weights := w[:nbSymbols-1] // the last weight is implied
+	var count [256]uint32
+	maxSV := uint(0)
+	for _, v := range weights {
+		count[v]++
+		if uint(v) > maxSV {
+			maxSV = uint(v)
+		}
+	}
+	if maxSV > TableLogMax-1 || len(weights) <= 1 {
+		return nil
+	}
+	const tl = fse.MaxTableLogForHuffHeader
+	var norm [TableLogMax + 1]int16
+	if _, err := fse.NormalizeCount(norm[:], tl, count[:], len(weights), maxSV, false); err != nil {
+		return nil
+	}
+	dst := make([]byte, 1+2*len(weights)+64)
+	n, err := fse.WriteNCount(dst[1:], norm[:], maxSV, tl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct := make(fse.CTable, fse.CTableSizeU32(tl, TableLogMax))
+	if err := fse.BuildCTable(ct, norm[:], maxSV, tl, make([]byte, fse.BuildCTableWorkspaceSize(TableLogMax, tl))); err != nil {
+		t.Fatal(err)
+	}
+	c, err := fse.CompressWeightsUsingCTable(dst[1+n:], weights, ct)
+	if err != nil || c == 0 || n+c >= 128 {
+		return nil
+	}
+	dst[0] = byte(n + c)
+	return append(dst[:1+n+c], comp[hSize:]...)
+}
+
+// fseTableLog returns the tableLog of the FSE-compressed weight header of a
+// Huffman stream (first byte < 128 is the compressed size).
+func fseTableLog(t *testing.T, comp []byte) uint {
+	t.Helper()
+	var ncount [256]int16
+	maxSV := uint(255)
+	tl, _, err := fse.ReadNCount(ncount[:], &maxSV, comp[1:1+int(comp[0])])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tl
 }
 
 // decode4X1Both runs the 4X decoder with the fast loop allowed and with it

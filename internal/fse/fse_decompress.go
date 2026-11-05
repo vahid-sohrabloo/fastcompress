@@ -205,9 +205,9 @@ func DecompressWksp(dst, src []byte, maxLog, wkspSizeU32 uint) (int, error) {
 	}
 
 	// C builds the DTable in the caller's workspace, with no allocation.
-	// tableBuf holds every table of the Huffman weight reader (maxLog 6,
-	// HUF_readStats) on the stack; buildDTable allocates only larger ones.
-	var tableBuf [1 << 6]decodeEntry
+	// tableBuf holds every table of the Huffman weight reader (maxLog
+	// MaxTableLogForHuffHeader, HUF_readStats) on the stack; buildDTable allocates only larger ones.
+	var tableBuf [1 << MaxTableLogForHuffHeader]decodeEntry
 	dt := dTable{table: tableBuf[:0]}
 	if err := buildDTable(&dt, ncount[:], uint32(maxSV), uint32(tableLog)); err != nil {
 		return 0, err

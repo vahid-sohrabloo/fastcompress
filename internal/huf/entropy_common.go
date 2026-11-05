@@ -50,7 +50,7 @@ func ReadStats(huffWeight []byte, rankStats []uint32, src []byte) (nbSymbols, ta
 		// max (hwSize-1) values decoded, as last one is implied
 		// C: the workspace is HUF_READ_STATS_WORKSPACE_SIZE_U32 =
 		// FSE_DECOMPRESS_WKSP_SIZE_U32(6, HUF_TABLELOG_MAX-1)
-		oSize, err = fse.DecompressWksp(huffWeight[:hwSize-1], src[1:1+iSize], 6, fse.DecompressWkspSizeU32(6, TableLogMax-1))
+		oSize, err = fse.DecompressWksp(huffWeight[:hwSize-1], src[1:1+iSize], maxFSETableLogForHuffHeader, fse.DecompressWkspSizeU32(maxFSETableLogForHuffHeader, TableLogMax-1))
 		if err != nil {
 			return 0, 0, 0, err
 		}
