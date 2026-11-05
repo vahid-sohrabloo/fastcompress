@@ -24,6 +24,10 @@ import (
 // nbAdditionalBits 1 and baseValue != 1) and executes it with execSequence,
 // unless execSequence would take a slow path (execSequenceEnd, or the
 // extDict path or its error): then it returns that sequence, pending.
+// With f.split it is decompressSequencesBodySplitLitBuffer's first loop:
+// it executes with execSequenceSplitLitBuffer (oend_w = iLitEnd - 32), and
+// also returns the sequence pending at that function's oMatchEnd > oend_w;
+// iLitEnd > litEnd is then C's break.
 // It counts each branch of the assembly it takes in seqArmHits.
 func (f *seqFast) runGo(st *seqState) (seq, bool) {
 	for f.nbSeq > 1 {
@@ -41,19 +45,34 @@ func (f *seqFast) runGo(st *seqState) (seq, bool) {
 			seqArmHits[armOverflow].Add(1)
 		}
 		oLitEnd := f.op + sq.litLength
+		oMatchEnd := oLitEnd + sq.matchLength
+		iLitEnd := f.litPtr + sq.litLength
 		switch {
-		case f.litPtr+sq.litLength > f.litEnd:
+		case iLitEnd > f.litEnd && f.split:
+			seqArmHits[armSplitBreak].Add(1)
+			return sq, true
+		case iLitEnd > f.litEnd:
 			seqArmHits[armPendLit].Add(1)
 			return sq, true
-		case oLitEnd+sq.matchLength > f.oend-wildcopyOverlength:
+		case oMatchEnd > f.oend-wildcopyOverlength:
 			seqArmHits[armPendOend].Add(1)
+			return sq, true
+		case f.split && oMatchEnd > iLitEnd-wildcopyOverlength:
+			seqArmHits[armPendSplit].Add(1)
 			return sq, true
 		case uint(sq.offset) > uint(oLitEnd-f.prefixStart):
 			seqArmHits[armPendOffset].Add(1)
 			return sq, true
 		}
 		countExecArms(sq)
-		n, e := execSequence(f.out, f.op, f.oend, sq, f.lits, &f.litPtr, f.litEnd, f.prefixStart, nil)
+		var n int
+		var e dErr
+		if f.split {
+			seqArmHits[armSplitExec].Add(1)
+			n, e = execSequenceSplitLitBuffer(f.out, f.op, f.oend, iLitEnd-wildcopyOverlength, sq, &f.litPtr, f.litEnd, f.prefixStart, nil)
+		} else {
+			n, e = execSequence(f.out, f.op, f.oend, sq, f.lits, &f.litPtr, f.litEnd, f.prefixStart, nil)
+		}
 		if e != 0 {
 			panic("execSequence failed on its fast path")
 		}
@@ -98,6 +117,9 @@ const (
 	armOff16                       // offset >= 16: copy16
 	armMatchLoop                   // offset >= 16, matchLength > 16: matchLoop
 	armCopy8Loop                   // offset < 16, matchLength > 8: copy8Loop
+	armSplitBreak                  // split: iLitEnd > litEnd, C's break to litExtraBuffer
+	armPendSplit                   // split: oMatchEnd > iLitEnd - 32 (execSequenceEndSplitLitBuffer)
+	armSplitExec                   // split: a sequence executed (execSequenceSplitLitBuffer's fast path)
 	numSeqArms
 )
 
@@ -108,6 +130,7 @@ var seqArmNames = [numSeqArms]string{
 	"repeat offset 3", "reload1", "mlBits 0", "llBits 0", "reload1 skipped", "reload in overflow",
 	"litLength<=16", "litLength 17..32", "litLength>32",
 	"offset<8", "offset 8..15", "offset>=16", "matchLoop", "copy8Loop",
+	"split break iLitEnd>litEnd", "split pending oMatchEnd>iLitEnd-32", "split executed",
 }
 
 var seqArmHits [numSeqArms]atomic.Int64
@@ -116,16 +139,18 @@ var seqArmHits [numSeqArms]atomic.Int64
 // blocks reach, syntheticArms TestSeqAsmSyntheticStates's states;
 // together, every branch (TestSeqAsmArmLists). The corpus does not reach
 // the last sequence before the bitstream's last 16 bytes, a broken table
-// invariant, oend (the blocks have room), a first reload (31 extra bits)
-// or overflow; the synthetic block's matches are short.
+// invariant, oend (the blocks have room), a first reload (31 extra bits),
+// overflow, or in split mode the output catching up with the literals
+// (they start at least litBufferExtraSize - 32 bytes ahead); the
+// synthetic block's matches are short.
 var (
 	equivArms = []seqArm{armStopPtr, armPendLit, armPendOffset, armOfNew, armRep0, armRep0LL0,
 		armRep1, armRep2, armRep3, armMLBits0, armLLBits0, armReload1Skip, armLit16, armLit32, armLitLoop,
-		armOffLt8, armOff8To15, armOff16, armMatchLoop, armCopy8Loop}
+		armOffLt8, armOff8To15, armOff16, armMatchLoop, armCopy8Loop, armSplitBreak, armSplitExec}
 	syntheticArms = []seqArm{armStopNbSeq, armStopPtr, armStopInvariant, armPendLit, armPendOend,
 		armPendOffset, armOfNew, armRep0, armRep0LL0, armRep1, armRep2, armRep3, armReload1,
 		armMLBits0, armLLBits0, armReload1Skip, armOverflow, armLit16, armLit32, armLitLoop, armOffLt8, armOff8To15,
-		armOff16, armCopy8Loop}
+		armOff16, armCopy8Loop, armSplitBreak, armPendSplit, armSplitExec}
 )
 
 // TestSeqAsmArmLists checks that equivArms and syntheticArms together
@@ -376,14 +401,29 @@ func TestSeqAsmGuard(t *testing.T) {
 			if moved || r.f.op != f.op || r.f.litPtr != f.litPtr || ptr2 != ptr || consumed2 != consumed {
 				t.Errorf("%s: the loop ran", c.name)
 			}
+			// The same through sequencesFastSplit (split, lits = out).
+			r = newSeqFastRun(t, d, out, hist, dstCap, block[litCSize+hSize:], nbSeq, false, false, false)
+			r.f.lits, r.f.split = r.f.out, true
+			r.f.litPtr, r.f.litEnd = r.f.oend-wildcopyOverlength-1, r.f.oend-wildcopyOverlength
+			c.mutate(&r.f)
+			f = r.f
+			if _, brk, e := sequencesFastSplit(&r.st, &r.f, nil); e != 0 || brk {
+				t.Fatalf("%s: split: err %d, break %v", c.name, e, brk)
+			}
+			_, ptr2, _, consumed2 = r.st.dStream.Raw()
+			if r.f.nbSeq != f.nbSeq || r.f.op != f.op || r.f.litPtr != f.litPtr || ptr2 != ptr || consumed2 != consumed {
+				t.Errorf("%s: split: the loop ran", c.name)
+			}
 		}
 	})
 }
 
-// seqFastRun is one side of a fast-loop comparison: its state and buffers.
+// seqFastRun is one side of a fast-loop comparison: its state and buffers,
+// with, for split literals, its copy of litExtraBuffer.
 type seqFastRun struct {
-	st seqState
-	f  seqFast
+	st    seqState
+	f     seqFast
+	extra []byte
 }
 
 // newSeqFastRun starts a run of the block's sequences seqSrc, with d's
@@ -391,7 +431,10 @@ type seqFastRun struct {
 // guard, the copy (after or before per outBefore), the bitstream (per
 // srcBefore) and a copy of literals not in out (after) sit against a guard
 // page; without, the literals are read where d's literal decoding left
-// them (decompressSequencesBody's buffers). Lits in out stay in out.
+// them (decompressSequencesBody's buffers). Lits in out stay in out. For
+// split literals the run starts as decompressSequencesBodySplitLitBuffer's
+// first loop (f.split), with a copy of d.litExtraBuffer (after a guard
+// page with guard) for the switch.
 func newSeqFastRun(t testing.TB, d *dctx, out []byte, ostart, dstCap int, seqSrc []byte, nbSeq int, guard, srcBefore, outBefore bool) *seqFastRun {
 	alloc := func(n int, before bool) []byte {
 		switch {
@@ -406,12 +449,18 @@ func newSeqFastRun(t testing.TB, d *dctx, out []byte, ostart, dstCap int, seqSrc
 	o := alloc(len(out), outBefore)
 	copy(o, out)
 	oend := ostart + d.litBuffer
-	if d.litBufferLocation == notInDst {
+	if d.litBufferLocation != inDst {
 		oend = ostart + dstCap
 	}
 	lits, litBase := d.litBufferStart(o, ostart)
 	litPtr := litBase + d.litPtr
 	litEnd := litPtr + d.litSize
+	isSplit := d.litBufferLocation == split
+	if isSplit {
+		litEnd = ostart + d.litBufferEnd
+		r.extra = alloc(len(d.litExtraBuffer), false)
+		copy(r.extra, d.litExtraBuffer[:])
+	}
 	if guard && d.litBufferLocation == notInDst {
 		l := alloc(litEnd+wildcopyOverlength, false)
 		copy(l, lits)
@@ -423,9 +472,50 @@ func newSeqFastRun(t testing.TB, d *dctx, out []byte, ostart, dstCap int, seqSrc
 		return nil
 	}
 	r.f = seqFast{out: o, op: ostart, oend: oend, lits: lits, litPtr: litPtr, litEnd: litEnd,
-		prefixStart: d.prefixStart, nbSeq: nbSeq}
+		prefixStart: d.prefixStart, nbSeq: nbSeq, split: isSplit}
 	return r
 }
+
+// execPending executes sq, which runAsm or runGo handed back, as the
+// production callers do: sequencesFast with execSequence,
+// sequencesFastSplit with execSequenceSplitLitBuffer, and at C's break
+// (split, iLitEnd > litEnd) decompressSequencesBodySplitLitBuffer's
+// switch: the leftover literals copied, then the literals from r.extra and
+// execSequence, the run no longer split.
+func (r *seqFastRun) execPending(sq seq, extDict []byte) dErr {
+	f := &r.f
+	var n int
+	var e dErr
+	switch {
+	case f.split && f.litPtr+sq.litLength > f.litEnd:
+		if leftoverLit := f.litEnd - f.litPtr; leftoverLit != 0 {
+			if uint(leftoverLit) > uint(f.oend-f.op) {
+				return dErrBlockDstSizeTooSmall
+			}
+			safecopyDstBeforeSrc(f.out, f.op, f.litPtr, leftoverLit)
+			sq.litLength -= leftoverLit
+			f.op += leftoverLit
+		}
+		f.lits, f.litPtr, f.litEnd, f.split = r.extra, 0, litBufferExtraSize, false
+		n, e = execSequence(f.out, f.op, f.oend, sq, f.lits, &f.litPtr, f.litEnd, f.prefixStart, extDict)
+	case f.split:
+		n, e = execSequenceSplitLitBuffer(f.out, f.op, f.oend, f.litPtr+sq.litLength-wildcopyOverlength,
+			sq, &f.litPtr, f.litEnd, f.prefixStart, extDict)
+	default:
+		n, e = execSequence(f.out, f.op, f.oend, sq, f.lits, &f.litPtr, f.litEnd, f.prefixStart, extDict)
+	}
+	if e != 0 {
+		return e
+	}
+	f.op += n
+	f.nbSeq--
+	return 0
+}
+
+// seqSplitRan and seqSplitPhase2Ran count the sequences compareSeqFast ran
+// through the fast loops in split mode, before and after the switch to
+// litExtraBuffer.
+var seqSplitRan, seqSplitPhase2Ran atomic.Int64
 
 // sameSeqFastState fails t unless the two runs are in the same state.
 func sameSeqFastState(t testing.TB, what string, a, g *seqFastRun) {
@@ -441,9 +531,9 @@ func sameSeqFastState(t testing.TB, what string, a, g *seqFastRun) {
 			a.st.stateLL.state, a.st.stateML.state, a.st.stateOffb.state, a.st.prevOffset,
 			g.st.stateLL.state, g.st.stateML.state, g.st.stateOffb.state, g.st.prevOffset)
 	}
-	if a.f.op != g.f.op || a.f.litPtr != g.f.litPtr || a.f.nbSeq != g.f.nbSeq {
-		t.Fatalf("%s: asm op %d litPtr %d nbSeq %d, Go op %d litPtr %d nbSeq %d", what,
-			a.f.op, a.f.litPtr, a.f.nbSeq, g.f.op, g.f.litPtr, g.f.nbSeq)
+	if a.f.op != g.f.op || a.f.litPtr != g.f.litPtr || a.f.nbSeq != g.f.nbSeq || a.f.split != g.f.split {
+		t.Fatalf("%s: asm op %d litPtr %d nbSeq %d split %v, Go op %d litPtr %d nbSeq %d split %v", what,
+			a.f.op, a.f.litPtr, a.f.nbSeq, a.f.split, g.f.op, g.f.litPtr, g.f.nbSeq, g.f.split)
 	}
 	if !bytes.Equal(a.f.out, g.f.out) {
 		t.Fatalf("%s: output differs", what)
@@ -452,16 +542,21 @@ func sameSeqFastState(t testing.TB, what string, a, g *seqFastRun) {
 
 // compareSeqFast runs the assembly (where the CPU has BMI2; the Go loop
 // again otherwise) and Go fast loops side by side from a and g, executing
-// each pending sequence on both with execSequence, and fails t at the first
-// difference. It returns the number of sequences the loops executed.
+// each pending sequence on both (execPending: for split runs, through the
+// switch to litExtraBuffer and on), and fails t at the first difference.
+// It returns the number of sequences the loops executed.
 func compareSeqFast(t testing.TB, a, g *seqFastRun, extDict []byte) int {
 	t.Helper()
-	if f := a.f; !f.asmOK() {
-		t.Fatalf("sequencesFast preconditions: oend %d, len(out) %d, litEnd %d, len(lits) %d, op %d, litPtr %d, prefixStart %d",
-			f.oend, len(f.out), f.litEnd, len(f.lits), f.op, f.litPtr, f.prefixStart)
+	checkOK := func() {
+		if f := a.f; !f.asmOK() {
+			t.Fatalf("sequencesFast preconditions (split %v): oend %d, len(out) %d, litEnd %d, len(lits) %d, op %d, litPtr %d, prefixStart %d",
+				f.split, f.oend, len(f.out), f.litEnd, len(f.lits), f.op, f.litPtr, f.prefixStart)
+		}
 	}
-	ran := 0
+	checkOK()
+	ran, switched := 0, false
 	for a.f.nbSeq > 1 {
+		wasSplit := a.f.split
 		before := a.f.nbSeq
 		var asq seq
 		var ap bool
@@ -475,23 +570,29 @@ func compareSeqFast(t testing.TB, a, g *seqFastRun, extDict []byte) int {
 		if ap != gp || asq != gsq {
 			t.Fatalf("asm pending %v %+v, Go pending %v %+v", ap, asq, gp, gsq)
 		}
-		ran += before - a.f.nbSeq
+		n := before - a.f.nbSeq
+		ran += n
+		switch {
+		case wasSplit:
+			seqSplitRan.Add(int64(n))
+		case switched:
+			seqSplitPhase2Ran.Add(int64(n))
+		}
 		if !ap {
 			break
 		}
-		an, ae := execSequence(a.f.out, a.f.op, a.f.oend, asq, a.f.lits, &a.f.litPtr, a.f.litEnd, a.f.prefixStart, extDict)
-		gn, ge := execSequence(g.f.out, g.f.op, g.f.oend, gsq, g.f.lits, &g.f.litPtr, g.f.litEnd, g.f.prefixStart, extDict)
-		if an != gn || ae != ge {
-			t.Fatalf("pending sequence: asm %d err %d, Go %d err %d", an, ae, gn, ge)
+		ae, ge := a.execPending(asq, extDict), g.execPending(gsq, extDict)
+		if ae != ge {
+			t.Fatalf("pending sequence: asm err %d, Go err %d", ae, ge)
 		}
 		if ae != 0 {
 			break
 		}
-		a.f.op += an
-		g.f.op += gn
-		a.f.nbSeq--
-		g.f.nbSeq--
 		sameSeqFastState(t, "after the pending sequence", a, g)
+		if wasSplit && !a.f.split {
+			switched = true
+			checkOK()
+		}
 	}
 	return ran
 }
@@ -508,9 +609,10 @@ var seqRawLitsRan atomic.Int64
 // sequences (compareSeqFast): with the buffers against guard pages (the
 // output after and the bitstream after one, then both before one), and
 // with the literals in place (compareSeqFast then also checks
-// decompressSequencesBody's buffers against seqFast.asmOK). It returns the
+// decompressSequencesBody's buffers against seqFast.asmOK). Split literals
+// run as decompressSequencesBodySplitLitBuffer's loops. It returns the
 // sequences the loops executed, or -1 when the block has no sequences to
-// compare (a header error, none, or split literals).
+// compare (a header error, or none).
 func checkBlockSeqFast(t testing.TB, d *dctx, dst []byte, dstCap int, block []byte, streaming streamingOperation, checkContinuity bool) int {
 	t.Helper()
 	d2 := *d
@@ -524,7 +626,7 @@ func checkBlockSeqFast(t testing.TB, d *dctx, dst []byte, dstCap int, block []by
 		return -1
 	}
 	nbSeq, hSize, e := decodeSeqHeaders(&d2, block[litCSize:])
-	if e != 0 || nbSeq == 0 || d2.litBufferLocation == split || (dstCap == 0 && nbSeq > 0) {
+	if e != 0 || nbSeq == 0 || (dstCap == 0 && nbSeq > 0) {
 		return -1
 	}
 	checkTableBound(t, "LL", d2.llTptr)
@@ -583,6 +685,7 @@ func TestSeqAsmEquiv(t *testing.T) {
 		t.Log("no BMI2: the direct loop comparison runs the Go loop twice")
 	}
 	arms, raw := seqArmCounts(), seqRawLitsRan.Load()
+	split1, split2 := seqSplitRan.Load(), seqSplitPhase2Ran.Load()
 	blocks, ran := 0, 0
 	compressedBlockHook = func(d *dctx, dst []byte, dstCap int, block []byte, streaming streamingOperation, cc bool) {
 		// A subtest per block unmaps its guard pages when it ends.
@@ -632,13 +735,20 @@ func TestSeqAsmEquiv(t *testing.T) {
 	} else {
 		t.Logf("%d of them with raw literals read in the block", n)
 	}
+	if n1, n2 := seqSplitRan.Load()-split1, seqSplitPhase2Ran.Load()-split2; n1 == 0 || n2 == 0 {
+		t.Errorf("split literals: %d sequences through the fast loops before the switch, %d after", n1, n2)
+	} else {
+		t.Logf("split literals: %d sequences through the fast loops before the switch, %d after", n1, n2)
+	}
 	checkSeqArms(t, arms, equivArms...)
 }
 
 // TestSeqAsmSyntheticStates compares the loops from states a valid stream
 // does not reach: a bitstream in overflow or with random bits consumed, an
 // offset table that breaks the TABLE INVARIANT, random repeat offsets
-// (including 0 and C's (size_t)-1) and output positions near oend.
+// (including 0 and C's (size_t)-1), output positions near oend, and split
+// literals (random bytes of out) starting close ahead of op, which the
+// output catches up with.
 func TestSeqAsmSyntheticStates(t *testing.T) {
 	r0 := rand.New(rand.NewPCG(1, 1))
 	src := make([]byte, 1<<16)
@@ -724,7 +834,18 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 			consumed = uint32(rng.IntN(80))
 		}
 		op := hist + rng.IntN(runs[0].f.oend-hist+1)
-		for _, r := range runs {
+		// Split (decompressSequencesBodySplitLitBuffer's first loop): the
+		// literals at out[litPtr:litEnd], up to 1 KiB ahead of op, then
+		// in extra (random bytes, the same on both sides).
+		isSplit := iter%6 == 1
+		lim := len(out) - wildcopyOverlength
+		litPtr := min(op+rng.IntN(1024), lim)
+		litEnd := litPtr + rng.IntN(lim-litPtr+1)
+		extra := make([]byte, litBufferExtraSize+wildcopyOverlength)
+		for i := range extra {
+			extra[i] = byte(rng.Uint32())
+		}
+		for i, r := range runs {
 			s, ptr, _, _ := r.st.dStream.Raw()
 			r.st.dStream.SetRaw(s, ptr, container, consumed)
 			r.st.prevOffset = rep
@@ -732,6 +853,14 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 				r.st.stateOffb.table = ofTable
 			}
 			r.f.op = op
+			if isSplit {
+				r.f.lits, r.f.litPtr, r.f.litEnd, r.f.split = r.f.out, litPtr, litEnd, true
+				r.extra = extra
+				if i == 0 {
+					r.extra = guardmem.After(t, len(extra))
+					copy(r.extra, extra)
+				}
+			}
 		}
 		ran += compareSeqFast(t, runs[0], runs[1], nil)
 	}
@@ -740,7 +869,8 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 }
 
 // FuzzSeqAsmEquiv decodes hostile blocks as FuzzDecompressBlock does (same
-// inputs and flags) and compares, on each, the fast loops directly
+// inputs and flags, plus a seed whose block has split literals) and
+// compares, on each, the fast loops directly
 // (checkBlockSeqFast: guard pages, state after every call) and the whole
 // block decode with the assembly on and off (size, error and output).
 func FuzzSeqAsmEquiv(f *testing.F) {
@@ -765,6 +895,29 @@ func FuzzSeqAsmEquiv(f *testing.F) {
 			ip += blockHeaderSize + cSize
 			if bp.lastBlock {
 				break
+			}
+		}
+	}
+	// A block with over litBufferExtraSize literals, decoded streaming
+	// into exactly its size: split literals (the seeds above have none).
+	r := rand.New(rand.NewPCG(20, 4))
+	src := make([]byte, blockSizeMax)
+	for i := 0; i < len(src); {
+		if i > 64 && r.IntN(40) == 0 { // a match: about 25% of the bytes
+			n := min(4+r.IntN(16), len(src)-i)
+			copy(src[i:i+n], src[r.IntN(i-n+1):])
+			i += n
+			continue
+		}
+		src[i] = byte('a' + r.IntN(16))
+		i++
+	}
+	if frame := newTestEncoder(f).EncodeAll(src, nil); len(frame) > 0 {
+		var zfh frameHeader
+		if need, de := getFrameHeaderAdvanced(&zfh, frame); need == 0 && de == 0 {
+			if cSize, bp, de := getcBlockSize(frame[zfh.headerSize:]); de == 0 && bp.blockType == btCompressed {
+				start := int(zfh.headerSize) + blockHeaderSize
+				f.Add(frame[start:start+cSize], uint16(0), uint16(0), uint32(blockSizeMax), byte(0x71))
 			}
 		}
 	}

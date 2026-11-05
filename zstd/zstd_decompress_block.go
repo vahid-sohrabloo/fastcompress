@@ -1266,10 +1266,20 @@ func (d *dctx) decompressSequencesBodySplitLitBuffer(out []byte, ostart, maxDstS
 
 		// decompress without overrunning litPtr begins
 		{
-			var sequence seq
+			// Where the assembly fast loop runs, it takes the sequences
+			// while it can, up to C's break if it reaches it (brk); the
+			// loop below continues.
+			f := seqFast{out: out, op: op, oend: oend, lits: out, litPtr: litPtr, litEnd: dctxLitBufferEnd,
+				prefixStart: prefixStart, nbSeq: nbSeq, split: true}
+			sequence, brk, e := sequencesFastSplit(&seqState, &f, extDict)
+			if e != 0 {
+				return 0, e
+			}
+			op, litPtr, nbSeq = f.op, f.litPtr, f.nbSeq
+
 			// Handle the initial state where litBuffer is currently split
 			// between dst and litExtraBuffer.
-			for ; nbSeq != 0; nbSeq-- {
+			for ; nbSeq != 0 && !brk; nbSeq-- {
 				sequence = decodeSequence(&seqState, isLongOffset, nbSeq == 1)
 				if litPtr+sequence.litLength > dctxLitBufferEnd {
 					break
@@ -1310,6 +1320,12 @@ func (d *dctx) decompressSequencesBodySplitLitBuffer(out []byte, ostart, maxDstS
 
 		if nbSeq > 0 {
 			// there is remaining lit from extra buffer
+			f := seqFast{out: out, op: op, oend: oend, lits: lits, litPtr: litPtr, litEnd: litBufferEnd,
+				prefixStart: prefixStart, nbSeq: nbSeq}
+			if e := sequencesFast(&seqState, &f, extDict); e != 0 {
+				return 0, e
+			}
+			op, litPtr, nbSeq = f.op, f.litPtr, f.nbSeq
 			for ; nbSeq != 0; nbSeq-- {
 				sequence := decodeSequence(&seqState, isLongOffset, nbSeq == 1)
 				oneSeqSize, e := execSequence(out, op, oend, sequence, lits, &litPtr, litBufferEnd, prefixStart, extDict)
@@ -1361,6 +1377,8 @@ func (d *dctx) decompressSequencesBodySplitLitBuffer(out []byte, ostart, maxDstS
 // seqFast is decompressSequencesBody's execution state, which the sequence
 // fast loop (sequencesFast) advances: the output out[op:oend], the literals
 // lits[litPtr:litEnd], the prefix start in out, and the sequences left.
+// With split, it is decompressSequencesBodySplitLitBuffer's first loop's
+// (sequencesFastSplit): lits is out and litEnd is dctx->litBufferEnd.
 type seqFast struct {
 	out         []byte
 	op, oend    int
@@ -1369,6 +1387,7 @@ type seqFast struct {
 	litEnd      int
 	prefixStart int
 	nbSeq       int
+	split       bool
 }
 
 // decompressSequencesBody decodes the sequences when the literals are not

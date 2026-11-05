@@ -30,6 +30,36 @@ func sequencesFast(st *seqState, f *seqFast, extDict []byte) dErr {
 	return 0
 }
 
+// sequencesFastSplit is sequencesFast for the first loop of
+// decompressSequencesBodySplitLitBuffer (f.split, literals in f.out up to
+// f.litEnd = dctx->litBufferEnd): it executes each handed-back sequence
+// with execSequenceSplitLitBuffer, except the one whose literals cross
+// f.litEnd, which it returns decoded but not executed, with brk true (C's
+// break to the litExtraBuffer switch). Like sequencesFast, it does nothing
+// when the assembly is off or f fails asmOK.
+func sequencesFastSplit(st *seqState, f *seqFast, extDict []byte) (sequence seq, brk bool, e dErr) {
+	if !useSeqDecAsm || !f.asmOK() {
+		return seq{}, false, 0
+	}
+	for f.nbSeq > 1 {
+		sequence, pending := f.runAsm(st)
+		if !pending {
+			break
+		}
+		if f.litPtr+sequence.litLength > f.litEnd {
+			return sequence, true, 0
+		}
+		oneSeqSize, e := execSequenceSplitLitBuffer(f.out, f.op, f.oend, f.litPtr+sequence.litLength-wildcopyOverlength,
+			sequence, &f.litPtr, f.litEnd, f.prefixStart, extDict)
+		if e != 0 {
+			return seq{}, false, e
+		}
+		f.op += oneSeqSize
+		f.nbSeq--
+	}
+	return seq{}, false, 0
+}
+
 // asmOK reports whether f meets the preconditions the loop's BOUNDS rely
 // on (zstd_decompress_block_amd64.s): out holds oend, lits holds
 // WILDCOPY_OVERLENGTH bytes past litEnd (every literal buffer placement
@@ -68,7 +98,11 @@ func (f *seqFast) runAsm(st *seqState) (seq, bool) {
 		prefixStart:  f.prefixStart,
 		nbSeq:        f.nbSeq,
 	}
-	decodeExecSeqsAsm(&a)
+	if f.split {
+		decodeExecSeqsSplitAsm(&a)
+	} else {
+		decodeExecSeqsAsm(&a)
+	}
 	st.dStream.SetRaw(src, a.ptr, a.bitContainer, uint32(a.bitsConsumed))
 	st.stateLL.state, st.stateML.state, st.stateOffb.state = a.stateLL, a.stateML, a.stateOf
 	st.prevOffset = a.rep

@@ -54,6 +54,15 @@ type seqAsmArgs struct {
 //go:noescape
 func decodeExecSeqsAsm(a *seqAsmArgs)
 
+// decodeExecSeqsSplitAsm is seqFast.runGo with split in assembly:
+// decodeExecSeqsAsm for the first loop of
+// decompressSequencesBodySplitLitBuffer (lits = out).
+// C: zstd_decompress_block.c:ZSTD_decompressSequences_bodySplitLitBuffer
+// (the first loop)
+//
+//go:noescape
+func decodeExecSeqsSplitAsm(a *seqAsmArgs)
+
 // useFSETableAsm selects the assembly sequence-table builder, which needs
 // BMI2 (SHLX). Without it buildFSETable's Go body builds every table. C has
 // no assembly here either.
