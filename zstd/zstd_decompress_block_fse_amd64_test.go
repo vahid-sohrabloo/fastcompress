@@ -491,6 +491,11 @@ func TestBuildFSETableAsmRegistered(t *testing.T) {
 		t.Fatalf("found %d registrations of buildFSETable", found)
 	}
 	defer func() {
+		// "on" first restores the detected X86.HasBMI2, which "nobmi2"
+		// cleared and "off" leaves alone; then the env mode.
+		if err := cpu.SetAsmMode("on"); err != nil {
+			t.Fatal(err)
+		}
 		if err := cpu.SetAsmMode(os.Getenv("FASTZSTD_FUZZ_ASM")); err != nil {
 			t.Fatal(err)
 		}
