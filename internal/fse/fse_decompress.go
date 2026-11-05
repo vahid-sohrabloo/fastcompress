@@ -100,11 +100,12 @@ type dState struct {
 	table []decodeEntry
 }
 
-// C: fse.h:FSE_initDState
-func (s *dState) init(bitD *bitstream.DStream, dt *dTable) {
-	s.state = bitD.ReadBits(dt.tableLog)
+// C: fse.h:FSE_initDState (Go: returns the state, so that dt.table does
+// not escape through a pointer and may live on the caller's stack)
+func initDState(bitD *bitstream.DStream, dt *dTable) dState {
+	state := bitD.ReadBits(dt.tableLog)
 	bitD.Reload()
-	s.table = dt.table
+	return dState{state: state, table: dt.table}
 }
 
 // C: fse.h:FSE_decodeSymbol (FSE_decodeSymbolFast reads the same bits)
@@ -123,14 +124,13 @@ func decompressUsingDTable(dst, src []byte, dt *dTable) (int, error) {
 	omax := len(dst)
 	olimit := omax - 3
 	var bitD bitstream.DStream
-	var state1, state2 dState
 
 	// Init
 	if _, err := bitD.Init(src); err != nil {
 		return 0, err
 	}
-	state1.init(&bitD, dt)
-	state2.init(&bitD, dt)
+	state1 := initDState(&bitD, dt)
+	state2 := initDState(&bitD, dt)
 	if bitD.Reload() == bitstream.DStreamOverflow {
 		return 0, ErrCorruptionDetected
 	}
@@ -204,7 +204,11 @@ func DecompressWksp(dst, src []byte, maxLog, wkspSizeU32 uint) (int, error) {
 		return 0, ErrTableLogTooLarge
 	}
 
-	var dt dTable
+	// C builds the DTable in the caller's workspace, with no allocation.
+	// tableBuf holds every table of the Huffman weight reader (maxLog 6,
+	// HUF_readStats) on the stack; buildDTable allocates only larger ones.
+	var tableBuf [1 << 6]decodeEntry
+	dt := dTable{table: tableBuf[:0]}
 	if err := buildDTable(&dt, ncount[:], uint32(maxSV), uint32(tableLog)); err != nil {
 		return 0, err
 	}

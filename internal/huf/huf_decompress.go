@@ -131,24 +131,39 @@ func ReadDTableX1(dt *DTable, src []byte, flags int) (int, error) {
 		}
 	}
 
-	// fill DTable: all entries of each weight in order. (C switches on
-	// length to inner loops storing 1, 2 or 4 entries at a time, the latter
-	// via HUF_DEltX1_set4 and MEM_write64; the stored entries are the same.)
+	// fill DTable: all entries of each weight in order. That way length is
+	// a constant for each iteration of the outer loop, and the switch picks
+	// an inner loop for it. (C's 4-entry MEM_write64 stores of
+	// HUF_DEltX1_set4 are four uint16 stores here; same entries.)
 	{
 		symbol := int(rankVal[0])
 		rankStart := 0
 		for w := uint32(1); w < tableLog+1; w++ {
 			symbolCount := int(rankVal[w])
 			length := (1 << w) >> 1
-			uStart := rankStart
 			nbBits := uint16(tableLog + 1 - w)
-			for s := 0; s < symbolCount; s++ {
-				d := uint16(symbols[symbol+s])<<8 | nbBits // C: HUF_DEltX1 {nbBits, byte}
-				fill := dt.x1[uStart : uStart+length]
-				for u := range fill {
-					fill[u] = d
+			syms := symbols[symbol : symbol+symbolCount]
+			fill := dt.x1[rankStart : rankStart+symbolCount*length]
+			switch length {
+			case 1:
+				for s, sym := range syms {
+					fill[s] = uint16(sym)<<8 | nbBits // C: HUF_DEltX1 {nbBits, byte}
 				}
-				uStart += length
+			case 2:
+				for _, sym := range syms {
+					d := uint16(sym)<<8 | nbBits
+					fill[0], fill[1] = d, d
+					fill = fill[2:]
+				}
+			default: // length is a power of 2, >= 4
+				for _, sym := range syms {
+					d := uint16(sym)<<8 | nbBits
+					for u := 0; u < length; u += 4 {
+						f := fill[u : u+4 : u+4]
+						f[0], f[1], f[2], f[3] = d, d, d, d
+					}
+					fill = fill[length:]
+				}
 			}
 			symbol += symbolCount
 			rankStart += symbolCount * length

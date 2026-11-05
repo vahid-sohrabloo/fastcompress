@@ -147,6 +147,31 @@ func TestHUFReadDTableX1(t *testing.T) {
 	}
 }
 
+// TestHUFReadDTableX1NoAlloc checks that reading a table allocates
+// nothing: the weight reader's FSE table lives on the stack (C keeps it in
+// the caller's workspace).
+func TestHUFReadDTableX1NoAlloc(t *testing.T) {
+	var comp []byte
+	for _, s := range hufStreams(t) {
+		if s.comp[0] < 128 { // FSE-compressed weights
+			comp = s.comp
+			break
+		}
+	}
+	if comp == nil {
+		t.Fatal("no stream with FSE-compressed weights")
+	}
+	var dt DTable
+	if n := testing.AllocsPerRun(10, func() {
+		dt.Init(TableLogMax - 1)
+		if _, err := ReadDTableX1(&dt, comp, 0); err != nil {
+			t.Fatal(err)
+		}
+	}); n != 0 {
+		t.Fatalf("%v allocations per ReadDTableX1", n)
+	}
+}
+
 // decode4X1Both runs the 4X decoder with the fast loop allowed and with it
 // disabled, on copies of the same table.
 func decode4X1Both(dt *DTable, src []byte, dstSize int) (fast, body []byte, errFast, errBody error) {
