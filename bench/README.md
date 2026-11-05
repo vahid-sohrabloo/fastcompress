@@ -57,3 +57,5 @@ Go reuses one block-sized output buffer for every block, while C decodes block *
 ## arm64
 
 The assembly routines have arm64 ports (NEON for the row match finder's tag compare), tested for byte-identical output under qemu. There is no arm64 hardware here, so arm64 speed against C is unverified until arm64 hardware is available; qemu timings say nothing about it.
+
+The same holds for the decoder: the Huffman fast loops, the sequence decode-and-execute loop and the sequence-table builder have arm64 ports, tested for state-identical results against the Go loops under qemu, but arm64 decode speed is unverified. None of them has been benchmarked on arm64.
