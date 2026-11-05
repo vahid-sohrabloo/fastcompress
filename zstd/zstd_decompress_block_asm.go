@@ -1,11 +1,43 @@
-//go:build amd64 && !appengine && !noasm && !purego && gc
+//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
 
 // The Go side of the sequence fast loop's and the sequence-table
-// builder's assembly.
+// builder's assembly, shared by amd64 and arm64.
 
 package zstd
 
 import "github.com/vahid-sohrabloo/fastzstd/internal/fse"
+
+// seqAsmArgs is the state decodeExecSeqsAsm reads and advances
+// (zstd_decompress_block_{amd64,arm64}.s read it at fixed offsets, checked by
+// TestSeqAsmArgsLayout). ptr, op, oendW, litPtr, litEnd and prefixStart are
+// offsets into src, out and lits, not pointers: the loop adds the bases on
+// entry and subtracts them before returning, so the Go side never handles a
+// pointer past the end of a buffer.
+type seqAsmArgs struct {
+	bitContainer uint64      // 0
+	bitsConsumed uint64      // 8
+	ptr          int         // 16: offset into src
+	src          *byte       // 24
+	stateLL      int         // 32
+	stateML      int         // 40
+	stateOf      int         // 48
+	tableLL      *seqSymbol  // 56: C's dt + 1
+	tableML      *seqSymbol  // 64
+	tableOf      *seqSymbol  // 72
+	rep          [repNum]int // 80: prevOffset
+	out          *byte       // 104
+	op           int         // 112
+	oendW        int         // 120: oend - WILDCOPY_OVERLENGTH
+	lits         *byte       // 128
+	litPtr       int         // 136
+	litEnd       int         // 144
+	prefixStart  int         // 152
+	nbSeq        int         // 160
+	litLength    int         // 168: the pending sequence
+	matchLength  int         // 176
+	offset       int         // 184
+	pending      int         // 192: 1 when the loop stopped on a sequence it decoded but did not execute
+}
 
 // sequencesFast runs the assembly fast loop while f.nbSeq > 1, executing
 // with execSequence each sequence the loop decodes but hands back (one that
@@ -61,7 +93,7 @@ func sequencesFastSplit(st *seqState, f *seqFast, extDict []byte) (sequence seq,
 }
 
 // asmOK reports whether f meets the preconditions the loops' BOUNDS rely
-// on (zstd_decompress_block_amd64.s, both entries): out holds oend, lits
+// on (zstd_decompress_block_{amd64,arm64}.s, both entries): out holds oend, lits
 // holds WILDCOPY_OVERLENGTH bytes past litEnd (every literal buffer
 // placement that reaches decompressSequencesBody leaves them, see
 // execSequence; so does the split layout, lits = out with litEnd =

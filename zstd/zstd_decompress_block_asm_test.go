@@ -1,4 +1,4 @@
-//go:build amd64 && !appengine && !noasm && !purego && gc
+//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
 
 package zstd
 
@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -254,7 +255,7 @@ func checkSeqArms(t *testing.T, before [numSeqArms]int64, arms ...seqArm) {
 	}
 }
 
-// TestSeqAsmArgsLayout checks the offsets zstd_decompress_block_amd64.s
+// TestSeqAsmArgsLayout checks the offsets zstd_decompress_block_{amd64,arm64}.s
 // uses, and seqSymbol's (C's ZSTD_seqSymbol) layout.
 func TestSeqAsmArgsLayout(t *testing.T) {
 	var a seqAsmArgs
@@ -299,9 +300,9 @@ func TestSeqAsmArgsLayout(t *testing.T) {
 }
 
 // TestSeqAsmRegistered checks the predicate registered with
-// cpu.RegisterAsm: the fast loop is registered with its switch, is off
-// without BMI2 (SetAsmMode("nobmi2")) and follows the detected BMI2
-// otherwise.
+// cpu.RegisterAsm: the fast loop is registered with its switch; on amd64
+// it is off without BMI2 (SetAsmMode("nobmi2")) and follows the detected
+// BMI2 otherwise; on arm64 (baseline) it is always on.
 func TestSeqAsmRegistered(t *testing.T) {
 	found := 0
 	for _, r := range cpu.AsmRoutines() {
@@ -328,14 +329,14 @@ func TestSeqAsmRegistered(t *testing.T) {
 	if err := cpu.SetAsmMode("on"); err != nil {
 		t.Fatal(err)
 	}
-	if useSeqDecAsm != cpu.X86.HasBMI2 {
+	if want := cpu.X86.HasBMI2 || runtime.GOARCH == "arm64"; useSeqDecAsm != want {
 		t.Errorf("mode on, BMI2 %v: asm %v", cpu.X86.HasBMI2, useSeqDecAsm)
 	}
 	if err := cpu.SetAsmMode("nobmi2"); err != nil {
 		t.Fatal(err)
 	}
-	if useSeqDecAsm {
-		t.Error("mode nobmi2: asm on")
+	if want := runtime.GOARCH == "arm64"; useSeqDecAsm != want {
+		t.Errorf("mode nobmi2: asm %v, want %v", useSeqDecAsm, want)
 	}
 }
 
@@ -570,7 +571,7 @@ func compareSeqFast(t testing.TB, a, g *seqFastRun, extDict []byte) int {
 		before := a.f.nbSeq
 		var asq seq
 		var ap bool
-		if cpu.X86.HasBMI2 {
+		if decAsmAvailable() {
 			asq, ap = a.f.runAsm(&a.st)
 		} else {
 			asq, ap = a.f.runGo(&a.st)
@@ -691,7 +692,7 @@ func TestSeqAsmEquiv(t *testing.T) {
 		restore()
 	}
 
-	if !cpu.X86.HasBMI2 {
+	if !decAsmAvailable() {
 		t.Log("no BMI2: the direct loop comparison runs the Go loop twice")
 	}
 	arms, raw := seqArmCounts(), seqRawLitsRan.Load()
@@ -885,7 +886,7 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 		ran += compareSeqFast(t, runs[0], runs[1], nil)
 	}
 	t.Logf("%d sequences through the fast loops, %d through sequencesFastSplit", ran, glue)
-	if cpu.X86.HasBMI2 && glue == 0 {
+	if decAsmAvailable() && glue == 0 {
 		t.Error("sequencesFastSplit executed no sequence")
 	}
 	checkSeqArms(t, arms, syntheticArms...)
