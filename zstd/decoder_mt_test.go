@@ -119,6 +119,13 @@ func checkSameStream(t testing.TB, what string, singleSegment, dicts, limited bo
 		exempt = "window"
 	case errors.Is(gerr, ErrUnexpectedBlockSize) && errors.Is(werr, ErrFrameSizeExceeded) && bytes.Equal(got, want):
 		exempt = "size" // the shortcut names it ErrFrameSizeExceeded; never the pipeline
+	case errors.Is(werr, ErrUnexpectedBlockSize) && seqCorrupt(gerr) && !errors.Is(gerr, ErrWindowSizeTooSmall) && bytes.Equal(got, want):
+		// The shortcut (DecodeAll's output space) stops a block that
+		// regenerates too much on its size; the stream's smaller room fails
+		// it on another check first. C differs the same way: one-shot
+		// dstSize_tooSmall, the buffered stream corruption_detected (seed
+		// 9d53354a…).
+		exempt = "size"
 	case dicts && seqCorrupt(gerr) && seqCorrupt(werr) && bytes.Equal(got, want):
 		exempt = "dict-cold"
 	default:

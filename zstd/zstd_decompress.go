@@ -1420,8 +1420,9 @@ func (d *dctx) decompressStreamCode(out *outBuffer, in *inBuffer) (int, dErr) {
 			// without the shortcut, which differs from the shortcut's in
 			// the documented size pair only: a block regenerating too much
 			// is ErrUnexpectedBlockSize here, where the shortcut can name
-			// it ErrFrameSizeExceeded (phase2-api-decisions.md, "Pipelined
-			// streams").
+			// it ErrFrameSizeExceeded, or fails another check here where
+			// the shortcut names it ErrUnexpectedBlockSize
+			// (phase2-api-decisions.md, "Pipelined streams").
 			if d.pipe == nil && d.fParams.frameContentSize != contentSizeUnknown &&
 				d.fParams.frameType != zstdSkippableFrame &&
 				uint64(oend-op) >= d.fParams.frameContentSize && ip-istart == d.lhSize {
