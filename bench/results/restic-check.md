@@ -67,3 +67,39 @@ Source: the same restic 0.19.1 tarball, read only, nothing built or run. restic 
 | `Close()` | releases the stream state; later calls return `ErrDecoderClosed` | yes |
 
 `TestResticDecoderOptions` (zstd/decoder_test.go) builds both constructions exactly as above and decodes 1 MiB and 4 MiB blobs written with restic's encoder options (CRC off, 512 KiB window) at levels 1/3/7/11, into nil and into a reused buffer. `scripts/apicheck.sh --subset` passes.
+
+## Phase 2 swap check (Task 22)
+
+Source: restic 0.19.1 release tarball (`restic-0.19.1.tar.gz` from the GitHub release), unpacked in a scratch directory outside this repo. Go 1.27.1, fastzstd at c3f5431. Every go command ran under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 env GOMEMLIMIT=2GiB`.
+
+### The swap
+
+- The five files that import `github.com/klauspost/compress/zstd` now import `zstd "github.com/vahid-sohrabloo/fastzstd/zstd"` instead. Nothing else was edited:
+  - `internal/repository/repository.go`
+  - `internal/repository/check.go`
+  - `internal/repository/checker.go`
+  - `internal/repository/repository_internal_test.go`
+  - `cmd/restic/cmd_debug.go`
+- `go.mod` gets `require github.com/vahid-sohrabloo/fastzstd v0.0.0` and `replace github.com/vahid-sohrabloo/fastzstd => /home/vahid/projects/fastzstd`.
+- `go mod tidy`: exit 0. It turns `github.com/klauspost/compress v1.18.6` into `// indirect`, because restic no longer imports it directly.
+
+### What still needs klauspost/compress
+
+`go list -deps -test ./...` lists three klauspost/compress packages and no klauspost zstd:
+- `github.com/klauspost/compress/s2`
+- `github.com/klauspost/compress/internal/le`
+- `github.com/klauspost/compress/internal/race`
+
+`go mod why -m` traces them to the S3 backend: `internal/backend/s3` imports `github.com/minio/minio-go/v7`, which imports `compress/s2`. That is S2, not zstd, so it stays on klauspost.
+
+The fastzstd packages in the graph are `zstd`, `huff0`, `internal/{bitstream,cpu,fse,hist,huf,xxhash}`.
+
+### Results
+
+| command | result |
+|---|---|
+| `go build -p 1 ./...` | **ok**, exit 0, no compile errors (nothing uses `huff0` or any other API fastzstd lacks) |
+| `go test -p 1 ./internal/repository/... ./internal/backend/...` | **not run** |
+| `go test -p 1 ./cmd/restic -run TestBackup` | **not run** |
+
+restic's test suites were not run. A permission check blocked running restic's code, and the user accepted a build-only check for this step. The swap is therefore verified to compile, not to pass restic's tests. Restic's decoder use is covered on the fastzstd side by `TestResticDecoderOptions` (see the Decoder section).
