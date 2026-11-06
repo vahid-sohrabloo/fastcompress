@@ -74,7 +74,7 @@ func TestCrefStreamOverflow(t *testing.T) {
 			t.Fatal(err)
 		}
 		var nOut int64
-		cw := &countWriter{w: hg, n: &nOut}
+		cw := &countPtrWriter{w: hg, n: &nOut}
 		e.Reset(cw)
 		r := &repeatReader{data: data, n: total}
 		buf := make([]byte, chunk)
@@ -106,12 +106,12 @@ func TestCrefStreamOverflow(t *testing.T) {
 	}
 }
 
-type countWriter struct {
+type countPtrWriter struct {
 	w io.Writer
 	n *int64
 }
 
-func (c *countWriter) Write(p []byte) (int, error) {
+func (c *countPtrWriter) Write(p []byte) (int, error) {
 	*c.n += int64(len(p))
 	return c.w.Write(p)
 }
