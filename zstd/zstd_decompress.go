@@ -574,7 +574,11 @@ func (d *dctx) decompressFrame(dst []byte, dstCapacity int, src []byte) (out []b
 			if e := reserve(room); e != 0 {
 				return out[:op], ip, e
 			}
-			dstCap := min(oend, cap(out)) - op
+			// Go: at most room, not all the buffer has: how far it has
+			// grown depends on dst's capacity, and a block regenerating
+			// more than room would fail on a check that depends on it
+			// (run out of space, or go on to another check).
+			dstCap := min(oend, cap(out), op+room) - op
 			decodedSize, e = d.decompressBlockInternal(out[:op], dstCap, block, notStreaming)
 			if e.cCode() == int(dErrDstSizeTooSmall) && dstCap > bsMax {
 				// More than dstCap > blockSizeMax bytes: the check below
