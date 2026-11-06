@@ -176,6 +176,8 @@ Geometric mean of % of C over 64 rows: **101.1%**
 
 ## Verification evidence (Task 22, tree c3f5431)
 
+**Update 2026-11-06:** the `-tags long` build break and the 3 fuzz failures below are fixed (commits 25c3f7c, 1bc5114, 2e0d5fd, 8cabd7e). At 8cabd7e, with the same caps: `go test ./zstd ./internal/...` pass (also with `FASTZSTD_FUZZ_ASM=off`), `-race -short ./zstd` pass, `-tags long ./zstd` pass, `scripts/decodercheck.sh` ok, and 10 min fuzz of FuzzDecompressBlock, FuzzDecompressDCtx and FuzzDecoderReadConcurrent all pass. Details: `.superpowers/sdd/2026-11-02-fastzstd-phase2-decoder/task-22-fix-report.md`. The root causes there differ from the guesses in the failure notes below: the DCtx failure was not state leaking across calls (it was `DecodeAll` block errors depending on dst capacity), and FuzzDecompressBlock was a test bug. The text below is the original c3f5431 record.
+
 Every go command ran capped, with `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 env GOMEMLIMIT=2GiB go test -p 1 -count=1`, one process at a time, from 2026-11-05 23:59 to 2026-11-06 05:34. load1 was 3.2 to 7.2.
 
 | command | result |
@@ -184,11 +186,11 @@ Every go command ran capped, with `systemd-run --user --scope -p MemoryMax=4G -p
 | `go test -tags noasm ./...` | **pass**: every package ok (zstd 1416.9 s) |
 | `go test -race -short ./...` | **pass**: every package ok (zstd 2514.8 s) |
 | qemu arm64, `-run 'AsmEquiv\|Cref\|Malicious' ./zstd/... ./internal/...` | **pass, reused from Task 21, not rerun.** Task 21 ran it at 4d42162 (every package ok; zstd 7069.8 s). The only code changes from 4d42162 to c3f5431 are comment lines in the two huf .s files, plus bench/README.md |
-| `go test -tags long ./zstd` | **FAIL: build failure** (see below) |
+| `go test -tags long ./zstd` | **FAIL at c3f5431: build failure** (see below). **Fixed in 8cabd7e: pass** (2070 s) |
 | `scripts/apicheck.sh` (full) | **pass**: `apicheck ok` |
 | `scripts/decodercheck.sh` | **pass**: `decodercheck: ok (19 decoder files)` |
 | coverage gate (CI's command and awk) | **pass**: zstd 96.7%, huf 90.1% of statements; every decoder file is at or above 95% (table below) |
-| `scripts/fuzz.sh -t 10m` | **FAIL: 3 of 24 targets** (see below) |
+| `scripts/fuzz.sh -t 10m` | **FAIL at c3f5431: 3 of 24 targets** (see below). **Fixed in 25c3f7c, 1bc5114, 2e0d5fd: the 3 targets re-ran 10 min each at 8cabd7e, all pass** |
 | `grep -rn "TODO\|t.Skip(" zstd internal huff0` | no TODO; 23 conditional `t.Skip` calls, all explained below |
 
 ### `-tags long` build failure
