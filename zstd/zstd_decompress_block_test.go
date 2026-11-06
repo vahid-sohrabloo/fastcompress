@@ -1457,6 +1457,12 @@ func FuzzDecompressBlock(f *testing.F) {
 		d.checkContinuity(buf[:0], len(buf)+dc)
 		d.previousDstEnd = len(buf)
 		histCopy := append([]byte(nil), buf...)
+		wantExt := prev
+		if len(buf)+dc == 0 {
+			// C: ZSTD_checkContinuity does nothing when dstSize is 0, so
+			// prev never became the extDict.
+			wantExt = nil
+		}
 		for round := 0; round < 1+int(flags>>3&1); round++ {
 			d.ddictIsCold = flags&4 != 0
 			d.checkContinuity(buf, dc)
@@ -1467,7 +1473,7 @@ func FuzzDecompressBlock(f *testing.F) {
 			if n < 0 || n > dc {
 				t.Fatalf("size %d, output space %d", n, dc)
 			}
-			if !bytes.Equal(buf[:len(histCopy)], histCopy) || !bytes.Equal(d.extDict, prev) {
+			if !bytes.Equal(buf[:len(histCopy)], histCopy) || !bytes.Equal(d.extDict, wantExt) {
 				t.Fatal("history written")
 			}
 			buf = buf[:len(buf)+n]
