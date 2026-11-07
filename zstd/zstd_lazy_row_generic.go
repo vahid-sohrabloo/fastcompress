@@ -1,7 +1,7 @@
 // Port of libzstd v1.5.7 lib/compress/zstd_lazy.c (Copyright (c) Meta
 // Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the inner loops of
 // the row-based match finder, which have amd64 and arm64 assembly versions
-// (row_amd64.s, row_arm64.s). These Go bodies are always compiled.
+// (zstd_lazy_row_amd64.s, zstd_lazy_row_arm64.s). These Go bodies are always compiled.
 
 package zstd
 

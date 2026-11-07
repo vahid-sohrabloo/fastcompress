@@ -4,7 +4,7 @@
 
 // func seqCodesAsm(seqs *seqDef, n int, llCodes, ofCodes, mlCodes *byte)
 //
-// C: zstd_compress.c:ZSTD_seqToCodes' loop (seqstore_amd64.s): per
+// C: zstd_compress.c:ZSTD_seqToCodes' loop (zstd_compress_seqstore_amd64.s): per
 // sequence (offBase u32 at 0, litLength u16 at 4, mlBase u16 at 6) the
 // offset code is highbit(offBase) = 31 - CLZ, the literal length code
 // llCodeTable[ll] or highbit(ll) + 19 above 63, the match length code

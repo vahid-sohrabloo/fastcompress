@@ -26,7 +26,7 @@ var (
 )
 
 // optAsmParams holds what optParseAsm reads and returns for one block. The
-// layout is fixed: opt_amd64.s reads the fields by offset (checked by
+// layout is fixed: zstd_opt_amd64.s reads the fields by offset (checked by
 // TestOptAsmParamsLayout).
 type optAsmParams struct {
 	bt            *btAsmParams    // 0
@@ -46,7 +46,7 @@ type optAsmParams struct {
 }
 
 // optParseAsm is compressBlockOptGeneric's match loop up to the next
-// segment to store; see opt_amd64.s and optParseFast.
+// segment to store; see zstd_opt_amd64.s and optParseFast.
 //
 //go:noescape
 func optParseAsm(p *optAsmParams) (status int)

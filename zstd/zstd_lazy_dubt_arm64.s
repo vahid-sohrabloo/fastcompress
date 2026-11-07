@@ -2,7 +2,7 @@
 
 #include "textflag.h"
 
-// Shared by both functions (as dubt_amd64.s): R0 bt, R1 b, R2 ip, R3 iend,
+// Shared by both functions (as zstd_lazy_dubt_amd64.s): R0 bt, R1 b, R2 ip, R3 iend,
 // R4 b+ip, R5 commonLengthSmaller, R6 commonLengthLarger, R7 smallerPtr,
 // R8 largerPtr, R9 matchIndex, R10 nbCompares, R11 nextPtr, R12 btMask,
 // R13 baseIdx, R14 btLow, R15 windowLow, R16/R17/R19/R20 scratch.
@@ -285,7 +285,7 @@ bbad:
 	MOVW ZR, matchEndIdx+72(FP)
 	RET
 
-// Fields of btAsmParams (see dubt_generic.go; TestBtAsmParamsLayout).
+// Fields of btAsmParams (see zstd_lazy_dubt_generic.go; TestBtAsmParamsLayout).
 #define BP_BT 0
 #define BP_B 8
 #define BP_HASH 16
@@ -307,7 +307,7 @@ bbad:
 //
 // C: zstd_opt.c:ZSTD_btGetAllMatches_internal (noDict, mls 4 to 6): the
 // skip check, the tree update (ZSTD_updateTree_internal with
-// ZSTD_insertBt1) and ZSTD_insertBtAndGetAllMatches, as dubt_amd64.s (see
+// ZSTD_insertBt1) and ZSTD_insertBtAndGetAllMatches, as zstd_lazy_dubt_amd64.s (see
 // it for the bounds). Registers as in the functions above, with R15
 // windowLow while updating, then matchLow; R21 bestLength, R22 mnum, R23
 // matchEndIdx, R24 curr, R25 p, R26 the position being inserted (C's idx).
@@ -658,7 +658,7 @@ gbad:
 // func dubtFindBestMatchAsm(p *btAsmParams, ip int) (bestLength int, offBase uint32, bad bool)
 //
 // C: zstd_lazy.c:ZSTD_updateDUBT + ZSTD_DUBT_findBestMatch (noDict); see
-// dubt_amd64.s for the steps and bounds. The two loops are called with
+// zstd_lazy_dubt_amd64.s for the steps and bounds. The two loops are called with
 // their stack arguments at 8(RSP) (insertDUBT1Asm: 8-65, dubtSearchAsm:
 // 8-88). Locals: 96(RSP) p, 104(RSP) curr, 108(RSP) unsortLimit, 112(RSP)
 // hash, 120(RSP) nbCandidates, 124(RSP) windowLow, 128(RSP) btLow,

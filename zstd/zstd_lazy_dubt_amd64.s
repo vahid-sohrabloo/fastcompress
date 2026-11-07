@@ -322,7 +322,7 @@ bbad:
 	MOVL $0, matchEndIdx+72(FP)
 	RET
 
-// Fields of btAsmParams (see dubt_generic.go; TestBtAsmParamsLayout).
+// Fields of btAsmParams (see zstd_lazy_dubt_generic.go; TestBtAsmParamsLayout).
 #define BP_BT 0
 #define BP_B 8
 #define BP_HASH 16

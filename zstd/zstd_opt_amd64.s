@@ -2,7 +2,7 @@
 
 #include "textflag.h"
 
-// Fields of optAsmParams (see opt_amd64.go; TestOptAsmParamsLayout).
+// Fields of optAsmParams (see zstd_opt_amd64.go; TestOptAsmParamsLayout).
 #define OP_BT 0
 #define OP_O 8
 #define OP_OPT 16

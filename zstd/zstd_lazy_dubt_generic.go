@@ -1,7 +1,7 @@
 // Port of libzstd v1.5.7 lib/compress/zstd_lazy.c (Copyright (c) Meta
 // Platforms, Inc. and affiliates; BSD/GPLv2 dual license): the binary-tree
-// (DUBT) insertion and search loops, always compiled; dubt_amd64.s
-// and dubt_arm64.s have equivalent ones.
+// (DUBT) insertion and search loops, always compiled; zstd_lazy_dubt_amd64.s
+// and zstd_lazy_dubt_arm64.s have equivalent ones.
 
 package zstd
 
@@ -141,7 +141,7 @@ func dubtSearchGeneric(ms *matchState, ip, iend int, curr, matchIndex, nbCompare
 
 // btAsmParams holds what the assembly btGetAllNoDictAsm and
 // dubtFindBestMatchAsm read for one block; ok is false when it is not set up (always, without assembly). The
-// layout is fixed: dubt_amd64.s and dubt_arm64.s read the fields by offset
+// layout is fixed: zstd_lazy_dubt_amd64.s and zstd_lazy_dubt_arm64.s read the fields by offset
 // (checked by TestBtAsmParamsLayout).
 type btAsmParams struct {
 	bt            *uint32   // 0: ms.chainTable

@@ -9,7 +9,7 @@ import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
 var useFastAsm bool
 
 // useAVX2 selects the 32-byte AVX2 compare in fastCount and in the row
-// search's inline count (row_lazy_amd64.s), taken once the first 8 bytes
+// search's inline count (zstd_lazy_row_lazy_amd64.s), taken once the first 8 bytes
 // match. The scalar 8-byte loop runs otherwise.
 var useAVX2 bool
 

@@ -10,7 +10,7 @@ import (
 	"unsafe"
 )
 
-// TestOptAsmParamsLayout checks the offsets opt_amd64.s uses for
+// TestOptAsmParamsLayout checks the offsets zstd_opt_amd64.s uses for
 // optAsmParams, optState and optimal.
 func TestOptAsmParamsLayout(t *testing.T) {
 	var p optAsmParams
