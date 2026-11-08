@@ -4,3 +4,4 @@ bench/corpus/
 *.prof
 .superpowers/
 ref/cref/build/
+.omc/

@@ -8,9 +8,12 @@ Status: work in progress.
 - **Phase 1, the encoder, is done:** `NewWriter`, `Encoder` (`EncodeAll`,
   the streaming `io.WriteCloser`), `EncodeTo`, `ZipCompressor` and the
   `EOption`s.
-- **Phase 2, the decoder, is in progress.** Every identifier of
-  `klauspost/compress/zstd` is now exported (`scripts/apicheck.sh` passes in
-  full mode); the remaining Phase 2 tasks are still open.
+- **Phase 2, the decoder, is done:** `NewReader`, `Decoder` (`DecodeAll`,
+  the streaming reader), the dictionary and trainer functions, and the zip and
+  snappy helpers. Every identifier of `klauspost/compress/zstd` is exported
+  (`scripts/apicheck.sh` passes in full mode). Decode speed is 101.1% of C
+  libzstd v1.5.7 overall; two rows are under 95% (nci level 1 at 94.5%,
+  silesia 16 KiB level 1 at 93.9%). See `bench/results/2026-11-05-phase2-final.md`.
 
 ## Encoder output
 

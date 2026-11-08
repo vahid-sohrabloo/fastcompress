@@ -1066,7 +1066,7 @@ func execSequence(out []byte, op, oend int, sequence seq,
 	iLitEnd := *litPtr + sequence.litLength
 	virtualStart := prefixStart - len(extDict)
 
-	// C (aarch64): PREFETCH_L1(match); prefetching is Task 20's.
+	// C (aarch64): PREFETCH_L1(match); Go does not prefetch here.
 
 	// Handle edge cases in a slow path:
 	//   - Read beyond end of literals
@@ -1453,8 +1453,7 @@ func (d *dctx) decompressSequencesBody(out []byte, ostart, maxDstSize int,
 }
 
 // prefetchMatch returns the position (relative to prefixStart) after the
-// sequence. C prefetches the sequence's match here; in Go it is a no-op
-// until Task 20 (PREFETCHT0 in asm).
+// sequence. C prefetches the sequence's match here; in Go it is a no-op.
 // C: zstd_decompress_block.c:ZSTD_prefetchMatch
 func prefetchMatch(prefetchPos int, sequence seq) int {
 	prefetchPos += sequence.litLength

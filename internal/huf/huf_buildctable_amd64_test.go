@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// histogram fills count[0..maxSym] in one of the shapes the Task 20i review
+// histogram fills count[0..maxSym] in one of the shapes
 // compared, with zero holes, and returns the number of nonzero counts.
 func histogram(r *rand.Rand, count *[256]uint32, maxSym int, mode int) int {
 	*count = [256]uint32{}

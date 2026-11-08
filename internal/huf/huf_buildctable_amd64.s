@@ -2,7 +2,7 @@
 
 // buildCTableAsm is gcc's HUF_buildCTable_wksp from ref/zstd/programs/zstd
 // (zstd v1.5.7, 0x15010-0x15b20), transliterated instruction for instruction
-// by Task 20k. HUF_sort, HUF_buildTree, HUF_setMaxHeight and
+// from C. HUF_sort, HUF_buildTree, HUF_setMaxHeight and
 // HUF_buildCTableFromTree are inlined in it as gcc inlined them; the bucket
 // quicksort is hufSimpleQuickSort below. Each line keeps C's address and
 // instruction in its comment. Registers are C's (rax = AX, ..., r15 = R15),

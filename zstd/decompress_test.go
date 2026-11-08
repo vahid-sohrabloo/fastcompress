@@ -618,7 +618,7 @@ func TestDecompressGrowBlockOverflow(t *testing.T) {
 // dictionary (set up by refDictContent) into a buffer that
 // decompressFrame must grow several times: checkContinuity, given the
 // frame's output space, makes the dictionary the extDict, and growing keeps
-// it (and every offset) valid. Task 10's dictionaries take this path.
+// it (and every offset) valid. Dictionary decoding takes this path.
 func TestDecompressFrameGrowExtDict(t *testing.T) {
 	nFrames := 0
 	for _, name := range creftest.FrameNames(t) {
@@ -956,7 +956,7 @@ func diffOne(t *testing.T, data []byte) string {
 		// The block regenerates more than blockSizeMax; streaming C ran
 		// out of its buffer (the frame content size) inside it, with more
 		// than blockSizeMax left. Go names such a block by itself,
-		// whatever room it had (Task 12 fix round 2: the error must not
+		// whatever room it had (the error must not
 		// depend on dst's capacity), as its own stream does.
 	default:
 		t.Errorf("%s: C one-shot %v, C streaming %v, Go %d (%v)", deviation, cerr, serr, e, e)

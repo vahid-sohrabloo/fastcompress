@@ -710,7 +710,7 @@ func CompressUsingCTable(dst, src []byte, ct CTable) (int, error) {
 // Compress2 is a TEST ORACLE WRAPPER, not part of the zstd compressor. C 1.5.7
 // has no FSE_compress2; this follows the re-assembly documented in the header
 // of ref/cref/cref.c (mode "fse"), which mirrors the removed
-// FSE_compress_wksp. The zstd compressor (ZSTD_buildCTable, Task 7) uses the
+// FSE_compress_wksp. The zstd compressor (ZSTD_buildCTable) uses the
 // building blocks above directly, not this wrapper's heuristics.
 //
 // It returns 0 when src is not compressible, 1 for RLE (dst[0] = the symbol),

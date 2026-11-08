@@ -25,7 +25,7 @@ var (
 )
 
 // buildDictSamples returns the 200 samples of 4 KiB that train.dict was
-// trained on (Phase 1 Task 18's sample set; see dict_test.go): the output
+// trained on (the sample set of dict_test.go): the output
 // of `go run testdata/gentrain.go DIR`, in file name order.
 func buildDictSamples(t testing.TB) [][]byte {
 	t.Helper()

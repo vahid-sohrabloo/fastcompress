@@ -237,17 +237,6 @@ func stepFour(seed uint64, p int) []byte {
 	return b
 }
 
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var s []byte
-	for ; n > 0; n /= 10 {
-		s = append([]byte{byte('0' + n%10)}, s...)
-	}
-	return string(s)
-}
-
 // rleSeqs is 8192 random bytes from a 64-symbol alphabet without 'x', then
 // 201 records of one 'x' and a 16-byte copy from 5000 bytes back (inside the
 // random part, never next to an 'x'): many identical sequences (literal
@@ -337,7 +326,7 @@ func inputSources(t testing.TB) (m map[string]source, large map[string]bool) {
 	for _, k := range []int{16, 128, 256} {
 		for _, d := range []int{-1, 0, 1} {
 			n := k*kib + d
-			name := "text" + itoa(k) + "KiB"
+			name := "text" + strconv.Itoa(k) + "KiB"
 			if d < 0 {
 				name += "-1"
 			} else if d > 0 {
@@ -362,7 +351,7 @@ func inputSources(t testing.TB) (m map[string]source, large map[string]bool) {
 	add("random200KiB", random(42, 200*kib))
 	add("random-small", random(43, 100))
 	for p := 2; p <= 8; p++ {
-		add("period"+itoa(p), period(p, 64*kib))
+		add("period"+strconv.Itoa(p), period(p, 64*kib))
 	}
 	add("litrle", litRLE())
 	add("litlong", litLong())
@@ -371,7 +360,7 @@ func inputSources(t testing.TB) (m map[string]source, large map[string]bool) {
 		seed uint64
 		p    int
 	}{{100, 302}, {113, 302}, {135, 303}} {
-		add("step4-"+itoa(int(v.seed))+"-"+itoa(v.p), stepFour(v.seed, v.p))
+		add("step4-"+strconv.Itoa(int(v.seed))+"-"+strconv.Itoa(v.p), stepFour(v.seed, v.p))
 	}
 	for _, f := range []string{"zstd-README.md", "zstd-format.md"} {
 		b, err := os.ReadFile(filepath.Join(root(), "internal", "creftest", "testdata", f))
@@ -790,17 +779,17 @@ func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
 		pos := 0
 		for _, sz := range []int{1000, 0, 1, 5000, 30000} {
 			sz = min(sz, len(b)-pos)
-			cs = append(cs, itoa(sz))
+			cs = append(cs, strconv.Itoa(sz))
 			pos += sz
 		}
-		cs = append(cs, itoa(len(b)-pos))
+		cs = append(cs, strconv.Itoa(len(b)-pos))
 		cref("stream/"+name+"/cuts", fixed(b), corpusEntry{}, "stream", "-level", "3", "-checksum", "1",
 			"-chunks", strings.Join(cs, ","), "-flush-after", "0,1,2,3")
 		// 4 KiB chunks, each flushed: short blocks; then an empty last block.
 		cs, fl := nil, []string{}
 		for i := 0; i*4096 < len(b); i++ {
-			cs = append(cs, itoa(min(4096, len(b)-i*4096)))
-			fl = append(fl, itoa(i))
+			cs = append(cs, strconv.Itoa(min(4096, len(b)-i*4096)))
+			fl = append(fl, strconv.Itoa(i))
 		}
 		if len(cs) == 0 {
 			cs, fl = []string{"0"}, []string{"0"}
@@ -864,7 +853,7 @@ func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
 	rs := rleSeqs()
 	for _, l := range []string{"1", "3", "19"} {
 		cref("seed/rle-seqs/L"+l, fixed(rs), corpusEntry{}, "stream", "-level", l, "-checksum", "1",
-			"-chunks", "8209,"+itoa(len(rs)-8209), "-flush-after", "0")
+			"-chunks", "8209,"+strconv.Itoa(len(rs)-8209), "-flush-after", "0")
 		cref("seed/no-seqs/L"+l, fixed(deBruijn()), corpusEntry{}, "compress", "-level", l)
 	}
 

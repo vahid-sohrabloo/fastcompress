@@ -345,7 +345,7 @@ func malSeqBitstream(t testing.TB, body []byte) (pos, nbSeq int) {
 type malSeq struct{ ll, ml, off uint32 }
 
 // craftBlock entropy-codes literals and sequences into a compressed block
-// body with the Phase 1 encoder's block writer, exactly as written, without
+// body with the encoder's block writer, exactly as written, without
 // the encoder's validity assumptions (offsets and lengths are not checked
 // against anything).
 func craftBlock(t testing.TB, literals []byte, seqs []malSeq) []byte {

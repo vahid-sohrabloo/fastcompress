@@ -248,9 +248,8 @@ func EncoderLevelFromZstd(level int) EncoderLevel {
 //
 // The names "fastest", "default", "better" and "best" (and "invalid" for
 // other values) are klauspost/compress's observable behaviour, which
-// EncoderLevelFromString must accept for drop-in compatibility; the user
-// ruled them part of the API (see docs/superpowers/phase2-api-decisions.md,
-// "Phase 1 API notes"). C has no level names.
+// EncoderLevelFromString must accept for drop-in compatibility; they
+// are part of the API. C has no level names.
 func (e EncoderLevel) String() string {
 	switch e {
 	case SpeedFastest:

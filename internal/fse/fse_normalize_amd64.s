@@ -2,7 +2,7 @@
 
 // normalizeCountAsm is gcc's FSE_normalizeCount from ref/zstd/programs/zstd
 // (zstd v1.5.7, 0xf890-0xfc40), FSE_normalizeM2 inlined as gcc inlined it,
-// transliterated instruction for instruction by Task 20k. Each line keeps
+// transliterated instruction for instruction from C. Each line keeps
 // C's address and instruction in its comment. Registers are C's (rax = AX,
 // ..., r15 = R15); C's red-zone slots at -0x18..-0x4(%rsp) are at
 // 0x28..0x3c(SP) (C's offset + 0x40).

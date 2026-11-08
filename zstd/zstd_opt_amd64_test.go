@@ -163,8 +163,7 @@ func TestOptAsmEquiv(t *testing.T) {
 // optNum. priceTable and matchTable sit inside larger arrays with sentinel
 // entries on both sides, checked after every block, and the assembly must
 // match the Go loop. Changing the exit's 4096 to 4097 makes the output
-// differ; to 4200, the writes overrun. (Adapted from the Task 20f review's
-// canary test.)
+// differ; to 4200, the writes overrun. (A canary test.)
 func TestOptAsmOptNumBound(t *testing.T) {
 	r := rand.New(rand.NewPCG(7, 9))
 	var src []byte

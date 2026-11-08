@@ -494,7 +494,7 @@ func TestDecodeAllBudget(t *testing.T) {
 // TestDecodeAllPresized pins review I2: a frame without a content size
 // (the streaming Encoder's) decodes in a dst the caller sized for its
 // output, allocating no output buffer (what is left, under 1 KiB, is
-// fse.buildDTable's per-table workspace: Task 20).
+// fse.buildDTable's per-table workspace).
 func TestDecodeAllPresized(t *testing.T) {
 	d := newTestDecoder(t, WithDecoderConcurrency(1))
 	e := newTestEncoder(t)
@@ -1278,7 +1278,7 @@ func TestErrorsIs(t *testing.T) {
 	})
 }
 
-// TestRoundTrip decodes the Phase 1 Encoder's output, one-shot and
+// TestRoundTrip decodes the Encoder's output, one-shot and
 // streamed (random write sizes, a Flush in the middle), at each level, with
 // DecodeAll, Read and WriteTo.
 func TestRoundTrip(t *testing.T) {

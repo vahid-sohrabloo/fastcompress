@@ -3,7 +3,7 @@
 // compressUsingCTableAsm is gcc's FSE_compress_usingCTable_generic from
 // ref/zstd/programs/zstd (zstd v1.5.7, 0xed50-0xf390), both the fast and the
 // checked flush inlined as gcc inlined them, transliterated instruction for
-// instruction by Task 20k. Each line keeps C's address and instruction in
+// instruction from C. Each line keeps C's address and instruction in
 // its comment. Registers are C's (rax = AX, ..., r15 = R15); C's red-zone
 // slots at -0x30..-0x8(%rsp) are at 0x10..0x38(SP) (C's offset + 0x40).
 //

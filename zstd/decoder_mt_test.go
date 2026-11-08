@@ -49,7 +49,7 @@ const (
 	smallInput = 4 << 10
 )
 
-// streamOuts are the chunk patterns of the Decoder tests (Task 11/12):
+// streamOuts are the chunk patterns of the Decoder tests:
 // Read of the whole input with 4096-byte reads, of 1-byte input with
 // 1-byte reads (small inputs), of random input chunks with random read
 // sizes; WriteTo of the whole input and of 7-byte chunks.
@@ -469,8 +469,7 @@ func TestStreamReaderErrors(t *testing.T) {
 	}
 }
 
-// TestStreamPipelineOptIn checks when streams are pipelined (controller
-// ruling, Task 13 fix round 1): only with an explicit
+// TestStreamPipelineOptIn checks when streams are pipelined: only with an explicit
 // WithDecoderConcurrency that resolves to more than 1. The default
 // (min(4, GOMAXPROCS) DecodeAll contexts) streams synchronously, as does
 // WithDecoderConcurrency(1); WithDecoderConcurrency(0) is GOMAXPROCS.

@@ -2,7 +2,7 @@
 
 // buildCTableAsm is gcc's FSE_buildCTable_wksp from ref/zstd/programs/zstd
 // (zstd v1.5.7, 0xf390-0xf750), transliterated instruction for instruction
-// by Task 20k. Each line keeps C's address and instruction in its comment.
+// from C. Each line keeps C's address and instruction in its comment.
 // Registers are C's (rax = AX, ..., r15 = R15); C's red-zone slots at
 // -0x34..-0x10(%rsp) are at 0x0c..0x30(SP) (C's offset + 0x40).
 //

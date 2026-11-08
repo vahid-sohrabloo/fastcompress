@@ -138,7 +138,7 @@ const (
 //
 // C's pointers into the output become int offsets into the current output
 // buffer prevDst (prefixStart, virtualStart, previousDstEnd), with the
-// previous segment in extDict, as Phase 1 does with its window: C's dictEnd
+// previous segment in extDict, as the encoder does with its window: C's dictEnd
 // is the end of extDict, and virtualStart is prefixStart - len(extDict)
 // (negative when extDict is longer than the prefix before it). The table
 // pointers become slices of the table they point into (entry 0 is the

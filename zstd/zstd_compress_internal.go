@@ -130,12 +130,6 @@ type fseCTablesMetadata struct {
 	lastCountSize          int // accounts for a bug in 1.3.4, see entropyCompressSeqStoreInternal
 }
 
-// entropyCTablesMetadata. C: zstd_compress_internal.h:ZSTD_entropyCTablesMetadata_t
-type entropyCTablesMetadata struct {
-	hufMetadata hufCTablesMetadata
-	fseMetadata fseCTablesMetadata
-}
-
 // Workspace sizes in bytes. C: zstd_compress_internal.h
 const (
 	compressSequencesWorkspaceSize = 4 * (maxSeq + 2)                                   // C: COMPRESS_SEQUENCES_WORKSPACE_SIZE
