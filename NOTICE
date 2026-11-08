@@ -1,0 +1,8 @@
+This project is a pure-Go port of the Zstandard reference implementation
+(libzstd v1.5.7, https://github.com/facebook/zstd), which is
+Copyright (c) Meta Platforms, Inc. and affiliates. libzstd is dual-licensed
+under the BSD 3-Clause license and GPLv2; this project uses it under the
+BSD 3-Clause license (see LICENSE).
+
+The public API follows that of github.com/klauspost/compress/zstd so that it
+can replace it. No code from that project is used.

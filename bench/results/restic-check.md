@@ -80,7 +80,7 @@ Source: restic 0.19.1 release tarball (`restic-0.19.1.tar.gz` from the GitHub re
   - `internal/repository/checker.go`
   - `internal/repository/repository_internal_test.go`
   - `cmd/restic/cmd_debug.go`
-- `go.mod` gets `require github.com/vahid-sohrabloo/fastzstd v0.0.0` and `replace github.com/vahid-sohrabloo/fastzstd => /home/vahid/projects/fastzstd`.
+- `go.mod` gets `require github.com/vahid-sohrabloo/fastzstd v0.0.0` and `replace github.com/vahid-sohrabloo/fastzstd => ../fastzstd` (a local checkout).
 - `go mod tidy`: exit 0. It turns `github.com/klauspost/compress v1.18.6` into `// indirect`, because restic no longer imports it directly.
 
 ### What still needs klauspost/compress
