@@ -4,3 +4,8 @@ bench/corpus/
 *.prof
 .superpowers/
 ref/cref/build/
+ref/libdeflate/
+ref/ldref/ldref
+ref/ldref/ldbench
+bench/gzip/gzbench
+bench/gzip/gzip

@@ -1,0 +1,39 @@
+# Normalised `go doc -all` lines (scripts/apicheck.sh) where ./zlib differs
+# textually from the standard library's compress/zlib.
+#   "+ line": only in ./zlib (an addition, or our spelling of a declaration
+#             the standard library spells differently)
+#   "- line": only in compress/zlib (spelled differently here: receiver or
+#             parameter names, named results, HuffmanOnly declared outside
+#             the const block)
+# The types and signatures behind every "-" line are the same in both;
+# zlib/apiparity_test.go checks that with go/types and reflect, and its
+# apiExtras lists every addition with the reason.
+- const ( | HuffmanOnly = flate.HuffmanOnly
+- func (z *Writer) Write(p []byte) (n int, err error)
++ const ( | Level10 = flate.Level10
++ const ( | Level11 = flate.Level11
++ const ( | Level12 = flate.Level12
++ const ( | MaxLevel = flate.MaxLevel
++ const DefaultMaxOutput = flate.DefaultMaxOutput
++ const HuffmanOnly = flate.HuffmanOnly
++ func (c *Compressor) AppendCompress(dst, src []byte) ([]byte, error)
++ func (c *Compressor) Compress(dst, src []byte) (n int, err error)
++ func (c *Compressor) CompressBound(n int) int
++ func (c *Compressor) Level() int
++ func (d *Decompressor) AppendDecompress(dst, src []byte, sizeHint int) ([]byte, error)
++ func (d *Decompressor) Decompress(dst, src []byte) (n int, err error)
++ func (d *Decompressor) DecompressEx(dst, src []byte) (nIn, nOut int, err error)
++ func (d *Decompressor) MaxOutput() int
++ func (d *Decompressor) SetMaxOutput(n int)
++ func (z *Writer) Write(p []byte) (int, error)
++ func CompressBound(n int) int
++ func NewCompressor(level int) (*Compressor, error)
++ func NewDecompressor() *Decompressor
++ type Compressor struct {
++ type Decompressor struct {
++ var ( | ErrBadData = flate.ErrBadData
++ var ( | ErrInsufficientSpace = flate.ErrInsufficientSpace
++ var ( | ErrInvalidLevel = flate.ErrInvalidLevel
++ var ( | ErrOutputLimit = flate.ErrOutputLimit
++ var ( | ErrShortBuffer = flate.ErrShortBuffer
++ var ( | ErrShortOutput = flate.ErrShortOutput

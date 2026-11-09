@@ -9,15 +9,30 @@ permissions:
 
 env:
   ZSTD_TAG: v1.5.7
+  # Must match LDTAG in ref/fetch.sh (the cache key of ref/libdeflate).
+  LIBDEFLATE_TAG: v1.26
 
 jobs:
   test:
-    name: test (${{ matrix.runner }})
+    name: test (${{ matrix.runner }}, ${{ matrix.group }})
     runs-on: ${{ matrix.runner }}
+    # Every go test has -timeout 60m per package; a job runs two long ones
+    # (default and noasm) plus the setup. packages runs zstd, flate, gzip,
+    # zlib and the rest side by side (-p = cores), so it gets more room.
+    timeout-minutes: ${{ matrix.group == 'packages' && 240 || 150 }}
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
+        # internal/deflate is split into the partitions of
+        # scripts/deflate-groups.sh (-regex; disjoint, together the whole
+        # package; other is the -skip of the rest): unsplit, its full suite
+        # can exceed the 60m test timeout on a small runner (the ldref cache
+        # is off under CI). packages = every other package; short = the 386
+        # and race -short passes of ./... (X64 only) and the API check.
+        group: [lazy, nopt, rest, equiv, dec, other, packages, short]
+    env:
+      GROUP: ${{ matrix.group }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -28,34 +43,68 @@ jobs:
         with:
           path: ref/zstd
           key: zstd-${{ env.ZSTD_TAG }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Fetch C zstd and build CLI (no corpus)
+      - name: Cache C reference (libdeflate source)
+        uses: actions/cache@v4
+        with:
+          path: ref/libdeflate
+          key: libdeflate-${{ env.LIBDEFLATE_TAG }}
+      - name: Fetch C zstd and libdeflate, build the zstd CLI (no corpus)
         run: ref/fetch.sh --no-corpus
-      # internal/creftest fails (rather than skips) under CI=true when cref is missing.
+      # internal/creftest fails (rather than skips) under CI=true when cref or
+      # ldref is missing.
       - name: Build cref
         run: make -C ref/cref
+      # ldref (and ldbench): the libdeflate v1.26 driver of the internal/deflate,
+      # flate, gzip and zlib differential tests (all steps below, 386 included:
+      # ldref runs natively).
+      - name: Build ldref
+        run: make -C ref/ldref
+      # The group's selection: the packages, or ./internal/deflate with the
+      # partition's -run regex (other: -skip of the other partitions). The
+      # noasm pass also runs every Fuzz target's seed corpus with the
+      # assembly compiled out.
       - name: Test
-        run: go test -timeout 60m ./...
-      # Also runs every Fuzz target's seed corpus with the assembly compiled out.
-      - name: Test (noasm)
-        run: go test -timeout 60m -tags noasm ./...
+        if: matrix.group != 'short'
+        run: |
+          if [ "$GROUP" = packages ]; then
+            pkgs=$(go list ./... | grep -v '/internal/deflate$')
+            args=($pkgs)
+          else
+            re=$(scripts/deflate-groups.sh -regex "$GROUP")
+            [ -n "$re" ] || { echo "empty regex for $GROUP"; exit 1; }
+            flag=-run
+            [ "$GROUP" = other ] && flag=-skip
+            args=("$flag" "$re" ./internal/deflate)
+          fi
+          go test -timeout 60m "${args[@]}"
+          echo "::group::noasm"
+          go test -timeout 60m -tags noasm "${args[@]}"
+          echo "::endgroup::"
       - name: Test (386, short)
-        if: runner.arch == 'X64'
+        if: matrix.group == 'short' && runner.arch == 'X64'
         env:
           GOARCH: "386"
         run: go test -timeout 60m -short ./...
       - name: Test (race)
-        if: runner.arch == 'X64'
+        if: matrix.group == 'short' && runner.arch == 'X64'
         # The race runtime needs cgo on linux/amd64. The library itself has no
         # cgo; this is test tooling only.
+        # The DEFLATE packages run no goroutines outside their concurrency
+        # tests, so their heavy differential/exhaustive tests skip or shrink
+        # under -race (raceEnabled) and run in full in the steps above.
+        # Measured -race -short, -p 1, loaded laptop: internal/deflate 277 s
+        # (49 min before the trim), flate/gzip/zlib ~115 s each, others < 25 s.
+        # -timeout (per package): about 4x the slowest, above the 10m default.
         env:
           CGO_ENABLED: "1"
-        run: go test -race -short ./...
+        run: go test -timeout 20m -race -short ./...
       - name: API check (full)
+        if: matrix.group == 'short'
         run: scripts/apicheck.sh
 
   fuzz-coverage:
-    # Its own job: about 40 minutes of coverage plus 7 of fuzzing, run in
-    # parallel with test.
+    # Its own job: about 40 minutes of zstd coverage, a few of DEFLATE
+    # coverage and about 15 of fuzzing, run in parallel with test.
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -68,10 +117,17 @@ jobs:
         with:
           path: ref/zstd
           key: zstd-${{ env.ZSTD_TAG }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Fetch C zstd and build CLI (no corpus)
+      - name: Cache C reference (libdeflate source)
+        uses: actions/cache@v4
+        with:
+          path: ref/libdeflate
+          key: libdeflate-${{ env.LIBDEFLATE_TAG }}
+      - name: Fetch C zstd and libdeflate, build the zstd CLI (no corpus)
         run: ref/fetch.sh --no-corpus
       - name: Build cref
         run: make -C ref/cref
+      - name: Build ldref
+        run: make -C ref/ldref
       - name: Fuzz (20s per target)
         run: scripts/fuzz.sh -t 20s
       - name: Collect failing inputs
@@ -112,6 +168,33 @@ jobs:
               if (nh == 0) { print "no internal/huf/huf_decompress*.go in the profile"; bad = 1 }
               exit bad
             }' cover.out
+      - name: Coverage gate (DEFLATE core files, 95% of statements)
+        run: |
+          # Decoder: decompress*, decode_table*, static_codes; compressor core:
+          # compress*, huffman, *matchfinder* (internal/deflate).
+          go test -short -timeout 60m -coverprofile=cover-deflate.out ./internal/deflate
+          awk '
+            FNR == 1 { next }
+            {
+              split($1, a, ":"); f = a[1]
+              if (f ~ /\/internal\/deflate\/(decompress[^\/]*|decode_table[^\/]*|static_codes)\.go$/) nd++
+              else if (f ~ /\/internal\/deflate\/(compress[^\/]*|huffman|[^\/]*matchfinder[^\/]*)\.go$/) nc++
+              else next
+              n[f, $1] = $2; files[f] = 1
+              if ($3 > 0) hit[f, $1] = 1
+            }
+            END {
+              for (k in n) { split(k, p, SUBSEP); tot[p[1]] += n[k]; if (k in hit) cov[p[1]] += n[k] }
+              bad = 0
+              for (f in files) {
+                pct = 100 * cov[f] / tot[f]
+                printf "%-72s %6.2f%% (%d/%d)\n", f, pct, cov[f], tot[f]
+                if (pct < 95) { print "  below 95%"; bad = 1 }
+              }
+              if (nd == 0) { print "no internal/deflate decoder files in the profile"; bad = 1 }
+              if (nc == 0) { print "no internal/deflate compressor files in the profile"; bad = 1 }
+              exit bad
+            }' cover-deflate.out
 
   lint:
     runs-on: ubuntu-latest

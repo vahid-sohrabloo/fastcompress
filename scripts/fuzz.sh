@@ -3,11 +3,16 @@
 #
 # Runs every Fuzz* target (found with go test -list '^Fuzz') of each package
 # for -fuzztime DURATION (default 30s), one target at a time. -p limits the
-# run to the given packages (repeatable; default ./...). FuzzTrainDict runs
-# at most 60s (when -t parses to more): each of its execs trains a
-# dictionary, in Go and in cref. A package with Fuzz targets must have a
-# fuzzasm_test.go (the FASTZSTD_FUZZ_ASM hook), and a package whose test
-# binary fails to build or list counts as failed.
+# run to the given packages (repeatable; directories or import paths; default
+# ./...; .github/workflows/fuzz.yml passes one suite's import paths).
+# FuzzTrainDict runs at most 60s (when -t parses to more): each of its execs
+# trains a dictionary, in Go and in cref. Differential targets need the C
+# drivers built: make -C ref/cref (zstd) and make -C ref/ldref (flate, gzip,
+# zlib, internal/deflate). A package with Fuzz targets must have a
+# fuzzasm_test.go (the FASTZSTD_FUZZ_ASM hook; flate, gzip, zlib and
+# internal/adler32 have one although only internal/deflate, which they
+# call, has assembly), and a package whose test binary fails to build or
+# list counts as failed.
 #
 # Every go test runs with -parallel 2 -fuzzminimizetime 2s. Outside CI (CI
 # unset) and when systemd-run exists, each also runs in a scope capped at
