@@ -7,7 +7,7 @@ ALL  := $(wildcard $(ZLIB)/common/*.c) $(wildcard $(ZLIB)/compress/*.c) $(wildca
         $(wildcard $(ZLIB)/dictBuilder/*.c)
 SRCS := $(filter-out $(ZLIB)/compress/zstd_compress.c,$(ALL))
 CFLAGS ?= -O2
-CFLAGS += -DZSTD_STATIC_LINKING_ONLY -DFSE_STATIC_LINKING_ONLY -DHUF_STATIC_LINKING_ONLY \
+override CFLAGS += -DZSTD_STATIC_LINKING_ONLY -DFSE_STATIC_LINKING_ONLY -DHUF_STATIC_LINKING_ONLY \
           -DZSTD_DISABLE_ASM -DZSTD_LEGACY_SUPPORT=0 -I$(ZLIB) -I$(ZLIB)/common -I$(ZLIB)/compress -I$(ZLIB)/dictBuilder
 
 cref: cref.c build/zstd_compress.c $(SRCS)

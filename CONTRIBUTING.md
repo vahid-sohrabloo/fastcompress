@@ -13,9 +13,14 @@ Bug reports and pull requests are welcome.
 
 ## Setup
 
-    ref/fetch.sh            # clones libzstd v1.5.7, builds the zstd CLI, fetches the Silesia corpus
+    ref/fetch.sh            # clones libzstd v1.5.7 and libdeflate v1.26, builds the zstd CLI, fetches the Silesia corpus
+    make -C ref/cref        # the zstd reference driver
+    make -C ref/ldref       # the libdeflate reference driver
     go test ./...           # the comparison tests use the C reference; takes a while without -short
     go test -short ./...
+
+Without `ref/cref/cref` and `ref/ldref/ldref` the comparison tests skip (they
+fail under `CI=true`), so build both before running the tests.
 
 The full suite is memory hungry. Cap it if your machine is small, for example
 `GOMEMLIMIT=2GiB go test -p 1 ./...`.

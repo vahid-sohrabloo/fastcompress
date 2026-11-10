@@ -26,6 +26,9 @@
 # prints the testdata/fuzz path of each failing input found.
 set -euo pipefail
 
+# Fuzz inputs are one-use: keep them out of the persistent libdeflate cache.
+export FASTCOMPRESS_LDREF_CACHE=off
+
 cd "$(dirname "$0")/.."
 
 fuzztime=30s
