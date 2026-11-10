@@ -48,8 +48,15 @@ jobs:
         with:
           path: ref/libdeflate
           key: libdeflate-${{ env.LIBDEFLATE_TAG }}
-      - name: Fetch C zstd and libdeflate, build the zstd CLI (no corpus)
-        run: ref/fetch.sh --no-corpus
+      # The flate, gzip, zlib and zstd differential tests read Silesia
+      # (bench/corpus/silesia and silesia.tar) and fail when it is missing.
+      - name: Cache Silesia corpus
+        uses: actions/cache@v4
+        with:
+          path: bench/corpus
+          key: silesia-${{ hashFiles('ref/fetch.sh') }}
+      - name: Fetch C zstd, libdeflate and the Silesia corpus, build the zstd CLI
+        run: ref/fetch.sh
       # internal/creftest fails (rather than skips) under CI=true when cref or
       # ldref is missing.
       - name: Build cref

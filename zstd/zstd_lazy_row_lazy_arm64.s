@@ -222,7 +222,7 @@ havehash:
 	VDUP  R2, V0.B16
 	VLD1  (R6), [V1.B16]
 	VCMEQ V0.B16, V1.B16, V1.B16
-	VSHRN $4, V1.H8, V1.B8
+	WORD  $0x0f0c8421 // VSHRN $4, V1.H8, V1.B8 (Go 1.25's assembler lacks VSHRN)
 	VMOV  V1.D[0], R11
 	LSLW  $2, R10, R12
 	ROR   R12, R11, R11
@@ -913,8 +913,8 @@ havehash:
 	VLD2  (R6), [V1.H8, V2.H8]
 	VCMEQ V0.B16, V1.B16, V1.B16
 	VCMEQ V0.B16, V2.B16, V2.B16
-	VSHRN $6, V1.H8, V1.B8
-	VSHRN $6, V2.H8, V2.B8
+	WORD  $0x0f0a8421 // VSHRN $6, V1.H8, V1.B8 (Go 1.25's assembler lacks VSHRN)
+	WORD  $0x0f0a8442 // VSHRN $6, V2.H8, V2.B8 (Go 1.25's assembler lacks VSHRN)
 	VSLI  $4, V2.B8, V1.B8
 	VMOV  V1.D[0], R11
 	LSLW  $1, R10, R12
@@ -1616,7 +1616,7 @@ havehash:
 	VSRI  $1, V3.B16, V4.B16
 	VSRI  $2, V2.B16, V4.B16
 	VSRI  $4, V4.B16, V4.B16
-	VSHRN $4, V4.H8, V4.B8
+	WORD  $0x0f0c8484 // VSHRN $4, V4.H8, V4.B8 (Go 1.25's assembler lacks VSHRN)
 	VMOV  V4.D[0], R11
 	ROR   R10, R11, R11
 	MOVWU S_LOWLIM, R12
@@ -2303,7 +2303,7 @@ havehash:
 	VDUP  R2, V0.B16
 	VLD1  (R6), [V1.B16]
 	VCMEQ V0.B16, V1.B16, V1.B16
-	VSHRN $4, V1.H8, V1.B8
+	WORD  $0x0f0c8421 // VSHRN $4, V1.H8, V1.B8 (Go 1.25's assembler lacks VSHRN)
 	VMOV  V1.D[0], R11
 	LSLW  $2, R10, R12
 	ROR   R12, R11, R11
@@ -2994,8 +2994,8 @@ havehash:
 	VLD2  (R6), [V1.H8, V2.H8]
 	VCMEQ V0.B16, V1.B16, V1.B16
 	VCMEQ V0.B16, V2.B16, V2.B16
-	VSHRN $6, V1.H8, V1.B8
-	VSHRN $6, V2.H8, V2.B8
+	WORD  $0x0f0a8421 // VSHRN $6, V1.H8, V1.B8 (Go 1.25's assembler lacks VSHRN)
+	WORD  $0x0f0a8442 // VSHRN $6, V2.H8, V2.B8 (Go 1.25's assembler lacks VSHRN)
 	VSLI  $4, V2.B8, V1.B8
 	VMOV  V1.D[0], R11
 	LSLW  $1, R10, R12
@@ -3697,7 +3697,7 @@ havehash:
 	VSRI  $1, V3.B16, V4.B16
 	VSRI  $2, V2.B16, V4.B16
 	VSRI  $4, V4.B16, V4.B16
-	VSHRN $4, V4.H8, V4.B8
+	WORD  $0x0f0c8484 // VSHRN $4, V4.H8, V4.B8 (Go 1.25's assembler lacks VSHRN)
 	VMOV  V4.D[0], R11
 	ROR   R10, R11, R11
 	MOVWU S_LOWLIM, R12
@@ -4384,7 +4384,7 @@ havehash:
 	VDUP  R2, V0.B16
 	VLD1  (R6), [V1.B16]
 	VCMEQ V0.B16, V1.B16, V1.B16
-	VSHRN $4, V1.H8, V1.B8
+	WORD  $0x0f0c8421 // VSHRN $4, V1.H8, V1.B8 (Go 1.25's assembler lacks VSHRN)
 	VMOV  V1.D[0], R11
 	LSLW  $2, R10, R12
 	ROR   R12, R11, R11
@@ -5075,8 +5075,8 @@ havehash:
 	VLD2  (R6), [V1.H8, V2.H8]
 	VCMEQ V0.B16, V1.B16, V1.B16
 	VCMEQ V0.B16, V2.B16, V2.B16
-	VSHRN $6, V1.H8, V1.B8
-	VSHRN $6, V2.H8, V2.B8
+	WORD  $0x0f0a8421 // VSHRN $6, V1.H8, V1.B8 (Go 1.25's assembler lacks VSHRN)
+	WORD  $0x0f0a8442 // VSHRN $6, V2.H8, V2.B8 (Go 1.25's assembler lacks VSHRN)
 	VSLI  $4, V2.B8, V1.B8
 	VMOV  V1.D[0], R11
 	LSLW  $1, R10, R12
@@ -5778,7 +5778,7 @@ havehash:
 	VSRI  $1, V3.B16, V4.B16
 	VSRI  $2, V2.B16, V4.B16
 	VSRI  $4, V4.B16, V4.B16
-	VSHRN $4, V4.H8, V4.B8
+	WORD  $0x0f0c8484 // VSHRN $4, V4.H8, V4.B8 (Go 1.25's assembler lacks VSHRN)
 	VMOV  V4.D[0], R11
 	ROR   R10, R11, R11
 	MOVWU S_LOWLIM, R12
