@@ -118,18 +118,26 @@
 // On amd64, unless built with the noasm or purego tag, assembly replaces
 // the Go code of the decoder's fast loop (on CPUs with BMI2 only), the
 // level 1 loop, the greedy, lazy and lazy2 loops of levels 2..9, the block
-// flush's sequence writer and the match finder's table init and rebase.
-// Levels 10..12 and every other architecture (arm64 included) are pure
-// Go. The assembly produces the same output as the Go code (each routine
-// has a fuzz target comparing the two).
+// flush's sequence writer, the match finder's table init and rebase, and,
+// for the near-optimal levels 10..12, the binary-tree match finding loop
+// and the backward min-cost-path pass. The rest of levels 10..12,
+// Adler-32 and every other architecture (arm64 included) are Go only. The
+// assembly produces the same output as the Go code (each routine has a
+// fuzz target comparing the two).
 //
 // On the one amd64 CPU measured (an i9-13900H, Silesia corpus; see the
 // repository README and bench/results), decompression is about as fast as
 // libdeflate's (geometric mean 100.2-100.6% at levels 1, 6, 9 and 12, a
-// margin that depends on code layout), and compression is slower: 94.7%
-// (level 12) to 99.1% (level 1) of libdeflate's speed (geometric means),
-// with six of the 13 level 12 inputs at 82-89%. The pure-Go build is slower
-// still (not gated; arm64 has not been benchmarked).
+// margin that depends on code layout), and compression is as fast or
+// faster: geometric means of 103.6% (level 1), 101.6% (level 3), 102.1%
+// (level 6), 102.8% (level 9) and 119.8% (level 12) of libdeflate's
+// speed, with every one of the 13 inputs per level at 99.6% or more
+// (the lowest is x-ray at level 1, 99.6%; the slow level 12 rows carry
+// about 2-3 points of rounding). The compression gate (geometric mean at
+// least 100%, every row at least 95%, none below 90%) is met at every
+// measured level. Results come from one CPU; expect other CPUs to differ.
+// The pure-Go build is slower (not gated; arm64 has not been
+// benchmarked).
 //
 // # Memory and reuse
 //

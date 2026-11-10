@@ -135,12 +135,13 @@ On amd64 (unless built with `-tags noasm` or `purego`) assembly replaces
 the Go code of the decoder's fast loop (only on CPUs with BMI2, as
 libdeflate's own BMI2 decoder; other CPUs run the Go loop), the level 1
 loop, the greedy / lazy / lazy2 loops of levels 2..9 with the hash-chain
-match finder, the sequence writer of the block flush, and the match
-finder's table init / rebase (SSE2). Levels 10..12 (near-optimal parsing,
-binary-tree match finder) and Adler-32 are Go only; CRC-32 is
-`hash/crc32`. Each routine has a fuzz target comparing it with the Go
-code. arm64 and every other architecture run pure Go: there is no arm64
-assembly, and arm64 is only tested on CI.
+match finder, the sequence writer of the block flush, the match finder's
+table init / rebase (SSE2), and, for the near-optimal levels 10..12, the
+binary-tree match finding loop (`btMatchLoopAsm`) and the backward
+min-cost-path pass (`minCostPathAsm`). The rest of levels 10..12 and
+Adler-32 are Go only; CRC-32 is `hash/crc32`. Each routine has a fuzz
+target comparing it with the Go code. arm64 and every other architecture
+run pure Go: there is no arm64 assembly, and arm64 is only tested on CI.
 
 ### Speed
 
@@ -159,25 +160,29 @@ percentage of libdeflate's:
   this one CPU (an earlier, 32-byte aligned version lost about half of
   that gain when moved by 32 bytes; the current 64-byte alignment did
   not). Expect parity, not a lead, on other CPUs.
-- **Compression** (`silesia.tar` in 1 MiB blocks), below libdeflate at
-  every measured level
-  ([bench/results/2026-11-08-deflate-compress-round5.md](bench/results/2026-11-08-deflate-compress-round5.md)):
+- **Compression** (the 12 Silesia files whole plus `silesia.tar` in 1 MiB
+  blocks, 13 rows per level), at or above libdeflate at every measured
+  level
+  ([bench/results/2026-11-10-deflate-compress-round7.md](bench/results/2026-11-10-deflate-compress-round7.md)):
 
   | level | geomean | lowest row |
   |---|---|---|
-  | 1 | 99.1% | 93.8% (x-ray) |
-  | 3 | 95.0% | 93.5% (ooffice) |
-  | 6 | 95.9% | 94.8% (nci) |
-  | 9 | 95.5% | 93.4% (mozilla) |
-  | 12 | 94.7% | 81.8% (x-ray) |
+  | 1 | 103.6% | 99.6% (x-ray) |
+  | 3 | 101.6% | 100.1% (mozilla) |
+  | 6 | 102.1% | 101.4% (samba) |
+  | 9 | 102.8% | 101.2% (xml) |
+  | 12 | 119.8% | 106.5% (nci) |
 
   The project's gate (geomean >= 100%, every row >= 95%, no row below
-  90%) is **not met** for compression at any level; at level 12, six of
-  13 rows (mr, nci, samba, sao, xml, x-ray) are below the 90% floor.
-  The compressed output is the same size in every row (byte-identical).
+  90%) is met for compression at all five measured levels: every
+  geomean is above 100% and no row is below 99.6%. The one row below
+  100% is x-ray at level 1 (99.6%). The slow level 12 rows (nci 3.3,
+  xml 4.1 MB/s) carry about +-2-3 points of rounding in "% of C". The
+  compressed output is byte-identical to libdeflate's in all 65 rows.
 
 The pure-Go build (`-tags noasm`) is slower and is not gated; arm64 has
-not been benchmarked.
+not been benchmarked. All results come from one CPU (the i9-13900H
+above); expect other CPUs to differ.
 
 ### Tests
 
