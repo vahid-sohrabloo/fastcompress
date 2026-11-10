@@ -361,15 +361,7 @@ func TestTrainDictDegenerate(t *testing.T) {
 // failure code where Go guards it up front.
 func checkTrainOrCrash(t *testing.T, mode string, samples [][]byte, maxDict int, p CoverParams) {
 	t.Helper()
-	var args []string
-	if mode != "train" {
-		args = crefTrainArgs(p)
-	}
-	// F above 31 makes C allocate gigabytes: on a machine without the
-	// memory, C's malloc fails (a plain error, not a crash) where Go refuses
-	// the parameters up front. Both are errors; the codes may differ.
-	if _, _, cerr := creftest.TrainCRef(t, mode, samples, maxDict, args...); cerr != nil &&
-		(cerr.Code == -2 || (p.F >= 32 && cerr.Code == cErrMemoryAllocation)) {
+	goTrain := func() error {
 		var err error
 		switch mode {
 		case "train":
@@ -379,7 +371,25 @@ func checkTrainOrCrash(t *testing.T, mode string, samples [][]byte, maxDict int,
 		default:
 			_, _, err = TrainDictFastCover(samples, maxDict, p)
 		}
-		var ce *buildDictError
+		return err
+	}
+	// Where Go marks the input as undefined behaviour in C, C's result is
+	// not defined: it crashes on one machine and returns normally on another
+	// (an out-of-bounds read that happens to stay in mapped memory).
+	var ce *buildDictError
+	if err := goTrain(); errors.As(err, &ce) && ce.undefined {
+		return
+	}
+	var args []string
+	if mode != "train" {
+		args = crefTrainArgs(p)
+	}
+	// F above 31 makes C allocate gigabytes: on a machine without the
+	// memory, C's malloc fails (a plain error, not a crash) where Go refuses
+	// the parameters up front. Both are errors; the codes may differ.
+	if _, _, cerr := creftest.TrainCRef(t, mode, samples, maxDict, args...); cerr != nil &&
+		(cerr.Code == -2 || (p.F >= 32 && cerr.Code == cErrMemoryAllocation)) {
+		err := goTrain()
 		if cerr.Code != -2 {
 			if err == nil {
 				t.Fatalf("C fails (%s), Go returned no error", cerr.Name)

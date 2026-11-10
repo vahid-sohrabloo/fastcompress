@@ -345,7 +345,11 @@ func TestBuildFSETableAsmEquiv(t *testing.T) {
 		t.Fatalf("%d corpus tables", len(corpus))
 	}
 	lowProb := 0
-	for i, c := range corpus {
+	// Each check maps ten guarded buffers, released when its test ends: run
+	// them in chunks of subtests, so a runner with the default
+	// vm.max_map_count (65530) does not run out of mappings.
+	chunked(t, len(corpus), func(t *testing.T, i int) {
+		c := corpus[i]
 		checkFSETableAsm(t, fmt.Sprint("corpus ", i), c)
 		if !validFSENorm(c.norm, c.tableLog) {
 			t.Fatalf("corpus %d: invalid norm %v", i, c.norm)
@@ -356,7 +360,7 @@ func TestBuildFSETableAsmEquiv(t *testing.T) {
 				break
 			}
 		}
-	}
+	})
 	t.Logf("%d corpus tables, %d with low-probability symbols", len(corpus), lowProb)
 	if lowProb == 0 || lowProb == len(corpus) {
 		t.Fatal("the corpus tables do not take both spread paths")
@@ -383,8 +387,22 @@ func TestBuildFSETableAsmEquiv(t *testing.T) {
 	if testing.Short() {
 		n = 2000
 	}
-	for i, c := range fseRandomCases(rand.New(rand.NewPCG(20, 3)), n) {
-		checkFSETableAsm(t, fmt.Sprint("random ", i), c)
+	random := fseRandomCases(rand.New(rand.NewPCG(20, 3)), n)
+	chunked(t, len(random), func(t *testing.T, i int) {
+		checkFSETableAsm(t, fmt.Sprint("random ", i), random[i])
+	})
+}
+
+// chunked calls f for i in [0, n) inside subtests of 100 calls each, so the
+// guard-page mappings of each chunk are released when its subtest ends.
+func chunked(t *testing.T, n int, f func(t *testing.T, i int)) {
+	const chunk = 100
+	for lo := 0; lo < n; lo += chunk {
+		t.Run(fmt.Sprint("cases ", lo), func(t *testing.T) {
+			for i := lo; i < min(lo+chunk, n); i++ {
+				f(t, i)
+			}
+		})
 	}
 }
 
