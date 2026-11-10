@@ -22,9 +22,8 @@ import (
 // the io.Reader in ZSTD_DStreamInSize() chunks (with an explicit
 // WithDecoderConcurrency(n > 1), through a pipeline that reads ahead and
 // decodes the blocks' entropy on two goroutines, see decoder_mt.go). Both
-// apply the options' C parameters (see DOption) and the deviations from C
-// listed in
-// docs/superpowers/phase2-api-decisions.md: in particular, a stream gives
+// apply the options' C parameters (see DOption) and the deviations from C:
+// in particular, a stream gives
 // DecodeAll's output and error for the same input, however it is cut, and
 // delivers the output decoded before an error, then the error.
 //
@@ -172,7 +171,7 @@ func configure(dc *dctx, o *decoderOptions, dicts *ddictSet, outLimit uint64, bu
 // The Decoder concurrency limits will be respected.
 //
 // C: ZSTD_decompressDCtx (ZSTD_decompressMultiFrame), with the allocation
-// rule and deviations of docs/superpowers/phase2-api-decisions.md: the
+// rule and deviations below: the
 // output is at most WithDecoderMaxMemory bytes (also cap(dst)-len(dst)
 // under WithDecodeAllCapLimit), else ErrDecoderSizeExceeded. On an error
 // the result holds dst and the output decoded before the error.

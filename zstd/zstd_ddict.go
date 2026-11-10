@@ -291,8 +291,8 @@ func (s *ddictSet) add(dd *ddict) {
 // selectFrameDDict returns the dictionary of a frame with dictionary ID
 // dictID: the one registered with that ID, or nil (no dictionary: a
 // frame with an ID then fails with dictionary_wrong).
-// C: zstd_decompress.c:ZSTD_DCtx_selectFrameDDict, with the decisions
-// record's selection rule (docs/superpowers/phase2-api-decisions.md).
+// C: zstd_decompress.c:ZSTD_DCtx_selectFrameDDict, with the selection rule
+// above.
 // Deviations from C:
 //   - C keeps the current DDict when the ID is not found, so a frame
 //     without an ID decodes with the last dictionary used; Go uses none.

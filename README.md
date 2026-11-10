@@ -11,10 +11,10 @@ Status: work in progress.
   `EOption`s.
 - **Phase 2, the decoder, is done:** `NewReader`, `Decoder` (`DecodeAll`,
   the streaming reader), the dictionary and trainer functions, and the zip and
-  snappy helpers. Every identifier of `klauspost/compress/zstd` is exported
-  (`scripts/apicheck.sh` passes in full mode). Decode speed is 101.1% of C
+  snappy helpers. Every identifier of `klauspost/compress/zstd` is exported.
+  Decode speed is 101.1% of C
   libzstd v1.5.7 overall; two rows are under 95% (nci level 1 at 94.5%,
-  silesia 16 KiB level 1 at 93.9%). See `bench/results/2026-11-05-phase2-final.md`.
+  silesia 16 KiB level 1 at 93.9%).
 
 ## Encoder output
 
@@ -32,9 +32,7 @@ ported from C's `zstd_decompress*.c` and `huf_decompress.c`. Output and
 error class are checked against C v1.5.7 by differential tests over a
 corpus of C-made frames, and fuzz targets compare the paths against each
 other (`DecodeAll`, streaming at any input cut, concurrent streaming, and
-any `dst` capacity). C errors map to the klauspost sentinels; the table
-and the deliberate deviations from C are in
-[docs/superpowers/phase2-api-decisions.md](docs/superpowers/phase2-api-decisions.md).
+any `dst` capacity). C errors map to the klauspost sentinels.
 
 ### Safety
 
@@ -157,8 +155,7 @@ percentage of libdeflate's:
 
 - **Decompression** (`silesia.tar` in 1 MiB, 128 KiB and 16 KiB blocks):
   100.2% to 100.6% at levels 1, 6, 9 and 12, lowest row 96.9%, in two
-  runs alternated with a pre-change build
-  ([bench/results/2026-11-09-deflate-decode-round2-recheck.md](bench/results/2026-11-09-deflate-decode-round2-recheck.md)).
+  runs alternated with a pre-change build.
   The margin over libdeflate is 0.2-0.6 points and depends on code
   layout: most of the last 2% came from aligning the fast loop, tuned on
   this one CPU (an earlier, 32-byte aligned version lost about half of
@@ -166,8 +163,7 @@ percentage of libdeflate's:
   not). Expect parity, not a lead, on other CPUs.
 - **Compression** (the 12 Silesia files whole plus `silesia.tar` in 1 MiB
   blocks, 13 rows per level), at or above libdeflate at every measured
-  level
-  ([bench/results/2026-11-10-deflate-compress-round7.md](bench/results/2026-11-10-deflate-compress-round7.md)):
+  level:
 
   | level | geomean | lowest row |
   |---|---|---|
@@ -215,8 +211,7 @@ On an i9-13900H (one core, checksums off), compression speed against C
 `zstd -b` v1.5.7 over the Silesia corpus, as a geometric mean of the
 percentage of C's speed: 101.1% at level 1, 101.3% at level 3, 102.1% at
 level 7 and 101.2% at level 11 (101.4% overall; lowest row 97.9%). The
-compressed sizes are identical in every row. Full tables:
-[bench/results/2026-11-02-phase1-final.md](bench/results/2026-11-02-phase1-final.md).
+compressed sizes are identical in every row.
 
 ## Credits
 

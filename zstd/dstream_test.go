@@ -358,8 +358,7 @@ func TestDecompressStreamBlockRoomCref(t *testing.T) {
 }
 
 // TestDecompressStreamDecodeAll pins the deliberate deviations from
-// streaming C (docs/superpowers/phase2-api-decisions.md, "Streaming
-// decoding"), with the frames that showed C's result depends on how the
+// streaming C, with the frames that showed C's result depends on how the
 // input is cut (cref dstream accepts some at 1-byte chunks and rejects
 // them at 1000, where its single-pass shortcut runs one-shot C): at every
 // chunking and output size, the stream gives DecodeAll's output and error.
@@ -642,8 +641,7 @@ func TestDecompressContinueCref(t *testing.T) {
 // and the Go error (streamClass). Both accept or both end incomplete with
 // the same output; or both fail with the same C error code, or Go fails
 // where C does not or with another code as one of the deliberate
-// deviations from streaming C says (docs/superpowers/phase2-api-decisions.md,
-// "Streaming decoding"), named by Go's error:
+// deviations from streaming C says, named by Go's error:
 //
 //   - window-limit, block-over-max: C's single-pass shortcut runs one-shot
 //     C, which checks neither; Go's runs DecodeAll's frame decoding.

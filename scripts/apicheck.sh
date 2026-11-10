@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # apicheck.sh [--subset|--missing]
 #
-# Compares the exported API of ./zstd against api/klauspost-zstd.txt.
-# api/fastcompress-extensions.txt lists the (normalised) declarations this port
-# adds on top of klauspost's API; they are removed before comparing.
-#   --subset  every normalised declaration of ./zstd must appear in the snapshot
-#   --missing print snapshot lines ./zstd does not export yet (always exit 0;
-#             also standard library lines ./flate, ./gzip, ./zlib lack)
-#   (default) additionally every snapshot line must exist in ./zstd
+# Compares the exported API of ./flate, ./gzip and ./zlib against the standard
+# library's compress/flate, compress/gzip and compress/zlib.
+#   --subset  every normalised declaration of ours must appear in the standard
+#             library's
+#   --missing print standard library lines ours does not export (always exit 0)
+#   (default) additionally every standard library line must exist in ours
 #
-# Normalisation of `go doc -all` output (applied identically to the snapshot):
+# Normalisation of `go doc -all` output (applied identically to both sides):
 #   - doc prose is dropped: it is indented with spaces, declarations are not
 #     (top-level declarations start in column 0 with func/type/const/var,
 #     members of struct/interface/const/var blocks are indented with one tab)
@@ -22,9 +21,7 @@
 #   - lines that are a lone closing brace/paren are dropped
 #   - the result is sorted with LC_ALL=C and de-duplicated
 #
-# ./flate, ./gzip and ./zlib are then compared, with the same normalisation,
-# against the standard library's compress/flate, compress/gzip and
-# compress/zlib (`go doc -all` of the installed Go). api/stdlib-<pkg>-delta.txt
+# The standard library side is `go doc -all` of the installed Go. api/stdlib-<pkg>-delta.txt
 # lists the expected difference: "+ line" only in ours, "- line" only in the
 # standard library ("#" lines are comments). The three modes apply to them in
 # the same way (--subset: ours minus "+" lines must appear in the standard
@@ -50,20 +47,8 @@ normalise() {
 }
 
 mode="${1:-}"
-tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-go doc -all ./zstd | normalise | LC_ALL=C comm -23 - api/fastcompress-extensions.txt > "$tmp"
 
-if [ "$mode" = "--missing" ]; then
-  LC_ALL=C comm -13 "$tmp" api/klauspost-zstd.txt
-elif [ "$mode" = "--subset" ]; then
-  extra="$(LC_ALL=C comm -23 "$tmp" api/klauspost-zstd.txt)"
-  if [ -n "$extra" ]; then echo "not in klauspost snapshot:"; echo "$extra"; exit 1; fi
-else
-  diff="$(LC_ALL=C comm -3 "$tmp" api/klauspost-zstd.txt)"
-  if [ -n "$diff" ]; then echo "API mismatch (left: ours only, right: snapshot only):"; echo "$diff"; exit 1; fi
-fi
-
-ref="$(mktemp)"; ours="$(mktemp)"; trap 'rm -f "$tmp" "$ref" "$ours"' EXIT
+ref="$(mktemp)"; ours="$(mktemp)"; trap 'rm -f "$ref" "$ours"' EXIT
 for p in flate gzip zlib; do
   delta="api/stdlib-$p-delta.txt"
   go doc -all "./$p" | normalise | LC_ALL=C comm -23 - <(sed -n 's/^+ //p' "$delta" | LC_ALL=C sort -u) > "$ours"

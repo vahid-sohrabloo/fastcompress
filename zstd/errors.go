@@ -76,7 +76,7 @@ var (
 
 // dErr is a decoder error: a C ZSTD_ErrorCode (the same value), or a
 // refinement of one (values from 128) where the error-mapping table
-// (docs/superpowers/phase2-api-decisions.md) gives one C code different
+// (see the Decoder section of the README) gives one C code different
 // sentinels depending on where C raises it. 0 is no error.
 type dErr uint8
 

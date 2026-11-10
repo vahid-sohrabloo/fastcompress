@@ -780,7 +780,7 @@ func FuzzDecodeDict(f *testing.F) {
 			t.Fatalf("C fails (%v), Go decodes %d bytes", ce, len(got))
 		case ce == nil:
 			// Go fails where C decodes: only the deviations of the error
-			// mapping table (docs/superpowers/phase2-api-decisions.md).
+			// mapping table.
 			switch ge {
 			case dErrFrameParameterWindowTooLarge: // window > 1<<29: one-shot C does not check it
 			case dErrDecodedBlockTooLarge: // a block regenerating > blockSizeMax: one-shot C accepts it

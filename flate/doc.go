@@ -126,7 +126,7 @@
 // fuzz target comparing the two).
 //
 // On the one amd64 CPU measured (an i9-13900H, Silesia corpus; see the
-// repository README and bench/results), decompression is about as fast as
+// repository README), decompression is about as fast as
 // libdeflate's (geometric mean 100.2-100.6% at levels 1, 6, 9 and 12, a
 // margin that depends on code layout), and compression is as fast or
 // faster: geometric means of 103.6% (level 1), 101.6% (level 3), 102.1%

@@ -359,8 +359,7 @@ func (d *dctx) decompressBegin() {
 	d.hufPtr = &d.entropy.hufTable
 }
 
-// Decoder parameter defaults (no C counterparts: the klauspost doc text
-// decides them, see docs/superpowers/phase2-api-decisions.md).
+// Decoder parameter defaults (no C counterparts).
 const (
 	// defaultMaxWindowSize is WithDecoderMaxWindow's default. C's
 	// counterpart is ZSTD_MAXWINDOWSIZE_DEFAULT ((1<<27)+1); the doc text
@@ -734,7 +733,7 @@ func (d *dctx) releaseBudget() {
 
 // decompressMultiFrame decodes every frame of src (skipping skippable
 // frames), appending the output to dst, which it grows as the allocation
-// rule says (docs/superpowers/phase2-api-decisions.md): each frame gets an
+// rule says: each frame gets an
 // output space of min(frame content size, blocks × blockSizeMax) bytes,
 // cut to d.maxMemory less the output so far, and memory as its blocks
 // need it. dst[:len(dst)] is never modified.
@@ -1031,7 +1030,7 @@ func (d *dctx) decompressContinue(dst []byte, dstCapacity int, src []byte, srcSi
 			// Go: C skips it as empty; one-shot decoding rejects a
 			// compressed block too small for a literals header
 			// (ZSTD_decodeLiteralsBlock). Deviation, so that the stream
-			// and DecodeAll agree (docs/superpowers/phase2-api-decisions.md).
+			// and DecodeAll agree.
 			return 0, dErrBlockTooSmall
 		}
 		if bp.lastBlock {
@@ -1358,7 +1357,7 @@ func (d *dctx) decompressStreamCode(out *outBuffer, in *inBuffer) (int, dErr) {
 	// Go: on an error, the input consumed and the output written so far
 	// are reported (C returns before updating in.pos and out.pos):
 	// deviation, so that the output before an error is the same however
-	// the input is cut, and DecodeAll's (docs/superpowers/phase2-api-decisions.md).
+	// the input is cut, and DecodeAll's.
 	fail := func(e dErr) (int, dErr) {
 		in.pos, out.pos = ip, op
 		return 0, e
@@ -1421,8 +1420,7 @@ func (d *dctx) decompressStreamCode(out *outBuffer, in *inBuffer) (int, dErr) {
 			// the documented size pair only: a block regenerating too much
 			// is ErrUnexpectedBlockSize here, where the shortcut can name
 			// it ErrFrameSizeExceeded, or fails another check here where
-			// the shortcut names it ErrUnexpectedBlockSize
-			// (phase2-api-decisions.md, "Pipelined streams").
+			// the shortcut names it ErrUnexpectedBlockSize.
 			if d.pipe == nil && d.fParams.frameContentSize != contentSizeUnknown &&
 				d.fParams.frameType != zstdSkippableFrame &&
 				uint64(oend-op) >= d.fParams.frameContentSize && ip-istart == d.lhSize {

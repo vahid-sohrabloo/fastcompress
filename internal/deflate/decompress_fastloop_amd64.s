@@ -26,8 +26,7 @@
 // is linked before it: with $32 the head moved between 0 and 32 mod 64 with
 // unrelated code, and at 32 mod 64 a third to nearly all of the alignment
 // gain was lost (median about half; dickens 96%, mozilla 88%, ooffice 80%,
-// tar/16K 42%, nci 32%; i9-13900H;
-// bench/results/2026-11-09-deflate-decode-round2-recheck.md).
+// tar/16K 42%, nci 32%; i9-13900H).
 // This is tuned on one microarchitecture and may not carry over. The two
 // copy loops entered by falling through (copySmall, copy1Loop) are reached
 // by a JMP over their padding, so the NOPs never execute (no measurable

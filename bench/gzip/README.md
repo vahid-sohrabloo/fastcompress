@@ -71,8 +71,7 @@ script changes there). Needs bash >= 4.4 (checked at start). Defaults: `-mode bo
 - **TMPDIR**: `-mode d` with `ours` dumps one row's libdeflate streams to `$TMP/z.bin` (mktemp under `$TMPDIR`, default /tmp):
   about the size of the largest input, ~212 MB for `silesia.tar` (16K blocks = ~13k blocks, plus 8 bytes per block). compare.sh
   checks the free space before starting and refuses with a clear message; set `TMPDIR` to a bigger filesystem if needed.
-- **Result naming**: the default file is `bench/results/<date>-gzip-<label>.md`. For the Phase-1 decode baseline use
-  `-o bench/results/$(date +%F)-deflate-decode-go.md` (compare.sh overwrites `-o`; keep hand-written profile notes in a
+- **Result naming**: the default file is `bench/results/<date>-gzip-<label>.md`. Use `-o PATH` for another name (compare.sh overwrites `-o`; keep hand-written profile notes in a
   separate file).
 - **`-dry-run`**: runs no benchmark; prints the first commands (`DRY: ...`) and writes the header and table skeleton with
   placeholder numbers, the gate summary structure (banner, NOT EVALUATED blocks, `OVERALL: DRY RUN, no verdict`) but no verdicts, preflight refusals reported as notices. Used by the compare.sh test.
@@ -139,15 +138,11 @@ so both sides decode the same input. For the `-noasm` row, build with `compare.s
 ## Current results (i9-13900H, asm on)
 
 - Decompression: geomean 100.2-100.6% of libdeflate at levels 1, 6, 9 and 12, lowest row 96.9%; gate passed by a
-  0.2-0.6 point margin that depends on the fast loop's code alignment (tuned on this CPU):
-  `bench/results/2026-11-09-deflate-decode-round2-recheck.md`.
+  0.2-0.6 point margin that depends on the fast loop's code alignment (tuned on this CPU).
 - Compression (round 7): geomean 103.6% (L1), 101.6% (L3), 102.1% (L6), 102.8% (L9), about 110% (L12; round 7 measured 119.8%, the independent confirmation run 109.3-109.8%); the gate
   (geomean >= 100%, every row >= 95%, none below 90%) passes at every level. Lowest rows: L1 99.6% (x-ray, the only
   row below 100%), L3 100.1% (mozilla), L6 101.4% (samba), L9 101.2% (xml), L12 100.0-106.5% (nci). The slow L12 rows
-  carry about +-2-3 points of rounding. Compressed sizes match libdeflate in all 65 rows:
-  `bench/results/2026-11-10-deflate-compress-round7.md`, confirmed at HEAD in
-  `bench/results/2026-11-10-deflate-confirm-head.md` (L1-L9 and decode reproduce within 0.3 points; L12 does not). Older rounds, kept as history (all failed the gate):
-  `bench/results/2026-11-08-deflate-compress-round5.md` (geomean 94.7-99.1%, L12 lowest row 81.8%) and the
-  other `bench/results/*deflate-compress*` files.
+  carry about +-2-3 points of rounding. Compressed sizes match libdeflate in all 65 rows. A confirmation run at HEAD
+  reproduced L1-L9 and decode within 0.3 points; L12 did not.
 - Results come from one CPU; expect other CPUs to differ.
 - `-noasm` (pure Go) is reported only, not gated; arm64 has not been benchmarked.

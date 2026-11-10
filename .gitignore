@@ -10,3 +10,6 @@ ref/ldref/ldref
 ref/ldref/ldbench
 bench/gzip/gzbench
 bench/gzip/gzip
+
+# benchmark outputs (compare.sh writes here); the results are not kept in the repository
+bench/results/

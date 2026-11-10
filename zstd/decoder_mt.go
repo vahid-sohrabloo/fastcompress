@@ -13,8 +13,7 @@ import (
 
 // The multi-threaded stream (WithDecoderConcurrency(n), n > 1): a pipeline
 // of three stages, started by the first Read or WriteTo after a Reset (no
-// C counterpart; C's decoder is single-threaded, see
-// docs/superpowers/phase2-api-decisions.md, "Pipelined streams").
+// C counterpart; C's decoder is single-threaded).
 //
 //   - S1, the framer (a goroutine): reads the io.Reader as the n == 1
 //     stream does (readInput) and cuts the input into units with C's

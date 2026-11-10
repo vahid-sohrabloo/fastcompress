@@ -855,7 +855,7 @@ func (r bytesLen) Len() int                 { return len(r.b) }
 func (r bytesLen) Read([]byte) (int, error) { return 0, errors.New("Read called") }
 
 // TestDecoderOptions checks each option's documented semantics
-// (docs/superpowers/phase2-api-decisions.md, "Doc-comment facts").
+// (the DOption doc comments).
 func TestDecoderOptions(t *testing.T) {
 	text := malText(300000)
 	frame := malEncode(t, text, true)
@@ -1199,7 +1199,7 @@ func malCaseNamed(t *testing.T, name string) []byte {
 }
 
 // TestErrorsIs pins every row of the error mapping table
-// (docs/superpowers/phase2-api-decisions.md) through the public API: each
+// through the public API: each
 // sentinel alone matches, on every path that can give it (DecodeAll, Read
 // and WriteTo; the memory limit is DecodeAll's only). The Snappy rows come
 // with SnappyConverter.
@@ -1337,8 +1337,8 @@ func resticBlob(t *testing.T, n int) []byte {
 	return b[:n]
 }
 
-// TestResticDecoderOptions uses restic 0.19.1's decoders
-// (bench/results/restic-check.md): getZstdDecoder's
+// TestResticDecoderOptions uses restic 0.19.1's decoders:
+// getZstdDecoder's
 // NewReader(nil, WithDecoderConcurrency(0), WithDecoderMaxMemory(16 GiB))
 // and the checker's NewReader(nil), with DecodeAll into nil and into a
 // reused buffer, over 1 MiB and 4 MiB blobs from restic's encoder options
