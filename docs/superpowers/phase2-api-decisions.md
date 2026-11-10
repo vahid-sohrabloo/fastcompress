@@ -11,7 +11,7 @@ Line references (`doc:N`) are lines of `api/klauspost-zstd-doc.txt`
 
 These replace the earlier "Open questions" section. Each answer below is binding.
 
-1. **`huff0.Scratch`: option A.** Add a public package `github.com/vahid-sohrabloo/fastzstd/huff0` that exports only an opaque `type Scratch struct{ /* unexported */ }`. The README documents the gap: code that reads Scratch's fields or calls klauspost huff0 functions will not compile.
+1. **`huff0.Scratch`: option A.** Add a public package `github.com/vahid-sohrabloo/fastcompress/huff0` that exports only an opaque `type Scratch struct{ /* unexported */ }`. The README documents the gap: code that reads Scratch's fields or calls klauspost huff0 functions will not compile.
 2. **klauspost doc text: committed.** Use the recommendation: commit `api/klauspost-zstd-doc.txt` in Task 1. This was not asked; it is the designer's call, open to override.
 3. **BuildDict: also port COVER/fastCover.** The user chose to port C's dictionary trainers (`cover.c`, `fastcover.c`, `zdict.c`'s `ZDICT_trainFromBuffer*`, and `divsufsort.c` for the legacy trainer only if needed) on top of `ZDICT_finalizeDictionary`. That adds an extension API beyond klauspost's surface. Task 16b defines it, and it is listed in `api/fastzstd-extensions.txt`.
 4. **Sentinel mapping: as recommended.** Approve the C-error mapping table under Decisions. This was not asked; it is the designer's call, open to override.

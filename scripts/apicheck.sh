@@ -2,7 +2,7 @@
 # apicheck.sh [--subset|--missing]
 #
 # Compares the exported API of ./zstd against api/klauspost-zstd.txt.
-# api/fastzstd-extensions.txt lists the (normalised) declarations this port
+# api/fastcompress-extensions.txt lists the (normalised) declarations this port
 # adds on top of klauspost's API; they are removed before comparing.
 #   --subset  every normalised declaration of ./zstd must appear in the snapshot
 #   --missing print snapshot lines ./zstd does not export yet (always exit 0;
@@ -51,7 +51,7 @@ normalise() {
 
 mode="${1:-}"
 tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-go doc -all ./zstd | normalise | LC_ALL=C comm -23 - api/fastzstd-extensions.txt > "$tmp"
+go doc -all ./zstd | normalise | LC_ALL=C comm -23 - api/fastcompress-extensions.txt > "$tmp"
 
 if [ "$mode" = "--missing" ]; then
   LC_ALL=C comm -13 "$tmp" api/klauspost-zstd.txt

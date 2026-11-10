@@ -4,7 +4,7 @@ import (
 	stdflate "compress/flate"
 	"reflect"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/flate"
+	pkg "github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // Package-specific parts of the shared API parity tests in apiparity_test.go.
@@ -13,7 +13,7 @@ import (
 const stdPath = "compress/flate"
 
 // ourPath is the import path of this package.
-const ourPath = "github.com/vahid-sohrabloo/fastzstd/flate"
+const ourPath = "github.com/vahid-sohrabloo/fastcompress/flate"
 
 // apiExtras lists every exported identifier ("Name") and member ("Type.Name")
 // of this package that the standard library's flate does not have, with the

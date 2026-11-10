@@ -9,7 +9,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // fbTok is one token of a block: length 0 is a literal (the next data

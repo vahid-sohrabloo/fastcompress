@@ -7,7 +7,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/vahid-sohrabloo/fastzstd/gzip"
+	"github.com/vahid-sohrabloo/fastcompress/gzip"
 )
 
 // Compress at levels 1 and 6 and decompress into a buffer of the known size.

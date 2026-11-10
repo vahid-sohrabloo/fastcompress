@@ -4,7 +4,7 @@ import (
 	stdgzip "compress/gzip"
 	"io"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/gzip"
+	pkg "github.com/vahid-sohrabloo/fastcompress/gzip"
 )
 
 // Format-specific parts of the shared Reader tests in reader_test.go (the

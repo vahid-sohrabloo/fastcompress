@@ -8,7 +8,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // Stream data through a Writer, flushing after the first message so a

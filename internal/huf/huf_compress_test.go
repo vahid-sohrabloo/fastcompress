@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 const maxInput = 128 << 10

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // streamCase is one streaming run: the same chunks and flushes go to the

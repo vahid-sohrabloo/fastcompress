@@ -176,7 +176,7 @@ Geometric mean of % of C over 64 rows: **101.1%**
 
 ## Verification evidence (Task 22, tree c3f5431)
 
-**Update 2026-11-06:** the `-tags long` build break and the 3 fuzz failures below are fixed (commits 25c3f7c, 1bc5114, 2e0d5fd, 8cabd7e). At 8cabd7e, with the same caps: `go test ./zstd ./internal/...` pass (also with `FASTZSTD_FUZZ_ASM=off`), `-race -short ./zstd` pass, `-tags long ./zstd` pass, `scripts/decodercheck.sh` ok, and 10 min fuzz of FuzzDecompressBlock, FuzzDecompressDCtx and FuzzDecoderReadConcurrent all pass. Details: `.superpowers/sdd/2026-11-02-fastzstd-phase2-decoder/task-22-fix-report.md`. The root causes there differ from the guesses in the failure notes below: the DCtx failure was not state leaking across calls (it was `DecodeAll` block errors depending on dst capacity), and FuzzDecompressBlock was a test bug. The text below is the original c3f5431 record.
+**Update 2026-11-06:** the `-tags long` build break and the 3 fuzz failures below are fixed (commits 25c3f7c, 1bc5114, 2e0d5fd, 8cabd7e). At 8cabd7e, with the same caps: `go test ./zstd ./internal/...` pass (also with `FASTCOMPRESS_FUZZ_ASM=off`), `-race -short ./zstd` pass, `-tags long ./zstd` pass, `scripts/decodercheck.sh` ok, and 10 min fuzz of FuzzDecompressBlock, FuzzDecompressDCtx and FuzzDecoderReadConcurrent all pass. Details: `.superpowers/sdd/2026-11-02-fastzstd-phase2-decoder/task-22-fix-report.md`. The root causes there differ from the guesses in the failure notes below: the DCtx failure was not state leaking across calls (it was `DecodeAll` block errors depending on dst capacity), and FuzzDecompressBlock was a test bug. The text below is the original c3f5431 record.
 
 Every go command ran capped, with `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0 env GOMEMLIMIT=2GiB go test -p 1 -count=1`, one process at a time, from 2026-11-05 23:59 to 2026-11-06 05:34. load1 was 3.2 to 7.2.
 
@@ -196,20 +196,20 @@ Every go command ran capped, with `systemd-run --user --scope -p MemoryMax=4G -p
 ### `-tags long` build failure
 
 ```
-# github.com/vahid-sohrabloo/fastzstd/zstd [github.com/vahid-sohrabloo/fastzstd/zstd.test]
+# github.com/vahid-sohrabloo/fastcompress/zstd [github.com/vahid-sohrabloo/fastcompress/zstd.test]
 zstd/stream_long_test.go:77:32: cannot use &nOut (value of type *int64) as int64 value in struct literal
 zstd/stream_long_test.go:109:6: countWriter redeclared in this block
 	zstd/snappy_test.go:16:6: other declaration of countWriter
 zstd/stream_long_test.go:114:23: method countWriter.Write already declared at zstd/snappy_test.go:21:23
 zstd/stream_long_test.go:115:3: invalid operation: cannot indirect c.n (variable of type int64)
-FAIL	github.com/vahid-sohrabloo/fastzstd/zstd [build failed]
+FAIL	github.com/vahid-sohrabloo/fastcompress/zstd [build failed]
 ```
 
 `zstd/snappy_test.go` declares a `countWriter` with an `int64` field (first added in 818339f or 9fae87f, 2026-11-03). `stream_long_test.go` (`//go:build long`) declares its own `countWriter` with a `*int64` field. The two clash only under `-tags long`, so the long tests (`stream_long_test.go`, `zstd_decompress_block_long_test.go`) did not run. This is a test-only break. Nothing was changed here.
 
 ### Fuzz failures
 
-Each target ran 10 minutes with `-parallel 2 -fuzzminimizetime 2s`, `FASTZSTD_FUZZ_ASM=on`, `FASTZSTD_FUZZ_CAP=1`. 21 targets passed. The three below failed, and each failing input reproduces with `FASTZSTD_FUZZ_ASM=on` **and** `off`, so the asm is not the cause. The inputs are left untracked under `zstd/testdata/fuzz/` for the fix.
+Each target ran 10 minutes with `-parallel 2 -fuzzminimizetime 2s`, `FASTCOMPRESS_FUZZ_ASM=on`, `FASTCOMPRESS_FUZZ_CAP=1`. 21 targets passed. The three below failed, and each failing input reproduces with `FASTCOMPRESS_FUZZ_ASM=on` **and** `off`, so the asm is not the cause. The inputs are left untracked under `zstd/testdata/fuzz/` for the fix.
 
 ```
 --- FAIL: FuzzDecoderReadConcurrent (90.79s)
@@ -238,8 +238,8 @@ Passing targets: fse FuzzReadNCount; huf FuzzHUFAsmEquiv, FuzzHUFDecompress4X1, 
 ### Coverage gate output
 
 ```
-ok  	github.com/vahid-sohrabloo/fastzstd/zstd	848.731s	coverage: 96.7% of statements
-ok  	github.com/vahid-sohrabloo/fastzstd/internal/huf	2.611s	coverage: 90.1% of statements
+ok  	github.com/vahid-sohrabloo/fastcompress/zstd	848.731s	coverage: 96.7% of statements
+ok  	github.com/vahid-sohrabloo/fastcompress/internal/huf	2.611s	coverage: 90.1% of statements
 zstd/zstd_decompress_internal.go     100.00% (1/1)
 zstd/zstd_decompress.go               96.96% (797/822)
 internal/huf/huf_decompress.go        96.31% (784/814)

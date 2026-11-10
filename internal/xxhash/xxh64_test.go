@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 var seeds = []uint64{0, 1, 0x9E3779B185EBCA87}

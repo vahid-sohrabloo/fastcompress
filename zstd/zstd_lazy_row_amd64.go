@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useRowAsm selects the assembly versions of the row match finder's inner
 // loops (SSE2 and PREFETCHT0, which every amd64 CPU has).

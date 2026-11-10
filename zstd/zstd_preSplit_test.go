@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // TestSplitBlockCref compares splitBlock with C's ZSTD_splitBlock (cref

@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/vahid-sohrabloo/fastzstd/gzip"
+	"github.com/vahid-sohrabloo/fastcompress/gzip"
 )
 
 // Read a gzip member and its header fields.

@@ -7,7 +7,7 @@ package deflate
 import (
 	"encoding/binary"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/adler32"
+	"github.com/vahid-sohrabloo/fastcompress/internal/adler32"
 )
 
 // zlibDecompress decodes the zlib stream at the start of in into out. With

@@ -8,7 +8,7 @@ import (
 	"errors"
 	"math/bits"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
 )
 
 // ErrCorruptionDetected. C: ERROR(corruption_detected)

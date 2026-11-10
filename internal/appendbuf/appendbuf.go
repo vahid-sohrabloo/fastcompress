@@ -7,7 +7,7 @@ import (
 	"math"
 	"slices"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 // DefaultMaxOutput is the output limit of a zero Limit (1 GiB). It must

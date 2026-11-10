@@ -8,7 +8,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 var errLimit = errors.New("test: output limit")

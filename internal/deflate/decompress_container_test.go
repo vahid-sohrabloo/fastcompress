@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/adler32"
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/adler32"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // Differential tests of DecompressGzip{,Ex} and DecompressZlib{,Ex} against

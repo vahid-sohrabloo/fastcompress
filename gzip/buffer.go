@@ -3,9 +3,9 @@ package gzip
 import (
 	"fmt"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
-	"github.com/vahid-sohrabloo/fastzstd/internal/appendbuf"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/appendbuf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 // Compression levels, the same as package flate's (and the standard

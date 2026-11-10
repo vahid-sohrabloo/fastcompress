@@ -38,8 +38,8 @@ func ldBatchInput(levels []int, data []byte) []byte {
 func TestLDCacheMatchesFresh(t *testing.T) {
 	bin := LDBin(t)
 	dir := t.TempDir()
-	t.Setenv("FASTZSTD_LDREF_CACHE", "on")
-	t.Setenv("FASTZSTD_LDREF_CACHE_DIR", dir)
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE", "on")
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE_DIR", dir)
 	calls := 0
 	check := func(name string, in []byte, args ...string) {
 		t.Helper()
@@ -75,8 +75,8 @@ func TestLDCacheMatchesFresh(t *testing.T) {
 func TestLDCacheCorruptEntry(t *testing.T) {
 	bin := LDBin(t)
 	dir := t.TempDir()
-	t.Setenv("FASTZSTD_LDREF_CACHE", "on")
-	t.Setenv("FASTZSTD_LDREF_CACHE_DIR", dir)
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE", "on")
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE_DIR", dir)
 	in := ldInputs()["rep300k"]
 	args := []string{"compress", "-l", "9", "-format", LDRaw}
 	fresh := run(t, bin, in, args...)
@@ -118,7 +118,7 @@ func TestLDCacheCorruptEntry(t *testing.T) {
 func TestLDCacheVerify(t *testing.T) {
 	bin := LDBin(t)
 	dir := t.TempDir()
-	t.Setenv("FASTZSTD_LDREF_CACHE_DIR", dir)
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE_DIR", dir)
 	in := []byte("verify verify verify verify")
 	args := []string{"compress", "-l", "6", "-format", LDRaw}
 	hash, err := ldBinHash(bin)
@@ -131,7 +131,7 @@ func TestLDCacheVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	ft := &fatalRecorder{TB: t}
-	t.Setenv("FASTZSTD_LDREF_CACHE", "verify")
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE", "verify")
 	func() {
 		defer func() { _ = recover() }()
 		ldRunCached(ft, bin, in, args...)
@@ -140,7 +140,7 @@ func TestLDCacheVerify(t *testing.T) {
 		t.Fatal("verify mode accepted an entry that differs from ldref")
 	}
 	if !ldSpotCheck(key) { // a spot-checked key would fail here as in verify mode
-		t.Setenv("FASTZSTD_LDREF_CACHE", "on")
+		t.Setenv("FASTCOMPRESS_LDREF_CACHE", "on")
 		if got := LDRun(t, in, args...); string(got) != "wrong" {
 			t.Fatalf("on mode did not use the (planted) entry: %q", got)
 		}
@@ -160,38 +160,38 @@ func (f *fatalRecorder) Fatalf(format string, args ...any) {
 	panic(f)
 }
 
-// FASTZSTD_LDREF_CACHE=off (and CI without an explicit setting) writes
+// FASTCOMPRESS_LDREF_CACHE=off (and CI without an explicit setting) writes
 // nothing; a directory inside the repository is refused; any other value is
 // an error.
 func TestLDCacheModes(t *testing.T) {
 	LDBin(t)
 	dir := t.TempDir()
-	t.Setenv("FASTZSTD_LDREF_CACHE_DIR", dir)
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE_DIR", dir)
 	in := []byte("mode mode mode")
 	for _, c := range []struct{ cache, ci, want string }{
 		{"off", "", "off"}, {"0", "", "off"}, {"", "true", "off"}, {"on", "true", "on"}, {"", "", "on"},
 		{"verify", "", "verify"}, {"bogus", "", "invalid"},
 	} {
-		t.Setenv("FASTZSTD_LDREF_CACHE", c.cache)
+		t.Setenv("FASTCOMPRESS_LDREF_CACHE", c.cache)
 		t.Setenv("CI", c.ci)
 		if got := ldCacheMode(); got != c.want {
-			t.Fatalf("FASTZSTD_LDREF_CACHE=%q CI=%q: mode %s, want %s", c.cache, c.ci, got, c.want)
+			t.Fatalf("FASTCOMPRESS_LDREF_CACHE=%q CI=%q: mode %s, want %s", c.cache, c.ci, got, c.want)
 		}
 	}
 	t.Setenv("CI", "")
-	t.Setenv("FASTZSTD_LDREF_CACHE", "off")
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE", "off")
 	LDRun(t, in, "compress", "-l", "1")
 	if n := len(ldCacheEntries(t, dir)); n != 0 {
 		t.Fatalf("off: %d entries", n)
 	}
-	t.Setenv("FASTZSTD_LDREF_CACHE", "on")
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE", "on")
 	for _, d := range []string{root(), filepath.Join(root(), "ref", "cache")} {
-		t.Setenv("FASTZSTD_LDREF_CACHE_DIR", d)
+		t.Setenv("FASTCOMPRESS_LDREF_CACHE_DIR", d)
 		if got, why := ldCacheDir(); got != "" || why == "" {
 			t.Fatalf("cache dir %s inside the repository accepted (%q)", d, got)
 		}
 	}
-	t.Setenv("FASTZSTD_LDREF_CACHE_DIR", filepath.Join(filepath.Dir(root()), filepath.Base(root())+"-cache"))
+	t.Setenv("FASTCOMPRESS_LDREF_CACHE_DIR", filepath.Join(filepath.Dir(root()), filepath.Base(root())+"-cache"))
 	if got, why := ldCacheDir(); got == "" {
 		t.Fatalf("sibling directory refused: %s", why)
 	}

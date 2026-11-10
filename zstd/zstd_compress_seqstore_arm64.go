@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useSeqCodesAsm selects the assembly seqToCodes loop (arm64).
 var useSeqCodesAsm bool

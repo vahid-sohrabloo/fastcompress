@@ -2,7 +2,7 @@
 
 package hist
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useHistAsm selects the assembly counting loop (baseline arm64).
 var useHistAsm bool

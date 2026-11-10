@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/appendbuf"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/appendbuf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 // Compression levels. NoCompression, BestSpeed, BestCompression and

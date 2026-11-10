@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // compress2Case is one ZSTD_compress2 parameter set.

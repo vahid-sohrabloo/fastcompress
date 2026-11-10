@@ -1,5 +1,5 @@
 /*
- * ldref - C reference driver for fastzstd's DEFLATE work. Built straight from
+ * ldref - C reference driver for fastcompress's DEFLATE work. Built straight from
  * ref/libdeflate/lib (libdeflate v1.26) as ONE translation unit (see the
  * Makefile). Reads stdin, writes stdout. Exit status 0 on success, nonzero
  * (with a message on stderr) on any error.

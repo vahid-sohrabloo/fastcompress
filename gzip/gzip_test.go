@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/gzip"
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/gzip"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // gzip-specific behaviour (the shared tests are in api_test.go).

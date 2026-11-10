@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/flate"
+	pkg "github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // The error types have the standard library's texts and work with

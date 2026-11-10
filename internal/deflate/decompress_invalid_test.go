@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // Malformed-stream suite (task T1.3). The C programs it ports are

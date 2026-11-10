@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/bitstream"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
 )
 
 // newTestDctx returns a dctx reset for a frame whose blocks are at most

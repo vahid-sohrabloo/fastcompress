@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 func TestZipMethods(t *testing.T) {

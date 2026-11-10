@@ -1,6 +1,6 @@
 # gzip / DEFLATE benchmarks against libdeflate v1.26
 
-This directory is a **nested Go module** (`github.com/vahid-sohrabloo/fastzstd/bench/gzip`) so the black-box
+This directory is a **nested Go module** (`github.com/vahid-sohrabloo/fastcompress/bench/gzip`) so the black-box
 references (`compress/flate`, `github.com/klauspost/compress`) never enter the root module's `go.mod`. Run its
 tests with `cd bench/gzip && go test ./...`.
 
@@ -117,8 +117,8 @@ stream once into the caller buffer through a `Write`. `ours` is called directly 
 `NewCompressor(level, "gzip")` = `gzip.NewCompressor` (levels 0..12; others `ErrUnsupportedLevel`, exit 4);
 `NewDecompressor("raw")` = `internal/deflate.Decompressor`, `NewDecompressor("gzip")` = `gzip.NewDecompressor` (both
 have the exact-length contract). Any other format returns `ErrNotPorted` (exit 3). The nested module imports
-`github.com/vahid-sohrabloo/fastzstd/...` (including `internal/deflate`) through `replace ... => ../..` and a
-`require ... v0.0.0` line (Go's `internal` rule is path-based, so the nested module's path `.../fastzstd/bench/gzip`
+`github.com/vahid-sohrabloo/fastcompress/...` (including `internal/deflate`) through `replace ... => ../..` and a
+`require ... v0.0.0` line (Go's `internal` rule is path-based, so the nested module's path `.../fastcompress/bench/gzip`
 may import it).
 
 `Adapter` (adapter.go) is whole-buffer, like libdeflate:

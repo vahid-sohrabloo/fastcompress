@@ -7,7 +7,7 @@ import (
 	"io"
 	"log"
 
-	"github.com/vahid-sohrabloo/fastzstd/zlib"
+	"github.com/vahid-sohrabloo/fastcompress/zlib"
 )
 
 // Stream a zlib stream and read it back with the standard library.

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // headerPrefixMax is how many prefix lengths of each input the frame header

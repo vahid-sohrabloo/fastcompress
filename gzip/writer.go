@@ -8,7 +8,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // HuffmanOnly is the level of a Writer that uses no matches, only Huffman

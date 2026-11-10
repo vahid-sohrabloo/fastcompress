@@ -1,6 +1,6 @@
 # Task 20b decode CPU profiles: FSE/HUF table building
 
-Top 10 functions by flat time, from `gobench -mode d -level L -block B -secs 8 -cpuprofile F FILE`, pinned with `taskset -c 2`, each under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB), then `go tool pprof -top`. The package prefix `github.com/vahid-sohrabloo/fastzstd/` is stripped. Go go1.27.1, AC power. `perf` is still unavailable (perf_event_paranoid 4, no linux-tools for 6.5.0-28).
+Top 10 functions by flat time, from `gobench -mode d -level L -block B -secs 8 -cpuprofile F FILE`, pinned with `taskset -c 2`, each under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB), then `go tool pprof -top`. The package prefix `github.com/vahid-sohrabloo/fastcompress/` is stripped. Go go1.27.1, AC power. `perf` is still unavailable (perf_event_paranoid 4, no linux-tools for 6.5.0-28).
 
 - Before: 59c35a4 (Task 20a + its N1/N2 follow-up), 2026-11-04 ~23:40, load1 2.8 to 3.4 (desktop background: Chrome, clickhouse-server). All load1 values here, before and after, are above the < 2 rule; these profiles are indicative of the call mix, not of absolute speed.
 - After: the Task 20b tree, 2026-11-05 ~02:45, load1 3.1 to 3.4 (same background).

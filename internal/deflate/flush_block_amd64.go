@@ -5,7 +5,7 @@ package deflate
 import (
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 )
 
 // useWriteSequencesAsm selects writeSequencesAsm for the sequence output of

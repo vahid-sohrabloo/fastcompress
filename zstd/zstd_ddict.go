@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"slices"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
-	"github.com/vahid-sohrabloo/fastzstd/internal/xxhash"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/xxhash"
 )
 
 // Decoder dictionaries. C: lib/decompress/zstd_ddict.c, and the dictionary

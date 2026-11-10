@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
 )
 
 // Compress-side ports of programs/test_litrunlen_overflow.c and

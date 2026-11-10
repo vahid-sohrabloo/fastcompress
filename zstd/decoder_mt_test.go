@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // The multi-threaded stream (WithDecoderConcurrency > 1, decoder_mt.go)

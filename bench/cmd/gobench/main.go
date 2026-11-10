@@ -34,7 +34,7 @@ import (
 	"runtime/pprof"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/zstd"
+	"github.com/vahid-sohrabloo/fastcompress/zstd"
 )
 
 func main() {

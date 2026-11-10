@@ -10,9 +10,9 @@ import (
 	"math/bits"
 	"slices"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/hist"
-	"github.com/vahid-sohrabloo/fastzstd/internal/xxhash"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/hist"
+	"github.com/vahid-sohrabloo/fastcompress/internal/xxhash"
 )
 
 // symbolEncodingTypeStats holds the finalized symbol encoding types and the

@@ -2,7 +2,7 @@
 
 package deflate
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useFastloopBMI2 selects the assembly fast loop of decompressDefault and
 // decompressStream, which needs BMI2 (SHRX/SHLX/BZHI). Without BMI2 the Go

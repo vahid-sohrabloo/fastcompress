@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // TestRowGetMatchMask checks the SWAR mask against a byte-by-byte one for

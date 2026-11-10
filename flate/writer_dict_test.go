@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // A preset dictionary (only its last 32 KiB) is referenced and the stream

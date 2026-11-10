@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/zlib"
+	"github.com/vahid-sohrabloo/fastcompress/zlib"
 )
 
 // The FDICT header (with the dictionary's Adler-32) is the standard

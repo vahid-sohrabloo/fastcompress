@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useSeqAsm selects the assembly loop of encodeSequences (baseline amd64);
 // useSeqBMI2 its BMI2 variant.

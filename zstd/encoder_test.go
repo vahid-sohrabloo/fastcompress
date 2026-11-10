@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 func newTestEncoder(t testing.TB, opts ...EOption) *Encoder {

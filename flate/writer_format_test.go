@@ -4,7 +4,7 @@ import (
 	stdflate "compress/flate"
 	"io"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/flate"
+	pkg "github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // Format-specific parts of the shared Writer tests in writer_test.go (the

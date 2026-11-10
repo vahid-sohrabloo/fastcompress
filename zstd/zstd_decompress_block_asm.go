@@ -5,7 +5,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/fse"
+import "github.com/vahid-sohrabloo/fastcompress/internal/fse"
 
 // seqAsmArgs is the state decodeExecSeqsAsm reads and advances
 // (zstd_decompress_block_{amd64,arm64}.s read it at fixed offsets, checked by

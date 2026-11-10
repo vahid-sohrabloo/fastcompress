@@ -11,7 +11,7 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
 )
 
 // byteOnly is an io.ByteReader without Peek or Seek (byte mode).

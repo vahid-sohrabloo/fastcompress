@@ -5,7 +5,7 @@ package deflate
 import (
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 )
 
 // useBtMatchLoopAsm selects btMatchLoopAsm for the matchfinding loop of

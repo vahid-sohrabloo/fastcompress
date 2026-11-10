@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useSeqDecAsm selects the assembly sequence fast loop, which needs BMI2
 // (SHLX, SHRX, BZHI). Without it decompressSequencesBody's Go loop runs

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // Assembly equivalence of greedyLoopAsm (levels 2..4) and lazyLoopAsm

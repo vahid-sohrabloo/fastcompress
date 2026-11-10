@@ -9,7 +9,7 @@ package fse
 import (
 	"math/bits"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
+	"github.com/vahid-sohrabloo/fastcompress/internal/bitstream"
 )
 
 // maxSymbolValue. C: fse.h:FSE_MAX_SYMBOL_VALUE

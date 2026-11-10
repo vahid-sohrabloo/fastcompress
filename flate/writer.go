@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 // HuffmanOnly is the level of a Writer that uses no matches, only Huffman

@@ -6,7 +6,7 @@ package zstd
 import (
 	"errors"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
 )
 
 // errCost stands for a C size_t error code used as a cost: it is

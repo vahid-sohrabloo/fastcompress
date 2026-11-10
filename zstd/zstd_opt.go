@@ -16,9 +16,9 @@ package zstd
 import (
 	"encoding/binary"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/hist"
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/hist"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
 )
 
 const (

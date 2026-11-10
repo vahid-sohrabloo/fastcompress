@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useDubtAsm selects the assembly binary-tree loops (baseline arm64).
 var useDubtAsm bool

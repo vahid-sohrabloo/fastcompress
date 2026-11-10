@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useRowAsm selects the assembly versions of the row match finder's inner
 // loops (NEON and PRFM, which every arm64 CPU has).

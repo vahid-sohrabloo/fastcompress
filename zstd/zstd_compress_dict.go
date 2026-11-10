@@ -10,8 +10,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
 )
 
 // dictContentType. C: zstd.h:ZSTD_dictContentType_e

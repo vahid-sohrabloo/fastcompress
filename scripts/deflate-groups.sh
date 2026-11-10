@@ -24,7 +24,7 @@
 # Tier full rules (conservative: when a file is not recognised, everything runs):
 #   * internal/deflate/*_amd64.s (assembly only): its area's partitions + equiv (compressor) or dec
 #     (decoder), asm on only. Every other internal/deflate file (Go, *_amd64.go included: it holds the
-#     dispatch and layout code) needs its partitions in both FASTZSTD_FUZZ_ASM modes, plus other, noasm
+#     dispatch and layout code) needs its partitions in both FASTCOMPRESS_FUZZ_ASM modes, plus other, noasm
 #     and, for a non-test file, the flate, gzip and zlib packages.
 #   * areas (basename prefix): compress_fastest/ht_matchfinder/compress_level1 -> rest equiv;
 #     compress_greedy/hc_matchfinder/compress_lazy -> lazy rest equiv; compress_near_optimal/
@@ -39,7 +39,7 @@
 #   * other paths (docs, bench, scripts, .superpowers, zstd, ...): nothing.
 #
 # Tier quick (tier 0, every change; default): only the internal/deflate tests of the changed files, -short,
-# asm on (plus one FASTZSTD_FUZZ_ASM=nobmi2 pass when an *_amd64.s file changed); no asm-off, noasm or
+# asm on (plus one FASTCOMPRESS_FUZZ_ASM=nobmi2 pass when an *_amd64.s file changed); no asm-off, noasm or
 # package passes for internal/deflate edits (those are tier 1's); flate/gzip/zlib -short only when their
 # own files change; everything (-short) for test infrastructure. The tests of a file are the top-level
 # Test/Fuzz functions of its _test.go files (foo.go, foo_amd64.s -> foo_test.go, foo_*_test.go; a test

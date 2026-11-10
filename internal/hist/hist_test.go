@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 func naive(src []byte) (c [256]uint32, maxSym, largest uint32) {

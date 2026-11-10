@@ -14,9 +14,9 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // runGo is decodeExecSeqsAsm in Go, the oracle of the equivalence tests:
@@ -322,7 +322,7 @@ func TestSeqAsmRegistered(t *testing.T) {
 		if err := cpu.SetAsmMode("on"); err != nil {
 			t.Fatal(err)
 		}
-		if err := cpu.SetAsmMode(os.Getenv("FASTZSTD_FUZZ_ASM")); err != nil {
+		if err := cpu.SetAsmMode(os.Getenv("FASTCOMPRESS_FUZZ_ASM")); err != nil {
 			t.Fatal(err)
 		}
 	}()
@@ -897,7 +897,7 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 // as sequencesFastSplit does (runGo, execPending until the break, an
 // error or the loop's stop), and fails t unless both end in the same
 // state with the same result. With the assembly unavailable (no BMI2,
-// FASTZSTD_FUZZ_ASM) sequencesFastSplit must do nothing. It returns the
+// FASTCOMPRESS_FUZZ_ASM) sequencesFastSplit must do nothing. It returns the
 // number of sequences sequencesFastSplit executed.
 func checkSplitGlue(t testing.TB, p, o *seqFastRun) int {
 	t.Helper()

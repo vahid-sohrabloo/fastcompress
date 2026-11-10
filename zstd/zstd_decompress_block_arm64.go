@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useSeqDecAsm selects the assembly sequence fast loop (baseline arm64
 // instructions only). C has no assembly here: the loop is

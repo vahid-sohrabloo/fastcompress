@@ -5,7 +5,7 @@ package deflate
 import (
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 )
 
 // useGreedyLoopAsm selects greedyLoopAsm for the per-position loop of

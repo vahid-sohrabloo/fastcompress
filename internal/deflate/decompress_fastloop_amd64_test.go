@@ -6,8 +6,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // fastloopFixture returns a Decompressor with the tables of the code tc

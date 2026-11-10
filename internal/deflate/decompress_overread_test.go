@@ -6,8 +6,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // Overread suite (task T1.3), porting programs/test_overread.c and the

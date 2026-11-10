@@ -1,6 +1,6 @@
 # Task 20c decode CPU profiles: sequence-table build in assembly
 
-Top 10 functions by flat time, from `gobench -mode d -level L -block B -secs 8 -cpuprofile F FILE`, pinned with `taskset -c 2`, each under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB), then `go tool pprof -top`. The package prefix `github.com/vahid-sohrabloo/fastzstd/` is stripped. AC power. `perf` is still unavailable (perf_event_paranoid 4, no linux-tools for 6.5.0-28).
+Top 10 functions by flat time, from `gobench -mode d -level L -block B -secs 8 -cpuprofile F FILE`, pinned with `taskset -c 2`, each under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB), then `go tool pprof -top`. The package prefix `github.com/vahid-sohrabloo/fastcompress/` is stripped. AC power. `perf` is still unavailable (perf_event_paranoid 4, no linux-tools for 6.5.0-28).
 
 - Before: cc7faea (HEAD, Task 20b and its review follow-ups), built from a scratch worktree. 2026-11-05 08:08 to 08:09, load1 1.77 to 1.97.
 - After: the Task 20c tree, run right after the before profiles, 2026-11-05 08:09 to 08:10, load1 2.06 to 2.69 (desktop background: Chrome, clickhouse-server).

@@ -2,7 +2,7 @@
 
 package deflate
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useMatchfinderSSE2 selects the SSE2 matchfinderInit / matchfinderRebase
 // (C: lib/x86/matchfinder_impl.h matchfinder_init_sse2 and

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // TestHUFFastArgsLayout checks the offsets huf_decompress_{amd64,arm64}.s use:
@@ -141,7 +141,7 @@ func TestHUFAsmRegistered(t *testing.T) {
 		if err := cpu.SetAsmMode("on"); err != nil {
 			t.Fatal(err)
 		}
-		if err := cpu.SetAsmMode(os.Getenv("FASTZSTD_FUZZ_ASM")); err != nil {
+		if err := cpu.SetAsmMode(os.Getenv("FASTCOMPRESS_FUZZ_ASM")); err != nil {
 			t.Fatal(err)
 		}
 	}()

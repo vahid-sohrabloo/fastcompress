@@ -2,7 +2,7 @@
 
 package huf
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useHuf4X1Asm and useHuf4X2Asm select the assembly fast loops (baseline
 // arm64 instructions only).

@@ -40,7 +40,7 @@ reference.
    does.
 5. **Byte-identical output to C libzstd** for the same input and equivalent
    parameters (level, window, checksum, pledged size, and so on).
-6. **Open source, public on GitHub**, at `github.com/vahid-sohrabloo/fastzstd`.
+6. **Open source, public on GitHub**, at `github.com/vahid-sohrabloo/fastcompress`.
 
 ## Non-goals
 
@@ -160,5 +160,5 @@ reference.
 
 ## Module path
 
-`github.com/vahid-sohrabloo/fastzstd`, with the package at
-`github.com/vahid-sohrabloo/fastzstd/zstd`.
+`github.com/vahid-sohrabloo/fastcompress`, with the package at
+`github.com/vahid-sohrabloo/fastcompress/zstd`.

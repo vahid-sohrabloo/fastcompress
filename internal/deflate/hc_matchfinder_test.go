@@ -8,7 +8,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // hcmfHash is ldref dump-hcmf's FNV-1a 64 over hash3_tab, hash4_tab and

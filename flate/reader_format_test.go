@@ -4,7 +4,7 @@ import (
 	stdflate "compress/flate"
 	"io"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/flate"
+	pkg "github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // Format-specific parts of the shared Reader tests in reader_test.go (the

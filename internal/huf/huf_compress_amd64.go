@@ -2,7 +2,7 @@
 
 package huf
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useHufAsm selects the assembly Huffman stream writer (baseline amd64);
 // useHufBMI2 its BMI2 variant.

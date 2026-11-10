@@ -710,11 +710,11 @@ func mustRead(t testing.TB, p string) []byte {
 //     --long=27 -19` (stdin: the 128 MiB window stays in the header) and
 //     `zstd --rsyncable -T2` frames.
 //
-// Only compressed frames are cached, under os.TempDir()/fastzstd-frames-<hash
+// Only compressed frames are cached, under os.TempDir()/fastcompress-frames-<hash
 // of the cref and zstd binaries>, in files named after the entry and
 // cacheKey (tool, arguments, dictionary contents, input), so changed inputs
 // or dictionaries regenerate. Creating a
-// new hash directory deletes the other fastzstd-frames-* directories. Inputs
+// new hash directory deletes the other fastcompress-frames-* directories. Inputs
 // are generated one job at a time and dropped, so memory stays bounded by
 // the parallel jobs.
 func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
@@ -933,15 +933,15 @@ func buildCorpus(t testing.TB, bin, cli string) map[string]*corpusEntry {
 }
 
 // frameCacheDir returns the frame cache directory for the cref and zstd
-// binaries bin and cli, os.TempDir()/fastzstd-frames-<hash of both>,
-// creating it (and then deleting the other fastzstd-frames-* directories)
+// binaries bin and cli, os.TempDir()/fastcompress-frames-<hash of both>,
+// creating it (and then deleting the other fastcompress-frames-* directories)
 // when it does not exist.
 func frameCacheDir(t testing.TB, bin, cli string) string {
 	t.Helper()
 	h := sha256.New()
 	h.Write(mustRead(t, bin))
 	h.Write(mustRead(t, cli))
-	const prefix = "fastzstd-frames-"
+	const prefix = "fastcompress-frames-"
 	dir := filepath.Join(os.TempDir(), prefix+hex.EncodeToString(h.Sum(nil))[:16])
 	if err := os.Mkdir(dir, 0o755); err == nil {
 		ents, _ := os.ReadDir(os.TempDir())

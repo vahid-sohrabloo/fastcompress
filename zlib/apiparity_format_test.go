@@ -4,7 +4,7 @@ import (
 	stdzlib "compress/zlib"
 	"reflect"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/zlib"
+	pkg "github.com/vahid-sohrabloo/fastcompress/zlib"
 )
 
 // Package-specific parts of the shared API parity tests in apiparity_test.go.
@@ -13,7 +13,7 @@ import (
 const stdPath = "compress/zlib"
 
 // ourPath is the import path of this package.
-const ourPath = "github.com/vahid-sohrabloo/fastzstd/zlib"
+const ourPath = "github.com/vahid-sohrabloo/fastcompress/zlib"
 
 // apiExtras lists every exported identifier ("Name") and member ("Type.Name")
 // of this package that the standard library's zlib does not have, with the

@@ -7,7 +7,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
 )
 
 // chunkLevels are the levels CompressChunk is tested at: HuffmanOnly and

@@ -9,7 +9,7 @@ import (
 	"encoding/binary"
 	"math"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/adler32"
+	"github.com/vahid-sohrabloo/fastcompress/internal/adler32"
 )
 
 // zlib format constants. C: zlib_constants.h

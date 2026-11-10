@@ -5,7 +5,7 @@ package deflate
 import (
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 )
 
 // useMinCostPathAsm selects minCostPathAsm for the backward pass of

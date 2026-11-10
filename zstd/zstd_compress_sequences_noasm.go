@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/fse"
+import "github.com/vahid-sohrabloo/fastcompress/internal/fse"
 
 func encodeSequences(dst []byte, ctML, ctOF, ctLL fse.CTable, seqs []seqDef,
 	llCodes, mlCodes, ofCodes []byte, longOffsets bool, bmi2 bool) (int, error) {

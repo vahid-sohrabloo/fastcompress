@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
 )
 
 // Stress suite (task T1.3): trailing bytes, slow-decompression streams,

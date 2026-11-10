@@ -5,7 +5,7 @@ import (
 	"math"
 	"sync/atomic"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
 )
 
 // Frame-level decoding. C: lib/decompress/zstd_decompress.c (v1.5.7),

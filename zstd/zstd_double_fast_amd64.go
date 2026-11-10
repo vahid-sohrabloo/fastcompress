@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useDoubleFastAsm selects the assembly main loop of the no-dictionary
 // double-fast match finder (baseline amd64 instructions only).

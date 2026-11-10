@@ -10,8 +10,8 @@ import (
 	"math/bits"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
-	"github.com/vahid-sohrabloo/fastzstd/internal/hist"
+	"github.com/vahid-sohrabloo/fastcompress/internal/bitstream"
+	"github.com/vahid-sohrabloo/fastcompress/internal/hist"
 )
 
 // Table-size limits. C: fse.h (FSE_MAX_MEMORY_USAGE 14, FSE_DEFAULT_MEMORY_USAGE 13).

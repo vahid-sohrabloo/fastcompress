@@ -12,8 +12,8 @@ import (
 	"errors"
 	"math/bits"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/hist"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/hist"
 )
 
 // Limits. C: huf.h

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/gzip"
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/gzip"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // headerCases are Headers to compare with the standard library's writer.

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"io"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
-	"github.com/vahid-sohrabloo/fastzstd/internal/adler32"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/adler32"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 // The errors of the standard library's zlib reader (same texts).

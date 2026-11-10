@@ -24,12 +24,12 @@ import (
 	"sync"
 	"testing"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/zlib"
+	pkg "github.com/vahid-sohrabloo/fastcompress/zlib"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
 )
 
 // allLevels are the accepted levels, DefaultCompression included.

@@ -4,7 +4,7 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 // A CorruptInputError reports the presence of corrupt input at a given

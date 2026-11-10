@@ -7,9 +7,9 @@ import (
 	"io"
 	"math"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
-	"github.com/vahid-sohrabloo/fastzstd/internal/xxhash"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/xxhash"
 )
 
 // BuildDictOptions contains options used for creating a dictionary.

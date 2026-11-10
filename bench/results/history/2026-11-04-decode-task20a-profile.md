@@ -1,6 +1,6 @@
 # Task 20a decode CPU profiles: sequence fast loop in amd64 assembly
 
-Top 10 functions by flat time, from `gobench -mode d -level L -block B -secs S -cpuprofile F FILE`, pinned with `taskset -c 2`, each under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB), then `go tool pprof -top -nodecount 10`. The package prefix `github.com/vahid-sohrabloo/fastzstd/` is stripped. Go go1.27.1, AC power. Each heading gives the gobench speed of that run.
+Top 10 functions by flat time, from `gobench -mode d -level L -block B -secs S -cpuprofile F FILE`, pinned with `taskset -c 2`, each under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB), then `go tool pprof -top -nodecount 10`. The package prefix `github.com/vahid-sohrabloo/fastcompress/` is stripped. Go go1.27.1, AC power. Each heading gives the gobench speed of that run.
 
 - Before: e539c49 (Task 19), 2026-11-04 17:32, load1 0.91 to 1.14, `-secs 8`.
 - After: the Task 20a tree, 2026-11-04 19:37, load1 1.32 to 1.45, `-secs 8`.

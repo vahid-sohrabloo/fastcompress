@@ -17,7 +17,7 @@
 
 ## Global Constraints
 
-- Module `github.com/vahid-sohrabloo/fastzstd`. The public package is `github.com/vahid-sohrabloo/fastzstd/zstd` (package `zstd`). Internals live in `.../internal/...`.
+- Module `github.com/vahid-sohrabloo/fastcompress`. The public package is `github.com/vahid-sohrabloo/fastcompress/zstd` (package `zstd`). Internals live in `.../internal/...`.
 - `go 1.25` in go.mod. **No dependencies** (stdlib only in the library). No cgo: `CGO_ENABLED=0 go build ./...` must pass.
 - **No klauspost code, no klauspost dependency, and klauspost internals are never read.** The only klauspost artifact is `api/klauspost-zstd.txt`, an exported-API snapshot.
 - The implementation follows C v1.5.7. A deviation is allowed only when it cannot change output, and it gets a comment `// C: <file>:<function> — <why different>`.
@@ -74,7 +74,7 @@ bench/cmd/gobench/main.go  bench/compare.sh  bench/results/
 **Interfaces:**
 - Produces: `scripts/apicheck.sh [--subset]`. It exits 0 when every exported identifier of `./zstd` appears in the snapshot with an identical declaration. Without `--subset`, it also requires that every snapshot identifier exists. Phase 1 runs it with `--subset`.
 
-- [ ] **Step 1:** `git init`. Write go.mod (`module github.com/vahid-sohrabloo/fastzstd`, `go 1.25`), the LICENSE and README described in Global Constraints, `zstd/doc.go` (package comment only), and a `.gitignore` containing `ref/zstd/`, `ref/cref/cref`, `bench/corpus/` and `*.prof`.
+- [ ] **Step 1:** `git init`. Write go.mod (`module github.com/vahid-sohrabloo/fastcompress`, `go 1.25`), the LICENSE and README described in Global Constraints, `zstd/doc.go` (package comment only), and a `.gitignore` containing `ref/zstd/`, `ref/cref/cref`, `bench/corpus/` and `*.prof`.
 - [ ] **Step 2:** Generate the snapshot in a **throwaway module in the scratchpad**, never in this repo:
   ```
   go mod init snap && go get github.com/klauspost/compress@v1.20.3

@@ -39,7 +39,7 @@ import (
 // in ldVerifyEvery is re-run in C anyway and must match the entry (a standing
 // spot-check that the cache returns libdeflate's bytes).
 //
-// FASTZSTD_LDREF_CACHE:
+// FASTCOMPRESS_LDREF_CACHE:
 //
 //	unset, "" or "on"  cache on, except when CI is set (CI runs uncached)
 //	"off" or "0"       cache off: every call runs ldref
@@ -47,9 +47,9 @@ import (
 //	                   output (the test fails otherwise), a missing one is
 //	                   written
 //
-// FASTZSTD_LDREF_CACHE_DIR sets the directory (default os.UserCacheDir()/fastzstd-ldref,
-// i.e. $XDG_CACHE_HOME/fastzstd-ldref or ~/.cache/fastzstd-ldref, else
-// os.TempDir()/fastzstd-ldref). A directory inside the repository is refused
+// FASTCOMPRESS_LDREF_CACHE_DIR sets the directory (default os.UserCacheDir()/fastcompress-ldref,
+// i.e. $XDG_CACHE_HOME/fastcompress-ldref or ~/.cache/fastcompress-ldref, else
+// os.TempDir()/fastcompress-ldref). A directory inside the repository is refused
 // (the cache is then off).
 
 // ldTag is the libdeflate release ldref is built from (LDTAG in ref/fetch.sh).
@@ -91,9 +91,9 @@ func ldBinHash(path string) (string, error) {
 	return r.sum, r.err
 }
 
-// ldCacheMode returns "off", "on" or "verify" from FASTZSTD_LDREF_CACHE and CI.
+// ldCacheMode returns "off", "on" or "verify" from FASTCOMPRESS_LDREF_CACHE and CI.
 func ldCacheMode() string {
-	switch v := os.Getenv("FASTZSTD_LDREF_CACHE"); v {
+	switch v := os.Getenv("FASTCOMPRESS_LDREF_CACHE"); v {
 	case "off", "0", "false":
 		return "off"
 	case "verify":
@@ -113,12 +113,12 @@ func ldCacheMode() string {
 // ldCacheDir returns the cache directory, or "" with a reason when it may not
 // be used.
 func ldCacheDir() (string, string) {
-	dir := os.Getenv("FASTZSTD_LDREF_CACHE_DIR")
+	dir := os.Getenv("FASTCOMPRESS_LDREF_CACHE_DIR")
 	if dir == "" {
 		if d, err := os.UserCacheDir(); err == nil {
-			dir = filepath.Join(d, "fastzstd-ldref")
+			dir = filepath.Join(d, "fastcompress-ldref")
 		} else {
-			dir = filepath.Join(os.TempDir(), "fastzstd-ldref")
+			dir = filepath.Join(os.TempDir(), "fastcompress-ldref")
 		}
 	}
 	abs, err := filepath.Abs(dir)
@@ -139,7 +139,7 @@ func ldCacheDir() (string, string) {
 func ldCacheKey(binHash string, args []string, in []byte) string {
 	inSum := sha256.Sum256(in)
 	h := sha256.New()
-	h.Write([]byte("fastzstd-ldref-cache v1\n" + ldTag + "\n" + binHash + "\n"))
+	h.Write([]byte("fastcompress-ldref-cache v1\n" + ldTag + "\n" + binHash + "\n"))
 	for _, a := range args {
 		h.Write([]byte(a))
 		h.Write([]byte{0})
@@ -208,7 +208,7 @@ func ldRunCached(t testing.TB, bin string, in []byte, args ...string) []byte {
 	t.Helper()
 	mode := ldCacheMode()
 	if mode == "invalid" {
-		t.Fatalf("FASTZSTD_LDREF_CACHE=%q: want on, off or verify", os.Getenv("FASTZSTD_LDREF_CACHE"))
+		t.Fatalf("FASTCOMPRESS_LDREF_CACHE=%q: want on, off or verify", os.Getenv("FASTCOMPRESS_LDREF_CACHE"))
 	}
 	if mode == "off" || len(args) == 0 || !ldCacheable[args[0]] {
 		return run(t, bin, in, args...)

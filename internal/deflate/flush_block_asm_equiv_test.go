@@ -10,7 +10,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // Assembly equivalence of writeSequencesAsm (flush_block_amd64.s) with the Go

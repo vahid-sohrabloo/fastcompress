@@ -1,6 +1,6 @@
 # Task 20d decode CPU profiles: split-literal-buffer sequences in the assembly loop
 
-Top 10 functions by flat time, from `gobench -mode d -level L -block B -secs 8 -cpuprofile F FILE`, pinned with `taskset -c 2`, each under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB), then `go tool pprof -top`. The package prefix `github.com/vahid-sohrabloo/fastzstd/` is stripped. AC power. `perf` is still unavailable (perf_event_paranoid 4, no linux-tools for 6.5.0-28).
+Top 10 functions by flat time, from `gobench -mode d -level L -block B -secs 8 -cpuprofile F FILE`, pinned with `taskset -c 2`, each under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB), then `go tool pprof -top`. The package prefix `github.com/vahid-sohrabloo/fastcompress/` is stripped. AC power. `perf` is still unavailable (perf_event_paranoid 4, no linux-tools for 6.5.0-28).
 
 - Before: e25e330 (8fe8754's code plus the test-only 20c follow-ups), built from a scratch worktree.
 - After: the Task 20d tree (two assembly entries, `decodeExecSeqsAsm` byte-identical to before, plus `decodeExecSeqsSplitAsm`).

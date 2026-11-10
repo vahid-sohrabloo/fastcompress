@@ -9,9 +9,9 @@ import (
 	"testing"
 	"testing/iotest"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/zlib"
+	pkg "github.com/vahid-sohrabloo/fastcompress/zlib"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // Every 2-byte header (CMF, FLG) in front of a valid body and Adler-32:

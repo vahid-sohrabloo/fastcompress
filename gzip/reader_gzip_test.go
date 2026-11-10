@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/gzip"
+	pkg "github.com/vahid-sohrabloo/fastcompress/gzip"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // stdMember writes one member with the standard library's Writer.

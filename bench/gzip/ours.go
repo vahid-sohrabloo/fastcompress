@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
-	"github.com/vahid-sohrabloo/fastzstd/gzip"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
+	"github.com/vahid-sohrabloo/fastcompress/gzip"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 // ours is the adapter for this repository's gzip/DEFLATE port: the

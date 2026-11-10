@@ -4,7 +4,7 @@ import (
 	stdgzip "compress/gzip"
 	"reflect"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/gzip"
+	pkg "github.com/vahid-sohrabloo/fastcompress/gzip"
 )
 
 // Package-specific parts of the shared API parity tests in apiparity_test.go.
@@ -13,7 +13,7 @@ import (
 const stdPath = "compress/gzip"
 
 // ourPath is the import path of this package.
-const ourPath = "github.com/vahid-sohrabloo/fastzstd/gzip"
+const ourPath = "github.com/vahid-sohrabloo/fastcompress/gzip"
 
 // apiExtras lists every exported identifier ("Name") and member ("Type.Name")
 // of this package that the standard library's gzip does not have, with the

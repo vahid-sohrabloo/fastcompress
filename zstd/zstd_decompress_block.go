@@ -5,9 +5,9 @@ import (
 	"slices"
 	"sync/atomic"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/bitstream"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
 )
 
 // Compressed block decoding: literals, sequence tables and sequences.

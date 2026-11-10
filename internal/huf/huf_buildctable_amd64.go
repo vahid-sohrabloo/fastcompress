@@ -2,7 +2,7 @@
 
 package huf
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useHufBuildAsm selects the assembly Huffman table builder (baseline amd64).
 var useHufBuildAsm bool

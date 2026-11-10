@@ -4,7 +4,7 @@
   *
   * Returns the total size of that block (including header) or a ZSTD error code.
   */
-+/* fastzstd cref: seqStore dump hook. NULL (a no-op) unless cref's seqs mode sets it.
++/* fastcompress cref: seqStore dump hook. NULL (a no-op) unless cref's seqs mode sets it.
 + * type: 0 = raw block, 1 = compressed block, 2 = RLE block. seqStore is NULL when
 + * ZSTD_buildSeqStore declined to build one (tiny block, emitted raw). */
 +void (*ZSTD_crefHook)(const SeqStore_t* seqStore, size_t srcSize, int type) = NULL;

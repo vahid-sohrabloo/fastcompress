@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
 )
 
 // errStreamLimit: streamDecode's output limit was reached.

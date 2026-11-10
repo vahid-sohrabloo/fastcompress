@@ -5,7 +5,7 @@ package fse
 import (
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 )
 
 // useFSEBuildAsm selects the assembly table builder, useFSENormAsm the

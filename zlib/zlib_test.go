@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/zlib"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/zlib"
 )
 
 // zlib-specific behaviour (the shared tests are in api_test.go).

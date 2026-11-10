@@ -2,7 +2,7 @@
 
 package huf
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useHuf4X1Asm and useHuf4X2Asm select the assembly fast loops, which need
 // BMI2 (SHRX/SHLX). Without BMI2 the Go fast loops

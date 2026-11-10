@@ -4,15 +4,15 @@
 #
 #   deflate-test.sh [-t quick|full] [-a MODES] [-r REGEX] [-p N] [-l LOGDIR] [-c] [-n] [GROUP...] [-- GO-TEST-ARGS...]
 #
-#   -t quick  tier 0 (every change, default; "fast" is an alias): -short, FASTZSTD_TEST_TIER=quick (adds
+#   -t quick  tier 0 (every change, default; "fast" is an alias): -short, FASTCOMPRESS_TEST_TIER=quick (adds
 #             1 MiB / 512 KiB prefixes of 7 more Silesia files to the level differential tests). Normally
 #             with -r from scripts/deflate-groups.sh (only the tests of the changed files).
 #   -t full   tier 1 (end of a round, CI): no -short, the full differential matrix
-#   -a MODES  FASTZSTD_FUZZ_ASM for the internal/deflate runs, comma-separated: on (default), off,
+#   -a MODES  FASTCOMPRESS_FUZZ_ASM for the internal/deflate runs, comma-separated: on (default), off,
 #             nobmi2; both = on,off
 #   -r REGEX  internal/deflate: run the tests matching REGEX (-run) instead of the GROUPs' partitions
-#   -p N      FASTZSTD_TEST_PAR and go test -parallel (default $FASTZSTD_TEST_PAR or 8; 1 = serial)
-#   -l DIR    log directory (default ${TMPDIR:-/tmp}/fastzstd-deflate-test/<date-time>)
+#   -p N      FASTCOMPRESS_TEST_PAR and go test -parallel (default $FASTCOMPRESS_TEST_PAR or 8; 1 = serial)
+#   -l DIR    log directory (default ${TMPDIR:-/tmp}/fastcompress-deflate-test/<date-time>)
 #   -c        also write a coverage profile (internal/deflate runs: DIR/<run>.cover)
 #   -n        print the full flock + systemd-run commands only
 #   GROUP     deflate (default: the whole internal/deflate package), or internal/deflate partitions
@@ -25,8 +25,8 @@
 # Every go test is
 #   flock /tmp/gzip-libdeflate-test.lock systemd-run --user --scope -p MemoryMax=$MEMMAX -p MemorySwapMax=0 \
 #     env GOMEMLIMIT=$GOMEMLIMIT ... go test -p 1 -count=1 -timeout 60m -v -parallel N ...
-# with MEMMAX = FASTZSTD_TEST_MEM_MAX (default 6G; N, NK, NM or NG, at least 256M, at most 8G) and
-# GOMEMLIMIT = FASTZSTD_TEST_GOMEMLIMIT (default 4GiB; N followed by B, KiB, MiB or GiB, nonzero and below
+# with MEMMAX = FASTCOMPRESS_TEST_MEM_MAX (default 6G; N, NK, NM or NG, at least 256M, at most 8G) and
+# GOMEMLIMIT = FASTCOMPRESS_TEST_GOMEMLIMIT (default 4GiB; N followed by B, KiB, MiB or GiB, nonzero and below
 # MEMMAX), leading zeros dropped; any other value (empty, infinity, off, ...) is an error. It runs in the
 # foreground after waiting (up to 6 h; then the run is aborted with rc 75, not started) until MemAvailable >= MEMMAX + 2 GiB and no other test
 # binary uses more than 3 GB; the same check is made again once the lock is taken (up to 10 min, then
@@ -41,10 +41,10 @@ cd "$(dirname "$0")/.."
 R=$PWD
 LOCK=/tmp/gzip-libdeflate-test.lock
 
-tier=quick asm=on run_re="" par=${FASTZSTD_TEST_PAR:-8} logdir="" cover=0 dry=0
-# Memory cap of the scope and Go soft limit (FASTZSTD_TEST_MEM_MAX, FASTZSTD_TEST_GOMEMLIMIT); a set but
+tier=quick asm=on run_re="" par=${FASTCOMPRESS_TEST_PAR:-8} logdir="" cover=0 dry=0
+# Memory cap of the scope and Go soft limit (FASTCOMPRESS_TEST_MEM_MAX, FASTCOMPRESS_TEST_GOMEMLIMIT); a set but
 # empty variable is rejected below, not defaulted.
-MEMMAX=${FASTZSTD_TEST_MEM_MAX-6G} GOMEMLIM=${FASTZSTD_TEST_GOMEMLIMIT-4GiB}
+MEMMAX=${FASTCOMPRESS_TEST_MEM_MAX-6G} GOMEMLIM=${FASTCOMPRESS_TEST_GOMEMLIMIT-4GiB}
 # size_bytes VALUE UNITS...: VALUE = digits + one of UNITS ("" = bytes); prints the byte count, or nothing
 # when the number exceeds 8 GiB in that unit (checked before shifting, so no overflow).
 size_bytes() {
@@ -62,11 +62,11 @@ size_bytes() {
 memmax_b="" gomemlim_b=""
 [[ $MEMMAX =~ ^[0-9]+[KMG]?$ ]] && memmax_b=$(size_bytes "$MEMMAX" K M G "")
 if [ -z "$memmax_b" ] || [ "$memmax_b" -lt $((256 << 20)) ]; then
-  echo "FASTZSTD_TEST_MEM_MAX='$MEMMAX': want N, NK, NM or NG, at least 256M and at most 8G" >&2; exit 2
+  echo "FASTCOMPRESS_TEST_MEM_MAX='$MEMMAX': want N, NK, NM or NG, at least 256M and at most 8G" >&2; exit 2
 fi
 [[ $GOMEMLIM =~ ^[0-9]+(B|KiB|MiB|GiB)$ ]] && gomemlim_b=$(size_bytes "$GOMEMLIM" KiB MiB GiB B)
 if [ -z "$gomemlim_b" ] || [ "$gomemlim_b" -eq 0 ] || [ "$gomemlim_b" -ge "$memmax_b" ]; then
-  echo "FASTZSTD_TEST_GOMEMLIMIT='$GOMEMLIM': want N followed by B, KiB, MiB or GiB, nonzero and below MemoryMax=$MEMMAX" >&2; exit 2
+  echo "FASTCOMPRESS_TEST_GOMEMLIMIT='$GOMEMLIM': want N followed by B, KiB, MiB or GiB, nonzero and below MemoryMax=$MEMMAX" >&2; exit 2
 fi
 # Strip leading zeros (validated above: digits then the unit) so systemd-run and Go get plain numbers.
 n=${MEMMAX%%[!0-9]*}; MEMMAX=$((10#$n))${MEMMAX#"$n"}
@@ -97,7 +97,7 @@ for m in $modes; do case "$m" in on|off|nobmi2) ;; *) echo "-a on|off|nobmi2[,..
 case "$par" in ''|*[!0-9]*) echo "-p N" >&2; exit 2 ;; esac
 [ "$par" -ge 1 ] || par=1
 [ ${#groups[@]} -gt 0 ] || [ -n "$run_re" ] || groups=(deflate)
-logdir=${logdir:-${TMPDIR:-/tmp}/fastzstd-deflate-test/$(date +%Y%m%d-%H%M%S)}
+logdir=${logdir:-${TMPDIR:-/tmp}/fastcompress-deflate-test/$(date +%Y%m%d-%H%M%S)}
 [ "$dry" = 1 ] || mkdir -p "$logdir"
 G="$R/scripts/deflate-groups.sh"
 
@@ -122,7 +122,7 @@ capped() {
   shift
   local log=$logdir/$name.log
   local cmd=(flock "$LOCK" systemd-run --user --scope -q -p MemoryMax="$MEMMAX" -p MemorySwapMax=0
-    env GOMEMLIMIT="$GOMEMLIM" FASTZSTD_TEST_PAR="$par" TIMEF="$log.time" NEED_KB="$NEED_KB" "${envs[@]}"
+    env GOMEMLIMIT="$GOMEMLIM" FASTCOMPRESS_TEST_PAR="$par" TIMEF="$log.time" NEED_KB="$NEED_KB" "${envs[@]}"
     bash -c "$INNER" "$par" "$@")
   if [ "$dry" = 1 ]; then
     printf '%q ' "${cmd[@]}"; echo
@@ -185,7 +185,7 @@ if [ -n "$run_re" ]; then
   for m in $modes; do
     cov=()
     [ "$cover" = 1 ] && cov=(-coverprofile="$logdir/sel-$tier-$m.cover")
-    capped "sel-$tier-$m" FASTZSTD_FUZZ_ASM="$m" FASTZSTD_TEST_TIER="$tier" -- \
+    capped "sel-$tier-$m" FASTCOMPRESS_FUZZ_ASM="$m" FASTCOMPRESS_TEST_TIER="$tier" -- \
       "${short[@]}" -run "$run_re" "${cov[@]}" "${extra[@]}" ./internal/deflate
   done
 elif [ ${#parts[@]} -gt 0 ]; then
@@ -209,19 +209,19 @@ elif [ ${#parts[@]} -gt 0 ]; then
   for m in $modes; do
     cov=()
     [ "$cover" = 1 ] && cov=(-coverprofile="$logdir/$name-$tier-$m.cover")
-    capped "$name-$tier-$m" FASTZSTD_FUZZ_ASM="$m" FASTZSTD_TEST_TIER="$tier" -- \
+    capped "$name-$tier-$m" FASTCOMPRESS_FUZZ_ASM="$m" FASTCOMPRESS_TEST_TIER="$tier" -- \
       "${short[@]}" "${sel[@]}" "${cov[@]}" "${extra[@]}" ./internal/deflate
   done
 fi
 for g in "${groups[@]}"; do
   case "$g" in
-    noasm) capped "noasm-$tier" FASTZSTD_TEST_TIER="$tier" -- -short -tags noasm "${extra[@]}" ./internal/deflate ;;
-    cover) capped "cover" FASTZSTD_FUZZ_ASM=on -- -short -coverprofile="$logdir/cover.out" "${extra[@]}" ./internal/deflate ;;
+    noasm) capped "noasm-$tier" FASTCOMPRESS_TEST_TIER="$tier" -- -short -tags noasm "${extra[@]}" ./internal/deflate ;;
+    cover) capped "cover" FASTCOMPRESS_FUZZ_ASM=on -- -short -coverprofile="$logdir/cover.out" "${extra[@]}" ./internal/deflate ;;
     creftest) capped "creftest-$tier" -- "${short[@]}" -run '^TestLD' "${extra[@]}" ./internal/creftest ;;
   esac
 done
 for p in "${pkgs[@]}"; do
-  capped "$p-$tier" FASTZSTD_TEST_TIER="$tier" -- "${short[@]}" "${extra[@]}" "./$p"
+  capped "$p-$tier" FASTCOMPRESS_TEST_TIER="$tier" -- "${short[@]}" "${extra[@]}" "./$p"
 done
 echo "logs: $logdir (summary.txt); failures: $fails (memory aborts: $aborts)"
 # rc 0 all passed, 75 only memory aborts (retry later), 1 a test failure.

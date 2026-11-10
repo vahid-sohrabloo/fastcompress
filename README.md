@@ -1,7 +1,8 @@
-# fastzstd
+# fastcompress
 
-A pure-Go port of the C libzstd v1.5.7 compressor, exposing the public API of
-`klauspost/compress/zstd`. No cgo and no dependencies.
+Pure-Go compression, ported from C. `zstd` is a port of libzstd v1.5.7 that
+exposes the public API of `klauspost/compress/zstd`; `flate`, `gzip` and
+`zlib` are a port of libdeflate v1.26. No cgo and no dependencies.
 
 Status: work in progress.
 

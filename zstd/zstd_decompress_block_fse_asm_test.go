@@ -12,10 +12,10 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // fseTableCase is one buildFSETable input: the counts (norm[:maxSV+1]),
@@ -142,7 +142,7 @@ func fseSeed(c fseTableCase) uint64 {
 // then before one) from the same starting state, and fails t unless the
 // assembly accepts c and leaves the same table and workspace, which must
 // pass checkTableBound. With the assembly off (no BMI2, or
-// FASTZSTD_FUZZ_ASM) it builds with Go twice.
+// FASTCOMPRESS_FUZZ_ASM) it builds with Go twice.
 func checkFSETableAsm(t testing.TB, what string, c fseTableCase) {
 	t.Helper()
 	maxSV1 := uint(len(c.norm))
@@ -338,7 +338,7 @@ func corpusFSECases(t *testing.T) []fseTableCase {
 // table log, with and without low-probability symbols.
 func TestBuildFSETableAsmEquiv(t *testing.T) {
 	if !useFSETableAsm {
-		t.Log("assembly off (no BMI2, or FASTZSTD_FUZZ_ASM): comparing the Go body with itself")
+		t.Log("assembly off (no BMI2, or FASTCOMPRESS_FUZZ_ASM): comparing the Go body with itself")
 	}
 	corpus := corpusFSECases(t)
 	if len(corpus) < 1000 {
@@ -498,7 +498,7 @@ func TestBuildFSETableAsmRegistered(t *testing.T) {
 		if err := cpu.SetAsmMode("on"); err != nil {
 			t.Fatal(err)
 		}
-		if err := cpu.SetAsmMode(os.Getenv("FASTZSTD_FUZZ_ASM")); err != nil {
+		if err := cpu.SetAsmMode(os.Getenv("FASTCOMPRESS_FUZZ_ASM")); err != nil {
 			t.Fatal(err)
 		}
 	}()

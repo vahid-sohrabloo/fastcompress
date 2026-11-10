@@ -5,7 +5,7 @@ import (
 	"errors"
 	"math/bits"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
 )
 
 // Internal errors, mirroring the C error codes returned at the same points.

@@ -8,7 +8,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 )
 
 // TestHcAsmLazyEquiv runs compressBlockLazyGeneric with the hash-chain

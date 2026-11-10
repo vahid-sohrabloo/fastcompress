@@ -11,7 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // hugeTestInput is every creftest input concatenated (about 3.5 MiB), large

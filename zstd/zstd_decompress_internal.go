@@ -1,8 +1,8 @@
 package zstd
 
 import (
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
-	"github.com/vahid-sohrabloo/fastzstd/internal/xxhash"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/xxhash"
 )
 
 // Objects and definitions shared within the decoder.

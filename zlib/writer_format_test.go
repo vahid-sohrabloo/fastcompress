@@ -4,7 +4,7 @@ import (
 	stdzlib "compress/zlib"
 	"io"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/zlib"
+	pkg "github.com/vahid-sohrabloo/fastcompress/zlib"
 )
 
 // Format-specific parts of the shared Writer tests in writer_test.go (the

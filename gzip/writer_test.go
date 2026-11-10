@@ -18,9 +18,9 @@ import (
 	"strings"
 	"testing"
 
-	pkg "github.com/vahid-sohrabloo/fastzstd/gzip"
+	pkg "github.com/vahid-sohrabloo/fastcompress/gzip"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // writerChunk is the Writer's documented chunk size.

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // trainXMLSamples returns 1000 samples of 1 KiB: the start of Silesia's

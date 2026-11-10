@@ -8,7 +8,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/gzip"
+	"github.com/vahid-sohrabloo/fastcompress/gzip"
 )
 
 // Write a gzip member with header fields and read it back with the

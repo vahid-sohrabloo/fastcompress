@@ -9,7 +9,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // Assembly equivalence of minCostPathAsm (levels 10..12) with the Go loop

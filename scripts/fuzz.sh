@@ -9,17 +9,17 @@
 # trains a dictionary, in Go and in cref. Differential targets need the C
 # drivers built: make -C ref/cref (zstd) and make -C ref/ldref (flate, gzip,
 # zlib, internal/deflate). A package with Fuzz targets must have a
-# fuzzasm_test.go (the FASTZSTD_FUZZ_ASM hook; flate, gzip, zlib and
+# fuzzasm_test.go (the FASTCOMPRESS_FUZZ_ASM hook; flate, gzip, zlib and
 # internal/adler32 have one although only internal/deflate, which they
 # call, has assembly), and a package whose test binary fails to build or
 # list counts as failed.
 #
 # Every go test runs with -parallel 2 -fuzzminimizetime 2s. Outside CI (CI
 # unset) and when systemd-run exists, each also runs in a scope capped at
-# MemoryMax=4G, no swap, GOMEMLIMIT=2GiB; FASTZSTD_FUZZ_CAP=0 turns the cap
-# off, FASTZSTD_FUZZ_CAP=1 requires it.
+# MemoryMax=4G, no swap, GOMEMLIMIT=2GiB; FASTCOMPRESS_FUZZ_CAP=0 turns the cap
+# off, FASTCOMPRESS_FUZZ_CAP=1 requires it.
 #
-# FASTZSTD_FUZZ_ASM=off|nobmi2|on is passed through to the tests, whose
+# FASTCOMPRESS_FUZZ_ASM=off|nobmi2|on is passed through to the tests, whose
 # init switches the assembly routines accordingly (internal/cpu SetAsmMode).
 #
 # Exits non-zero when a target fails, after running the remaining ones, and
@@ -45,7 +45,7 @@ if [[ ${#pkgs[@]} == 0 ]]; then
 fi
 
 cap=()
-case ${FASTZSTD_FUZZ_CAP:-} in
+case ${FASTCOMPRESS_FUZZ_CAP:-} in
   0) ;;
   1) cap=(systemd-run --user --scope --quiet -p MemoryMax=4G -p MemorySwapMax=0 env GOMEMLIMIT=2GiB) ;;
   *)
@@ -81,7 +81,7 @@ for pkg in $(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{en
     continue
   fi
   targets=$(grep '^Fuzz' <<<"$out" || true)
-  # The FASTZSTD_FUZZ_ASM hook: without it the asm modes do nothing here.
+  # The FASTCOMPRESS_FUZZ_ASM hook: without it the asm modes do nothing here.
   if [[ -n $targets && ! -f $dir/fuzzasm_test.go ]]; then
     echo "fuzz.sh: $pkg has Fuzz targets but no fuzzasm_test.go" >&2
     failed+=("$pkg (no fuzzasm_test.go)")
@@ -95,7 +95,7 @@ for pkg in $(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{en
       fi
     fi
     ntargets=$((ntargets + 1))
-    echo "=== $pkg $target ($t, FASTZSTD_FUZZ_ASM=${FASTZSTD_FUZZ_ASM:-on})"
+    echo "=== $pkg $target ($t, FASTCOMPRESS_FUZZ_ASM=${FASTCOMPRESS_FUZZ_ASM:-on})"
     if ! gotest -run '^$' -fuzz "^${target}\$" -fuzztime "$t" -parallel 2 -fuzzminimizetime 2s "$pkg" 2>&1 | tee "$log"; then
       failed+=("$pkg $target")
       # go test prints "Failing input written to testdata/fuzz/<target>/<id>".

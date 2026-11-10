@@ -1,6 +1,6 @@
 package huff0
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/huf"
+import "github.com/vahid-sohrabloo/fastcompress/internal/huf"
 
 // Scratch holds a Huffman compression table (a dictionary's literal
 // table, from zstd.InspectDictionary). Its fields are unexported.

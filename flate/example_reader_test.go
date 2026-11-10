@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // Stream data through a Writer and back through a Reader.

@@ -2,7 +2,7 @@
 
 package zstd
 
-import "github.com/vahid-sohrabloo/fastzstd/internal/cpu"
+import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 
 // useFastAsm selects the assembly main loop of the no-dictionary fast match
 // finder (baseline arm64 instructions only).

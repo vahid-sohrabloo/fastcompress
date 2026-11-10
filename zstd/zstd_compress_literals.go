@@ -6,7 +6,7 @@ package zstd
 import (
 	"encoding/binary"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
 )
 
 // noCompressLiterals writes a raw literals section.

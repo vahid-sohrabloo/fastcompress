@@ -7,8 +7,8 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // Assembly equivalence of fastestLoopAsm (compress_fastest_amd64.s) with the

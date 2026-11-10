@@ -7,9 +7,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/bitstream"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
 )
 
 // hufStream is one Huffman-compressed input: the table description

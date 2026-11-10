@@ -24,12 +24,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // modulePath prefixes the packages of this module that replace a standard
 // library package.
-const modulePath = "github.com/vahid-sohrabloo/fastzstd/"
+const modulePath = "github.com/vahid-sohrabloo/fastcompress/"
 
 // canonPkg maps compress/X and this module's X (X = flate, gzip, zlib) to X,
 // so that types of the two implementations compare equal by name.

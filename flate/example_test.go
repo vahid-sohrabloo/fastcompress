@@ -7,7 +7,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
 )
 
 // Compress at levels 1 and 6 and decompress into a buffer of the known size.

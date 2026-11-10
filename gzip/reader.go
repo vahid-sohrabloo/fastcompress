@@ -7,8 +7,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/vahid-sohrabloo/fastzstd/flate"
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflate"
+	"github.com/vahid-sohrabloo/fastcompress/flate"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflate"
 )
 
 // The errors of the standard library's gzip.Reader (same texts).

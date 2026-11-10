@@ -53,7 +53,7 @@ jobs:
         run: make -C ref/ldref
       - name: Fuzz (10m per target)
         env:
-          FASTZSTD_FUZZ_ASM: ${{ matrix.asm }}
+          FASTCOMPRESS_FUZZ_ASM: ${{ matrix.asm }}
           SUITE: ${{ matrix.suite }}
         run: |
           deflate='/(flate|gzip|zlib|internal/deflate|internal/deflatetest|internal/adler32)$'

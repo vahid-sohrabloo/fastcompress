@@ -1,5 +1,5 @@
 /*
- * cref - C reference driver for fastzstd. Built straight from ref/zstd/lib
+ * cref - C reference driver for fastcompress. Built straight from ref/zstd/lib
  * (libzstd v1.5.7, single-threaded). Reads stdin, writes stdout. Exit status 0
  * on success, nonzero (with a message on stderr) on any error.
  *
@@ -15,7 +15,7 @@
  *                   (ZSTD_dlm_byCopy): C digests it into a local CDict from the
  *                   context's parameters at the first frame (ZSTD_initLocalDict)
  *                   and attaches or copies that CDict for every frame, as
- *                   fastzstd's WithEncoderDict / WithEncoderDictRaw. A raw
+ *                   fastcompress's WithEncoderDict / WithEncoderDictRaw. A raw
  *                   dictionary has ID 0 (C cannot write another ID).
  *   -raw-dict 0|1   1: load the dictionary as ZSTD_dct_rawContent
  *   -lit-mode M     ZSTD_c_literalCompressionMode: 0 auto (default),

@@ -7,8 +7,8 @@
 package zstd
 
 import (
-	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
-	"github.com/vahid-sohrabloo/fastzstd/internal/fse"
+	"github.com/vahid-sohrabloo/fastcompress/internal/bitstream"
+	"github.com/vahid-sohrabloo/fastcompress/internal/fse"
 )
 
 // encodeSequencesGeneric writes the sequences bitstream and returns its size.

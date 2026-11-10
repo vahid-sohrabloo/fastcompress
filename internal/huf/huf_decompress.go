@@ -16,7 +16,7 @@ import (
 	"encoding/binary"
 	"math/bits"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/bitstream"
+	"github.com/vahid-sohrabloo/fastcompress/internal/bitstream"
 )
 
 // decoderFastTableLog. C: HUF_DECODER_FAST_TABLELOG

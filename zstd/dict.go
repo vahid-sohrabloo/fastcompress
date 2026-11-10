@@ -3,8 +3,8 @@ package zstd
 import (
 	"encoding/binary"
 
-	"github.com/vahid-sohrabloo/fastzstd/huff0"
-	"github.com/vahid-sohrabloo/fastzstd/internal/huf"
+	"github.com/vahid-sohrabloo/fastcompress/huff0"
+	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
 )
 
 // dictInfo is InspectDictionary's result.

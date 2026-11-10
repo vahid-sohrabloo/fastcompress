@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 var update = flag.Bool("update", false, "regenerate committed test data (TestGenDecodeSeeds)")

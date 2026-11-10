@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/creftest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
 )
 
 // countWriter counts the bytes written through it.

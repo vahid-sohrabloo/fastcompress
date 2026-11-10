@@ -9,8 +9,8 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
-	"github.com/vahid-sohrabloo/fastzstd/internal/guardmem"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
 // Assembly equivalence of the stream decoder (decompressStream, which runs

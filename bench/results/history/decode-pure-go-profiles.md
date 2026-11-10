@@ -1,6 +1,6 @@
 # Pure-Go decode CPU profiles (baseline for Tasks 19/20)
 
-Top 15 functions by flat time, from `gobench -mode d -level L -block B -secs 10 -cpuprofile F bench/corpus/silesia.tar`, pinned with `taskset -c 2`. Each run is under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB) and `go tool pprof -top -nodecount 15`. Go go1.27.1, 2026-11-04, AC power, load1 of 1.6 to 2.6 (desktop background only; no other benchmark or build running). The profile covers only the timed DecodeAll passes. Package prefix `github.com/vahid-sohrabloo/fastzstd/` is stripped. Each heading gives the gobench speed of that run; the C speeds are in `2026-11-04-decode-pure-go.md`.
+Top 15 functions by flat time, from `gobench -mode d -level L -block B -secs 10 -cpuprofile F bench/corpus/silesia.tar`, pinned with `taskset -c 2`. Each run is under `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0` (GOMEMLIMIT=2GiB) and `go tool pprof -top -nodecount 15`. Go go1.27.1, 2026-11-04, AC power, load1 of 1.6 to 2.6 (desktop background only; no other benchmark or build running). The profile covers only the timed DecodeAll passes. Package prefix `github.com/vahid-sohrabloo/fastcompress/` is stripped. Each heading gives the gobench speed of that run; the C speeds are in `2026-11-04-decode-pure-go.md`.
 
 ## Observations
 

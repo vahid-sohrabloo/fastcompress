@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/vahid-sohrabloo/fastzstd/zlib"
+	"github.com/vahid-sohrabloo/fastcompress/zlib"
 )
 
 // Decompress a zlib stream written with a preset dictionary.

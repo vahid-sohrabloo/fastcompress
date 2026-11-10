@@ -56,7 +56,7 @@ func RegisterAsm(name string, use *bool, available func() bool) {
 }
 
 // SetAsmMode sets every assembly switch, including those registered later,
-// for the fuzz tests (FASTZSTD_FUZZ_ASM): "on" or "" to available() with
+// for the fuzz tests (FASTCOMPRESS_FUZZ_ASM): "on" or "" to available() with
 // X86.HasBMI2 as detected, "nobmi2" to available() after clearing
 // X86.HasBMI2, "off" to false.
 func SetAsmMode(mode string) error {

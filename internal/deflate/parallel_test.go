@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastzstd/internal/deflatetest"
+	"github.com/vahid-sohrabloo/fastcompress/internal/deflatetest"
 )
 
 // Parallel differential cases and the test tiers (scripts/README-deflate-tests.md).
@@ -21,7 +21,7 @@ import (
 // withDeflateAsm, cpu.DisableBMI2) never overlap a parallel case. At most
 // testPar leaf cases run at once, whatever go test -parallel says.
 //
-// FASTZSTD_TEST_PAR sets testPar (default 4). 1 (or 0) is the serial mode:
+// FASTCOMPRESS_TEST_PAR sets testPar (default 4). 1 (or 0) is the serial mode:
 // no t.Parallel at all and the cases run in the old order, each test with a
 // single compressor as before. Under -race testPar is 1 (the race lane keeps
 // its trimmed, serial shape).
@@ -31,11 +31,11 @@ var testPar = func() int {
 	if raceEnabled {
 		return 1
 	}
-	if v := os.Getenv("FASTZSTD_TEST_PAR"); v != "" {
+	if v := os.Getenv("FASTCOMPRESS_TEST_PAR"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return max(n, 1)
 		}
-		panic("FASTZSTD_TEST_PAR=" + v + ": want a number")
+		panic("FASTCOMPRESS_TEST_PAR=" + v + ": want a number")
 	}
 	return 4
 }()
@@ -62,11 +62,11 @@ func parallelCase(t *testing.T) {
 	t.Cleanup(func() { <-testSlots })
 }
 
-// tierQuick reports the quick tier (FASTZSTD_TEST_TIER=quick, or fast, with
+// tierQuick reports the quick tier (FASTCOMPRESS_TEST_TIER=quick, or fast, with
 // -short): the level differential tests add the quickSilesia prefixes to
 // their -short inputs.
 func tierQuick() bool {
-	v := os.Getenv("FASTZSTD_TEST_TIER")
+	v := os.Getenv("FASTCOMPRESS_TEST_TIER")
 	return testing.Short() && (v == "quick" || v == "fast")
 }
 
