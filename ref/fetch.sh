@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Idempotent: clone zstd v1.5.7, build the zstd CLI, fetch Silesia (unless --no-corpus).
+# Idempotent: clone zstd v1.5.7, build the zstd CLI, clone libdeflate v1.26, fetch Silesia (unless --no-corpus).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG=v1.5.7
+LDTAG=v1.26
 CORPUS=1
 for a in "$@"; do
   case "$a" in
@@ -15,6 +16,10 @@ if [ ! -d ref/zstd/.git ]; then
   git clone --depth 1 --branch "$TAG" https://github.com/facebook/zstd.git ref/zstd
 fi
 make -C ref/zstd/programs zstd -j"$(nproc)"
+
+if [ ! -d ref/libdeflate/.git ]; then
+  git clone --depth 1 --branch "$LDTAG" https://github.com/ebiggers/libdeflate.git ref/libdeflate
+fi
 
 if [ "$CORPUS" = 1 ]; then
   dir=bench/corpus/silesia
