@@ -323,7 +323,7 @@ func TestDecompressParams(t *testing.T) {
 		t.Fatal("reset(sessionOnly) reset the parameters")
 	}
 	d.reset(false)
-	if d.maxWindowSize != MaxWindowSize || d.forceIgnoreChecksum || d.maxMemory != 64<<30 {
+	if d.maxWindowSize != MaxWindowSize || d.forceIgnoreChecksum || d.maxMemory != defaultMaxMemory {
 		t.Fatal("reset(false) kept parameters")
 	}
 }

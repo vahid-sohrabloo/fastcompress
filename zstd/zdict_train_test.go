@@ -365,7 +365,11 @@ func checkTrainOrCrash(t *testing.T, mode string, samples [][]byte, maxDict int,
 	if mode != "train" {
 		args = crefTrainArgs(p)
 	}
-	if _, _, cerr := creftest.TrainCRef(t, mode, samples, maxDict, args...); cerr != nil && cerr.Code == -2 {
+	// F above 31 makes C allocate gigabytes: on a machine without the
+	// memory, C's malloc fails (a plain error, not a crash) where Go refuses
+	// the parameters up front. Both are errors; the codes may differ.
+	if _, _, cerr := creftest.TrainCRef(t, mode, samples, maxDict, args...); cerr != nil &&
+		(cerr.Code == -2 || (p.F >= 32 && cerr.Code == cErrMemoryAllocation)) {
 		var err error
 		switch mode {
 		case "train":
@@ -376,6 +380,12 @@ func checkTrainOrCrash(t *testing.T, mode string, samples [][]byte, maxDict int,
 			_, _, err = TrainDictFastCover(samples, maxDict, p)
 		}
 		var ce *buildDictError
+		if cerr.Code != -2 {
+			if err == nil {
+				t.Fatalf("C fails (%s), Go returned no error", cerr.Name)
+			}
+			return
+		}
 		if !errors.As(err, &ce) || !(ce.undefined || ce.code == cErrMemoryAllocation) {
 			t.Fatalf("C crashes (%s), Go returned %v, want an undefined-behaviour error", cerr.Name, err)
 		}
