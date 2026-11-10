@@ -80,6 +80,33 @@ type nearOptimalState struct {
 	onlyLitsSeq [1]deflateSequence
 }
 
+// btMatchLoopState is the state btMatchLoopAsm reads and updates (the
+// locals of deflateCompressNearOptimal's matchfinding loop; inNext,
+// nextObservation, cachePtr and the next hashes are updated, the rest is
+// read only).
+type btMatchLoopState struct {
+	inNext          int
+	inCurBase       int
+	limit           int // the assembly starts a position only at inNext < limit
+	inBlockBegin    int
+	inMaxBlockEnd   int
+	nextObservation int
+	cachePtr        int
+	nextHash3       uint32
+	nextHash4       uint32
+	minLen          uint32
+	niceLen         uint32
+	maxSearchDepth  uint32
+}
+
+// btMatchLoopMaxBytes bounds the work of one btMatchLoopAsm call (it is not
+// preemptible while it runs): st.limit is at most btMatchLoopMaxBytes input
+// bytes past st.inNext, so a call advances in_next by at most
+// btMatchLoopMaxBytes + DEFLATE_MAX_MATCH_LEN - 1 bytes (a position started
+// just before limit skips up to 257 more), each walking at most
+// max_search_depth tree nodes.
+const btMatchLoopMaxBytes = 4096
+
 // tallyItemList follows the minimum-cost path from optimum node 0 to the
 // end of the block and counts the Huffman symbols it needs (and the
 // end-of-block symbol) in c.freqs. port of deflate_tally_item_list
@@ -402,66 +429,86 @@ func deflateCompressNearOptimal(c *Compressor, in []byte, os *outputBitstream) {
 		// length reached, (2) the match cache may overflow, (3) the block
 		// split heuristic says to split now.
 		for {
-			remaining := inEnd - inNext
+			// The positions of the block below in assembly while no window
+			// slide and no max_len / nice_len change can happen within the
+			// position and its skipped bytes (at most DEFLATE_MAX_MATCH_LEN -
+			// 1 of them): in_next+257 < in_next_slide and in_end -
+			// (in_next+257) >= DEFLATE_MAX_MATCH_LEN (and nice_len >= 3, which
+			// every near-optimal level has). It returns after the first
+			// position at which the block may end, or at limit, and the checks
+			// below continue from there.
+			if limit := min(inEnd-2*deflateMaxMatchLen+2, inNextSlide-deflateMaxMatchLen+1); useBtMatchLoopAsm &&
+				inNext < limit && niceLen >= deflateMinMatchLen {
+				st := btMatchLoopState{inNext: inNext, inCurBase: inCurBase,
+					limit: min(limit, inNext+btMatchLoopMaxBytes), inBlockBegin: inBlockBegin,
+					inMaxBlockEnd: inMaxBlockEnd, nextObservation: nextObservation, cachePtr: cachePtr,
+					nextHash3: nextHashes[0], nextHash4: nextHashes[1], minLen: minLen, niceLen: niceLen,
+					maxSearchDepth: maxSearchDepth}
+				btMatchLoopAsm(ns, stats, in, &st)
+				inNext, nextObservation, cachePtr = st.inNext, st.nextObservation, st.cachePtr
+				nextHashes = [2]uint32{st.nextHash3, st.nextHash4}
+			} else {
+				remaining := inEnd - inNext
 
-			// Slide the window forward if needed.
-			if inNext == inNextSlide {
-				mf.slideWindow()
-				inCurBase = inNext
-				inNextSlide = inNext + min(remaining, matchfinderWindowSize)
-			}
-
-			// Find matches with the current position using the binary tree
-			// matchfinder and save them in the match cache.
-			matches := cachePtr
-			bestLen := uint32(0)
-			maxLen, niceLen = adjustMaxAndNiceLen(maxLen, niceLen, remaining)
-			if maxLen >= btMatchfinderRequiredNbytes {
-				cachePtr += mf.getMatches(in, inCurBase, inNext-inCurBase, maxLen, niceLen, maxSearchDepth,
-					&nextHashes, (*[maxMatchesPerPos]lzMatch)(cache[cachePtr:]))
-				if cachePtr > matches {
-					bestLen = uint32(cache[cachePtr-1].length)
+				// Slide the window forward if needed.
+				if inNext == inNextSlide {
+					mf.slideWindow()
+					inCurBase = inNext
+					inNextSlide = inNext + min(remaining, matchfinderWindowSize)
 				}
-			}
-			if inNext >= nextObservation {
-				if bestLen >= minLen {
-					stats.observeMatch(bestLen)
-					nextObservation = inNext + int(bestLen)
-					ns.newMatchLenFreqs[bestLen]++
-				} else {
-					stats.observeLiteral(in[inNext])
-					nextObservation = inNext + 1
+
+				// Find matches with the current position using the binary tree
+				// matchfinder and save them in the match cache.
+				matches := cachePtr
+				bestLen := uint32(0)
+				maxLen, niceLen = adjustMaxAndNiceLen(maxLen, niceLen, remaining)
+				if maxLen >= btMatchfinderRequiredNbytes {
+					cachePtr += mf.getMatches(in, inCurBase, inNext-inCurBase, maxLen, niceLen, maxSearchDepth,
+						&nextHashes, (*[maxMatchesPerPos]lzMatch)(cache[cachePtr:]))
+					if cachePtr > matches {
+						bestLen = uint32(cache[cachePtr-1].length)
+					}
 				}
-			}
-
-			cache[cachePtr] = lzMatch{uint16(cachePtr - matches), uint16(in[inNext])}
-			inNext++
-			cachePtr++
-
-			// If there was a very long match found, don't cache any matches
-			// for the bytes covered by that match. This avoids degenerate
-			// behavior when compressing highly redundant data, where the
-			// number of matches can be very large (it doesn't hurt the
-			// ratio much: such data must be highly compressible anyway).
-			if bestLen >= deflateMinMatchLen && bestLen >= niceLen {
-				bestLen--
-				for {
-					remaining = inEnd - inNext
-					if inNext == inNextSlide {
-						mf.slideWindow()
-						inCurBase = inNext
-						inNextSlide = inNext + min(remaining, matchfinderWindowSize)
+				if inNext >= nextObservation {
+					if bestLen >= minLen {
+						stats.observeMatch(bestLen)
+						nextObservation = inNext + int(bestLen)
+						ns.newMatchLenFreqs[bestLen]++
+					} else {
+						stats.observeLiteral(in[inNext])
+						nextObservation = inNext + 1
 					}
-					maxLen, niceLen = adjustMaxAndNiceLen(maxLen, niceLen, remaining)
-					if maxLen >= btMatchfinderRequiredNbytes {
-						mf.skipByte(in, inCurBase, inNext-inCurBase, niceLen, maxSearchDepth, &nextHashes)
-					}
-					cache[cachePtr] = lzMatch{0, uint16(in[inNext])}
-					inNext++
-					cachePtr++
+				}
+
+				cache[cachePtr] = lzMatch{uint16(cachePtr - matches), uint16(in[inNext])}
+				inNext++
+				cachePtr++
+
+				// If there was a very long match found, don't cache any matches
+				// for the bytes covered by that match. This avoids degenerate
+				// behavior when compressing highly redundant data, where the
+				// number of matches can be very large (it doesn't hurt the
+				// ratio much: such data must be highly compressible anyway).
+				if bestLen >= deflateMinMatchLen && bestLen >= niceLen {
 					bestLen--
-					if bestLen == 0 {
-						break
+					for {
+						remaining = inEnd - inNext
+						if inNext == inNextSlide {
+							mf.slideWindow()
+							inCurBase = inNext
+							inNextSlide = inNext + min(remaining, matchfinderWindowSize)
+						}
+						maxLen, niceLen = adjustMaxAndNiceLen(maxLen, niceLen, remaining)
+						if maxLen >= btMatchfinderRequiredNbytes {
+							mf.skipByte(in, inCurBase, inNext-inCurBase, niceLen, maxSearchDepth, &nextHashes)
+						}
+						cache[cachePtr] = lzMatch{0, uint16(in[inNext])}
+						inNext++
+						cachePtr++
+						bestLen--
+						if bestLen == 0 {
+							break
+						}
 					}
 				}
 			}
