@@ -23,10 +23,15 @@
 //   R14 in_end - DEFLATE_MAX_MATCH_LEN          R8  seq (&sequences[i])
 //   R10 next_hash                               R11 nice_len
 //   R15 cutoff (search), scratch (match/skip)   CX  cur_pos / seq4 / pos
-//   AX  bucket, scratch                         DX  matchptr / best match
+//   AX  hash (bucket index), scratch            DX  node, matchptr / best match
 //   R12 second node, then its matchptr          SI  length
 // Locals: blockend-8(SP) = &in[in_max_block_end], seqend-16(SP) =
 // &sequences[FAST_SEQ_STORE_LENGTH].
+// As gcc does, the buckets are indexed by the hash itself (no mask: it is <
+// 2^15), bucket[0] is loaded zero-extended (MOVWLZX) and compared with the
+// cutoff in 16 bits (CMPW: both are mf_pos_t), and only a node in range is
+// sign-extended for the match pointer; with the mask, the LEAQ and a
+// sign-extending load before that compare the loop was 4-6% slower (T17.1).
 
 #include "textflag.h"
 
@@ -83,7 +88,8 @@ lbl: \
 //   bucket; ht_matchfinder_skip_bytes: the bucket after the skip) as
 //   PREFETCHT0 of hash_tab[next_hash], next_hash = lz_hash >> 17 < 2^15 (inside
 //   the table; a prefetch never faults anyway);
-//   hash_tab buckets (hash & 0x7FFF) * 4 bytes + [0, 4) (read, written) and
+//   hash_tab buckets hash * 4 bytes + [0, 4) (read, written; hash < 2^15:
+//   st.nextHash is masked on entry, every later hash is an lz_hash >> 17) and
 //   the slide over bytes [0, 131072) (read, written); sequences[seq..seq+1]
 //   (written; seq+1 <= 8192, the 8193-entry array's last index, because the
 //   loop stops once seq reaches 8192).
@@ -111,6 +117,7 @@ TEXT ·fastestLoopAsm(SB), NOSPLIT, $16-48
 	LEAQ SEQ_END(DI), CX
 	MOVQ CX, seqend-16(SP)
 	MOVL 32(AX), R10
+	ANDL $0x7FFF, R10         // next_hash < 2^15 (the identity for the lz_hash Go passes)
 	MOVL 36(AX), R11
 
 step:
@@ -128,19 +135,18 @@ noslide:
 	// ht_matchfinder_longest_match
 	LEAL    -0x8000(CX), R15
 	MOVWQSX R15, R15          // cutoff
-	MOVL    R10, AX           // hash = next_hash
+	MOVL    R10, AX           // hash = next_hash (< 2^15)
 	MOVL    1(BX), R10
 	IMUL3L  $0x1E35A7BD, R10, R10
 	SHRL    $17, R10          // next_hash = lz_hash(in_next + 1)
 	PREFETCHT0 (DI)(R10*4)    // prefetchw(&mf->hash_tab[next_hash])
-	ANDL    $0x7FFF, AX
-	LEAQ    (DI)(AX*4), AX    // the bucket
-	MOVWQSX (AX), DX          // cur_node = bucket[0]
-	MOVW    CX, (AX)          // bucket[0] = cur_pos
-	CMPQ    DX, R15
+	MOVWLZX (DI)(AX*4), DX    // cur_node = bucket[0] (zero-extended: gcc's movzwl)
+	MOVW    CX, (DI)(AX*4)    // bucket[0] = cur_pos
+	CMPW    DX, R15           // 16-bit mf_pos_t compare (gcc's cmp %r8w,%dx)
 	JLE     literal
-	MOVWQSX 2(AX), R12        // cur_node = bucket[1]
-	MOVW    DX, 2(AX)         // bucket[1] = to_insert
+	MOVWQSX 2(DI)(AX*4), R12  // cur_node = bucket[1]
+	MOVW    DX, 2(DI)(AX*4)   // bucket[1] = to_insert
+	MOVWQSX DX, DX
 	ADDQ    R13, DX           // matchptr
 	MOVL    (BX), CX          // seq4
 	CMPL    (DX), CX
@@ -326,11 +332,9 @@ skipnoslide:
 	LEAL -1(SI), R12          // count
 
 skiploop:
-	ANDL   $0x7FFF, R10
-	LEAQ   (DI)(R10*4), AX
-	MOVW   (AX), DX
-	MOVW   DX, 2(AX)          // bucket[1] = bucket[0]
-	MOVW   CX, (AX)           // bucket[0] = pos
+	MOVW   (DI)(R10*4), DX
+	MOVW   DX, 2(DI)(R10*4)   // bucket[1] = bucket[0]
+	MOVW   CX, (DI)(R10*4)    // bucket[0] = pos
 	MOVL   (R15), R10
 	IMUL3L $0x1E35A7BD, R10, R10
 	SHRL   $17, R10

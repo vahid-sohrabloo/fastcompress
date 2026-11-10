@@ -116,11 +116,11 @@ const (
 // hcLongestMatchAsmForTest is mf.longestMatch(in, inBase, inNext, bestLen,
 // maxLen, niceLen, maxSearchDepth, nextHashes) in assembly (same results, same
 // matchfinder, *inBase and nextHashes updates): a Go-callable entry to the
-// search of greedyLoopAsm and lazyLoopAsm (hcsearch<>, with lzExtend and the
-// window slide written in), used by the assembly equivalence tests to check
-// that search call by call against the Go method. The compressors do not call
-// it (their loops expand the same HCSEARCH macro in place; greedyLoopAsm
-// expands its max_len 258 variant HCSEARCH258, whose entry is
+// search of lazyLoopAsm (an expansion of the same HCSEARCH macro, with
+// lzExtend and the window slide written in), used by the assembly equivalence
+// tests to check that search call by call against the Go method. The
+// compressors do not call it (their loops expand the macro in place;
+// greedyLoopAsm expands its max_len 258 variant HCSEARCH258, whose entry is
 // hcLongestMatch258AsmForTest). Its preconditions are listed in the BOUNDS
 // block. C: hc_matchfinder_longest_match
 //
@@ -129,7 +129,7 @@ func hcLongestMatchAsmForTest(mf *hcMatchfinder, in []byte, inBase *int, inNext 
 	bestLen, maxLen, niceLen, maxSearchDepth uint32, nextHashes *[2]uint32) (length, offset uint32)
 
 // hcLongestMatch258AsmForTest is hcLongestMatchAsmForTest with maxLen 258
-// through the HCSEARCH258 expansion of greedyLoopAsm (hcsearch258<>), the
+// through an expansion of greedyLoopAsm's HCSEARCH258 macro, the
 // tests' entry to that variant. Precondition: 258 <= len(in) - inNext.
 // C: hc_matchfinder_longest_match
 //

@@ -12,12 +12,12 @@
 // (no -mprfchw). Semantics are those of hcMatchfinder.longestMatch (the Go
 // reference, statement for statement).
 //
-// BP: hcLongestMatchAsmForTest, greedyLoopAsm and lazyLoopAsm use BP as a
-// general register (nice_len for the search). Their frames make the assembler
-// save the caller's BP on entry and restore it at RET, so Go code never sees a
-// changed BP; but while one of them runs BP is not a frame pointer, and a
-// frame-pointer unwinder (perf, the execution tracer) that samples inside it
-// sees a bad stack.
+// BP: hcLongestMatchAsmForTest, hcLongestMatch258AsmForTest, greedyLoopAsm
+// and lazyLoopAsm use BP as a general register (next_hashes[1]). Their
+// frames make the assembler save the caller's BP on entry and restore it at
+// RET, so Go code never sees a changed BP; but while one of them runs BP is
+// not a frame pointer, and a frame-pointer unwinder (perf, the execution
+// tracer) that samples inside it sees a bad stack.
 //
 // Preemption: the routines are NOSPLIT assembly, so the goroutine is not
 // asynchronously preemptible while inside one. Bound per call: greedyLoopAsm
@@ -32,20 +32,28 @@
 // 256 KiB matchfinder.
 //
 // The search is the HCSEARCH macro (HCSEARCH258 in greedyLoopAsm), expanded
-// in place at each search of the two loops, and hcsearch<>, a
-// register-convention routine around the same macro for
-// hcLongestMatchAsmForTest (its Go-callable entry for the tests, no production
-// caller; hcsearch258<> and hcLongestMatch258AsmForTest the same for
-// HCSEARCH258). Its registers:
+// in place at each search of the two loops and once in each of their
+// Go-callable test entries, hcLongestMatchAsmForTest and
+// hcLongestMatch258AsmForTest (no production caller). Its registers:
 //   DI  mf                     BX  strptr (&in[inNext])
 //   R13 &in[*inBase] (C in_base, advanced by a slide)
 //   R15 cutoff (sign-extended mf_pos_t)
 //   R12 depth_remaining        R10 best_len
-//   R11 max_len                R8  best_matchptr
-//   BP  nice_len               SI  next_hashes, then seq4 (first 4 bytes)
-//   AX  cur_node4 (sign-ext.)  DX  matchptr
+//   R11 next_hashes[0]         R8  best_matchptr
+//   BP  next_hashes[1]         SI  seq4 (first 4 bytes)
+//   AX  cur_node4              DX  matchptr
 //   R14 the 4 bytes at strptr+best_len-3
-//   CX  lz_extend length       R9  scratch (lz_extend word, hashes)
+//   CX  lz_extend length       R9  scratch (lz_extend word, max_len)
+// AX holds a node as a signed mf_pos_t: sign-extended from the hash4 bucket,
+// in the chain walks the low 16 bits of the zero-extending MOVWLZX load of
+// next_tab (gcc's movzwl; a sign-extending load is a cycle slower on the
+// walk's load-to-load chain), compared with the cutoff in 16 bits (CMPW, as
+// gcc's cmp %si,%ax) and sign-extended into DX for the match pointer.
+// max_len and nice_len are memory operands (the macro arguments ML / NL; a
+// constant 258 in HCSEARCH258). Keeping next_hashes in R11 / BP across the
+// loops' positions, as gcc does in deflate_compress_greedy and
+// deflate_compress_lazy_generic, instead of in the frame, made levels 2..9
+// 1-9% faster, the MOVWLZX walk loads another 0-8% (T17.1).
 
 #include "textflag.h"
 
@@ -53,11 +61,14 @@
 #define HASH4_OFF 65536
 #define NEXT_OFF 196608
 
-// HCSEARCH(H3M, H4M, ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16,
-// d8, dd, ed, ot): hc_matchfinder_longest_match written in where it is used
-// (as gcc forceinlines it), with the registers of hcsearch<> (below) and
-// next_hashes[0] / next_hashes[1] at the memory operands H3M / H4M instead of
-// (SI) / 4(SI); it ends at the label ot. The other arguments are the labels
+// HCSEARCH(ML, NL, ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16, d8,
+// dd, ed, ot): hc_matchfinder_longest_match written in where it is used (as
+// gcc forceinlines it), with the registers listed above except that
+// next_hashes[0] / next_hashes[1] are in R11 / BP (gcc keeps them in two
+// registers across the compressors' loops) and max_len / nice_len are read
+// at the operands ML / NL; R11 and BP are < 2^15 / < 2^16 on entry and are
+// replaced by the next hashes (lz_hash results, so the same bounds hold) with
+// no masking. It ends at the label ot. The other arguments are the labels
 // of one expansion (unique per TEXT): ns noslide, sl the slide loop, c4 the
 // length 4 check, l4 the length 4 chain walk, hv a known match of length >= 4,
 // nb a new best length, l5 / n5 the chain walk for longer matches, cd a
@@ -70,9 +81,9 @@
 // then 8, then 1 at a time; its TZCNTQ runs only on a nonzero XOR word, for
 // which TZCNT (REP BSF) and BSF give the same result, so the encoding is
 // correct on CPUs without BMI1 too). The chain-walk loop heads are 32-byte
-// aligned (PCALIGN). Its accesses are hcsearch<>'s BOUNDS (with H3M / H4M for
-// next_hashes).
-#define HCSEARCH(H3M, H4M, ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16, d8, dd, ed, ot) \
+// aligned (PCALIGN). Its accesses are listed in the BOUNDS block of
+// hcLongestMatchAsmForTest.
+#define HCSEARCH(ML, NL, ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16, d8, dd, ed, ot) \
 	MOVQ BX, CX; \
 	SUBQ R13, CX; \
 	CMPL CX, $0x8000; \
@@ -104,29 +115,23 @@ ns: \
 	MOVQ    BX, R8; \
 	LEAL    -0x8000(CX), R15; \
 	MOVWQSX R15, R15; \
-	CMPL    R11, $5; \
+	CMPL    ML, $5; \
 	JB      ot; \
-	MOVL    H3M, R9; \
-	ANDL    $0x7FFF, R9; \
-	MOVL    H4M, DX; \
-	ANDL    $0xFFFF, DX; \
-	MOVWQSX (DI)(R9*2), R14; \
-	MOVWQSX HASH4_OFF(DI)(DX*2), AX; \
-	MOVW    CX, (DI)(R9*2); \
-	MOVW    CX, HASH4_OFF(DI)(DX*2); \
+	MOVWQSX (DI)(R11*2), R14; \
+	MOVWQSX HASH4_OFF(DI)(BP*2), AX; \
+	MOVW    CX, (DI)(R11*2); \
+	MOVW    CX, HASH4_OFF(DI)(BP*2); \
 	ANDL    $0x7FFF, CX; \
 	MOVW    AX, NEXT_OFF(DI)(CX*2); \
 	MOVL    1(BX), CX; \
-	MOVL    CX, DX; \
-	ANDL    $0xFFFFFF, DX; \
-	IMUL3L  $0x1E35A7BD, DX, DX; \
-	IMUL3L  $0x1E35A7BD, CX, CX; \
-	SHRL    $17, DX; \
-	SHRL    $16, CX; \
-	MOVL    DX, H3M; \
-	MOVL    CX, H4M; \
-	PREFETCHT0 (DI)(DX*2); \
-	PREFETCHT0 HASH4_OFF(DI)(CX*2); \
+	MOVL    CX, R11; \
+	ANDL    $0xFFFFFF, R11; \
+	IMUL3L  $0x1E35A7BD, R11, R11; \
+	IMUL3L  $0x1E35A7BD, CX, BP; \
+	SHRL    $17, R11; \
+	SHRL    $16, BP; \
+	PREFETCHT0 (DI)(R11*2); \
+	PREFETCHT0 HASH4_OFF(DI)(BP*2); \
 	CMPL R10, $4; \
 	JAE  hv; \
 	CMPQ R14, R15; \
@@ -145,12 +150,13 @@ c4: \
 	JLE  ot; \
 	PCALIGN $32; \
 l4: \
-	LEAQ    (R13)(AX*1), DX; \
+	MOVWQSX AX, DX; \
+	ADDQ    R13, DX; \
 	CMPL    (DX), SI; \
 	JEQ     cd; \
 	ANDL    $0x7FFF, AX; \
-	MOVWQSX NEXT_OFF(DI)(AX*2), AX; \
-	CMPQ    AX, R15; \
+	MOVWLZX NEXT_OFF(DI)(AX*2), AX; \
+	CMPW    AX, R15; \
 	JLE     ot; \
 	DECL    R12; \
 	JNZ     l4; \
@@ -158,29 +164,30 @@ l4: \
 hv: \
 	CMPQ AX, R15; \
 	JLE  ot; \
-	CMPL R10, BP; \
+	CMPL R10, NL; \
 	JAE  ot; \
 	MOVL (BX), SI; \
 nb: \
 	MOVL -3(BX)(R10*1), R14; \
 	PCALIGN $32; \
 l5: \
-	LEAQ (R13)(AX*1), DX; \
+	MOVWQSX AX, DX; \
+	ADDQ    R13, DX; \
 	CMPL -3(DX)(R10*1), R14; \
 	JNE  n5; \
 	CMPL (DX), SI; \
 	JEQ  cd; \
 n5: \
 	ANDL    $0x7FFF, AX; \
-	MOVWQSX NEXT_OFF(DI)(AX*2), AX; \
-	CMPQ    AX, R15; \
+	MOVWLZX NEXT_OFF(DI)(AX*2), AX; \
+	CMPW    AX, R15; \
 	JLE     ot; \
 	DECL    R12; \
 	JNZ     l5; \
 	JMP     ot; \
 cd: \
 	MOVL $4, CX; \
-	MOVL R11, R9; \
+	MOVL ML, R9; \
 	SUBL CX, R9; \
 	CMPL R9, $32; \
 	JB   e8; \
@@ -199,7 +206,7 @@ cd: \
 	ADDL $32, CX; \
 e8: \
 	LEAL 8(CX), R9; \
-	CMPL R9, R11; \
+	CMPL R9, ML; \
 	JA   e1; \
 	MOVQ (DX)(CX*1), R9; \
 	XORQ (BX)(CX*1), R9; \
@@ -207,7 +214,7 @@ e8: \
 	ADDL $8, CX; \
 	JMP  e8; \
 e1: \
-	CMPL    CX, R11; \
+	CMPL    CX, ML; \
 	JAE     ed; \
 	MOVBLZX (DX)(CX*1), R9; \
 	CMPB    R9, (BX)(CX*1); \
@@ -229,21 +236,25 @@ ed: \
 	JBE  n5; \
 	MOVL CX, R10; \
 	MOVQ DX, R8; \
-	CMPL R10, BP; \
+	CMPL R10, NL; \
 	JAE  ot; \
 	ANDL    $0x7FFF, AX; \
-	MOVWQSX NEXT_OFF(DI)(AX*2), AX; \
-	CMPQ    AX, R15; \
+	MOVWLZX NEXT_OFF(DI)(AX*2), AX; \
+	CMPW    AX, R15; \
 	JLE     ot; \
 	DECL    R12; \
 	JNZ     nb; \
 ot:
 
-// HCSEARCH258: HCSEARCH for max_len = 258 (R11 must be 258; greedyLoopAsm,
-// where max_len is fixed): without the max_len < 5 exit and with lz_extend
-// always starting with the 32-byte step (max_len - 4 >= 32), as gcc folds the
-// constant max_len into deflate_compress_greedy. Same accesses as HCSEARCH.
-#define HCSEARCH258(H3M, H4M, ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16, d8, dd, ed, ot) \
+// HCSEARCH258(NL, labels...): HCSEARCH for max_len = 258 (greedyLoopAsm,
+// where max_len is fixed), with next_hashes[0] / next_hashes[1] in R11 / BP
+// (gcc keeps them in two registers across deflate_compress_greedy's loop) and
+// nice_len at the operand NL; R11 and BP are < 2^15 / < 2^16 on entry and are
+// replaced by the next hashes (lz_hash results, so the same bounds hold) with
+// no masking. max_len is the constant 258 (no max_len < 5 exit, lz_extend
+// always starts with the 32-byte step), as gcc folds it into
+// deflate_compress_greedy. Same accesses as HCSEARCH.
+#define HCSEARCH258(NL, ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16, d8, dd, ed, ot) \
 	MOVQ BX, CX; \
 	SUBQ R13, CX; \
 	CMPL CX, $0x8000; \
@@ -275,27 +286,21 @@ ns: \
 	MOVQ    BX, R8; \
 	LEAL    -0x8000(CX), R15; \
 	MOVWQSX R15, R15; \
-	MOVL    H3M, R9; \
-	ANDL    $0x7FFF, R9; \
-	MOVL    H4M, DX; \
-	ANDL    $0xFFFF, DX; \
-	MOVWQSX (DI)(R9*2), R14; \
-	MOVWQSX HASH4_OFF(DI)(DX*2), AX; \
-	MOVW    CX, (DI)(R9*2); \
-	MOVW    CX, HASH4_OFF(DI)(DX*2); \
+	MOVWQSX (DI)(R11*2), R14; \
+	MOVWQSX HASH4_OFF(DI)(BP*2), AX; \
+	MOVW    CX, (DI)(R11*2); \
+	MOVW    CX, HASH4_OFF(DI)(BP*2); \
 	ANDL    $0x7FFF, CX; \
 	MOVW    AX, NEXT_OFF(DI)(CX*2); \
 	MOVL    1(BX), CX; \
-	MOVL    CX, DX; \
-	ANDL    $0xFFFFFF, DX; \
-	IMUL3L  $0x1E35A7BD, DX, DX; \
-	IMUL3L  $0x1E35A7BD, CX, CX; \
-	SHRL    $17, DX; \
-	SHRL    $16, CX; \
-	MOVL    DX, H3M; \
-	MOVL    CX, H4M; \
-	PREFETCHT0 (DI)(DX*2); \
-	PREFETCHT0 HASH4_OFF(DI)(CX*2); \
+	MOVL    CX, R11; \
+	ANDL    $0xFFFFFF, R11; \
+	IMUL3L  $0x1E35A7BD, R11, R11; \
+	IMUL3L  $0x1E35A7BD, CX, BP; \
+	SHRL    $17, R11; \
+	SHRL    $16, BP; \
+	PREFETCHT0 (DI)(R11*2); \
+	PREFETCHT0 HASH4_OFF(DI)(BP*2); \
 	CMPL R10, $4; \
 	JAE  hv; \
 	CMPQ R14, R15; \
@@ -314,12 +319,13 @@ c4: \
 	JLE  ot; \
 	PCALIGN $32; \
 l4: \
-	LEAQ    (R13)(AX*1), DX; \
+	MOVWQSX AX, DX; \
+	ADDQ    R13, DX; \
 	CMPL    (DX), SI; \
 	JEQ     cd; \
 	ANDL    $0x7FFF, AX; \
-	MOVWQSX NEXT_OFF(DI)(AX*2), AX; \
-	CMPQ    AX, R15; \
+	MOVWLZX NEXT_OFF(DI)(AX*2), AX; \
+	CMPW    AX, R15; \
 	JLE     ot; \
 	DECL    R12; \
 	JNZ     l4; \
@@ -327,22 +333,23 @@ l4: \
 hv: \
 	CMPQ AX, R15; \
 	JLE  ot; \
-	CMPL R10, BP; \
+	CMPL R10, NL; \
 	JAE  ot; \
 	MOVL (BX), SI; \
 nb: \
 	MOVL -3(BX)(R10*1), R14; \
 	PCALIGN $32; \
 l5: \
-	LEAQ (R13)(AX*1), DX; \
+	MOVWQSX AX, DX; \
+	ADDQ    R13, DX; \
 	CMPL -3(DX)(R10*1), R14; \
 	JNE  n5; \
 	CMPL (DX), SI; \
 	JEQ  cd; \
 n5: \
 	ANDL    $0x7FFF, AX; \
-	MOVWQSX NEXT_OFF(DI)(AX*2), AX; \
-	CMPQ    AX, R15; \
+	MOVWLZX NEXT_OFF(DI)(AX*2), AX; \
+	CMPW    AX, R15; \
 	JLE     ot; \
 	DECL    R12; \
 	JNZ     l5; \
@@ -364,7 +371,7 @@ cd: \
 	ADDL $32, CX; \
 e8: \
 	LEAL 8(CX), R9; \
-	CMPL R9, R11; \
+	CMPL R9, $258; \
 	JA   e1; \
 	MOVQ (DX)(CX*1), R9; \
 	XORQ (BX)(CX*1), R9; \
@@ -372,7 +379,7 @@ e8: \
 	ADDL $8, CX; \
 	JMP  e8; \
 e1: \
-	CMPL    CX, R11; \
+	CMPL    CX, $258; \
 	JAE     ed; \
 	MOVBLZX (DX)(CX*1), R9; \
 	CMPB    R9, (BX)(CX*1); \
@@ -394,22 +401,25 @@ ed: \
 	JBE  n5; \
 	MOVL CX, R10; \
 	MOVQ DX, R8; \
-	CMPL R10, BP; \
+	CMPL R10, NL; \
 	JAE  ot; \
 	ANDL    $0x7FFF, AX; \
-	MOVWQSX NEXT_OFF(DI)(AX*2), AX; \
-	CMPQ    AX, R15; \
+	MOVWLZX NEXT_OFF(DI)(AX*2), AX; \
+	CMPW    AX, R15; \
 	JLE     ot; \
 	DECL    R12; \
 	JNZ     nb; \
 ot:
 
-// hcsearch<>: in DI mf, BX strptr, R13 in_base, R10 best_len, R11 max_len,
-// R12 max_search_depth, BP nice_len, SI &next_hashes[0]; out R10 the length,
-// R8 the best match pointer (strptr if none), R13 the in_base after a slide.
-// Clobbers AX, CX, DX, SI, R9, R12 (depth_remaining), R14, R15, X0-X4;
-// preserves DI, BX, R11 and BP. No stack frame. Only hcLongestMatchAsmForTest
-// calls it; greedyLoopAsm and lazyLoopAsm expand the same macro in place.
+// func hcLongestMatchAsmForTest(mf *hcMatchfinder, in []byte, inBase *int, inNext int,
+//	bestLen, maxLen, niceLen, maxSearchDepth uint32, nextHashes *[2]uint32) (length, offset uint32)
+//
+// The HCSEARCH expansion of lazyLoopAsm, expanded here once: the next_hashes
+// words are loaded into R11 / BP (masked to their tables, the macro's entry
+// condition), max_len / nice_len are the maxLen / niceLen argument slots, and
+// the next hashes are stored back. In: DI mf, BX strptr, R13 in_base, R10
+// best_len, R12 max_search_depth; out R10 the length, R8 the best match
+// pointer (strptr if none), R13 the in_base after a slide.
 //
 // BOUNDS: preconditions (those under which the Go reference does not panic;
 // the callers keep them by construction): max_len <= len(in) - inNext;
@@ -419,12 +429,13 @@ ot:
 // in <= in_base + p < strptr.
 // Memory accesses:
 // * mf (the 262144-byte struct): the slide reads and writes bytes [0, 262144)
-//   (4096 iterations of 64 bytes); hash3Tab[next_hashes[0] & 0x7FFF] and
-//   hash4Tab[next_hashes[1] & 0xFFFF] (read and written), nextTab[curPos &
-//   0x7FFF] (written), nextTab[node & 0x7FFF] (read): every index is masked to
-//   its table. The two PREFETCHT0 touch hash3Tab[h3] / hash4Tab[h4] with h3 <
-//   2^15, h4 < 2^16 (lz_hash results); a prefetch never faults anyway.
-// * next_hashes[0..1] (read, written).
+//   (4096 iterations of 64 bytes); hash3Tab[R11] and hash4Tab[BP] (read and
+//   written; R11 < 2^15 and BP < 2^16 by the entry condition), nextTab[curPos
+//   & 0x7FFF] (written), nextTab[node & 0x7FFF] (read). The next hashes are
+//   lz_hash results (a 32-bit product shifted right by 17 / 16), so R11 <
+//   2^15 and BP < 2^16 hold again at the end. The two PREFETCHT0 touch
+//   hash3Tab[R11] / hash4Tab[BP] with those new values; a prefetch never
+//   faults anyway.
 // * in, only when max_len >= 5: the 4 bytes at strptr+1 (<= strptr+max_len)
 //   and at strptr (seq4); for a candidate m = in_base + node (node > cutoff,
 //   so m < strptr by the precondition): 4 bytes at m (length 3 and 4 checks,
@@ -434,19 +445,11 @@ ot:
 //   and strptr+n only while n+8 <= max_len, then single bytes at n < max_len.
 //   So in is read only in [m, m+max_len) with m >= &in[0] and [strptr,
 //   strptr+max_len).
+// Also (this entry) nextHashes[0..1] and *inBase (read, written back), the
+// arguments and the 8-byte frame (the assembler's BP save: BP holds
+// next_hashes[1], a general register, not a frame pointer, while inside: see
+// the file header).
 // C: hc_matchfinder_longest_match (+ lz_extend, hc_matchfinder_slide_window)
-TEXT hcsearch<>(SB), NOSPLIT|NOFRAME, $0-0
-	HCSEARCH(0(SI), 4(SI), hns, hsl, hc4, hl4, hhv, hnb, hl5, hn5, hcd, he8, he1, hd24, hd16, hd8, hdd, hed, hout)
-	RET
-
-// func hcLongestMatchAsmForTest(mf *hcMatchfinder, in []byte, inBase *int, inNext int,
-//	bestLen, maxLen, niceLen, maxSearchDepth uint32, nextHashes *[2]uint32) (length, offset uint32)
-//
-// BOUNDS: hcsearch<>'s (in_base = &in[*inBase], strptr = &in[inNext]), plus
-// *inBase (read, written back), the arguments and the 8-byte frame (the
-// assembler's BP save: BP carries nice_len, a general register, not a frame
-// pointer, while inside: see the file header).
-// C: hc_matchfinder_longest_match
 TEXT ·hcLongestMatchAsmForTest(SB), NOSPLIT, $8-80
 	MOVQ mf+0(FP), DI
 	MOVQ in_base+8(FP), R9
@@ -456,11 +459,16 @@ TEXT ·hcLongestMatchAsmForTest(SB), NOSPLIT, $8-80
 	MOVQ (AX), R13
 	ADDQ R9, R13
 	MOVL bestLen+48(FP), R10
-	MOVL maxLen+52(FP), R11
-	MOVL niceLen+56(FP), BP
 	MOVL maxSearchDepth+60(FP), R12
 	MOVQ nextHashes+64(FP), SI
-	CALL hcsearch<>(SB)
+	MOVL 0(SI), R11
+	ANDL $0x7FFF, R11
+	MOVL 4(SI), BP
+	ANDL $0xFFFF, BP
+	HCSEARCH(maxLen+52(FP), niceLen+56(FP), hns, hsl, hc4, hl4, hhv, hnb, hl5, hn5, hcd, he8, he1, hd24, hd16, hd8, hdd, hed, hout)
+	MOVQ nextHashes+64(FP), SI
+	MOVL R11, 0(SI)
+	MOVL BP, 4(SI)
 	MOVQ in_base+8(FP), R9
 	SUBQ R9, R13
 	MOVQ inBase+32(FP), AX
@@ -470,21 +478,20 @@ TEXT ·hcLongestMatchAsmForTest(SB), NOSPLIT, $8-80
 	MOVL BX, offset+76(FP)
 	RET
 
-// hcsearch258<>: hcsearch<> with the HCSEARCH258 expansion of greedyLoopAsm
-// (R11 must be 258). Only hcLongestMatch258AsmForTest calls it.
-//
-// BOUNDS: hcsearch<>'s, with max_len = 258.
-// C: hc_matchfinder_longest_match (max_len 258, as in deflate_compress_greedy)
-TEXT hcsearch258<>(SB), NOSPLIT|NOFRAME, $0-0
-	HCSEARCH258(0(SI), 4(SI), xns, xsl, xc4, xl4, xhv, xnb, xl5, xn5, xcd, xe8, xe1, xd24, xd16, xd8, xdd, xed, xout)
-	RET
-
 // func hcLongestMatch258AsmForTest(mf *hcMatchfinder, in []byte, inBase *int, inNext int,
 //	bestLen, niceLen, maxSearchDepth uint32, nextHashes *[2]uint32) (length, offset uint32)
 //
-// BOUNDS: hcLongestMatchAsmForTest's with max_len = 258 (so 258 <=
-// len(in) - inNext and niceLen <= 258).
-// C: hc_matchfinder_longest_match
+// The HCSEARCH258 expansion of greedyLoopAsm, expanded here once: the
+// next_hashes words are loaded into R11 / BP (masked to their tables, the
+// macro's entry condition), nice_len is the niceLen argument slot, and the
+// next hashes are stored back.
+//
+// BOUNDS: hcLongestMatchAsmForTest's with max_len = 258 (so 258 <= len(in) -
+// inNext and niceLen <= 258; in_base = &in[*inBase], strptr = &in[inNext]),
+// plus nextHashes[0..1] and *inBase (read, written back), the arguments and
+// the 8-byte frame (the assembler's BP save: BP holds next_hashes[1], a
+// general register, not a frame pointer, while inside: see the file header).
+// C: hc_matchfinder_longest_match (max_len 258, as in deflate_compress_greedy)
 TEXT ·hcLongestMatch258AsmForTest(SB), NOSPLIT, $8-80
 	MOVQ mf+0(FP), DI
 	MOVQ in_base+8(FP), R9
@@ -494,11 +501,16 @@ TEXT ·hcLongestMatch258AsmForTest(SB), NOSPLIT, $8-80
 	MOVQ (AX), R13
 	ADDQ R9, R13
 	MOVL bestLen+48(FP), R10
-	MOVL $258, R11
-	MOVL niceLen+52(FP), BP
 	MOVL maxSearchDepth+56(FP), R12
 	MOVQ nextHashes+64(FP), SI
-	CALL hcsearch258<>(SB)
+	MOVL 0(SI), R11
+	ANDL $0x7FFF, R11
+	MOVL 4(SI), BP
+	ANDL $0xFFFF, BP
+	HCSEARCH258(niceLen+52(FP), xns, xsl, xc4, xl4, xhv, xnb, xl5, xn5, xcd, xe8, xe1, xd24, xd16, xd8, xdd, xed, xout)
+	MOVQ nextHashes+64(FP), SI
+	MOVL R11, 0(SI)
+	MOVL BP, 4(SI)
 	MOVQ in_base+8(FP), R9
 	SUBQ R9, R13
 	MOVQ inBase+32(FP), AX
@@ -519,7 +531,7 @@ TEXT ·hcLongestMatch258AsmForTest(SB), NOSPLIT, $8-80
 #define OBS_MATCH 32
 #define OBS_NUM 80
 
-// HCSLIDE rebases the whole hc_matchfinder at DI (as in hcsearch<>);
+// HCSLIDE rebases the whole hc_matchfinder at DI (as HCSEARCH's slide);
 // clobbers DX, R9, X0-X4. lbl is a unique loop label.
 #define HCSLIDE(lbl) \
 	MOVL   $0x80008000, DX; \
@@ -557,19 +569,21 @@ lbl: \
 // in_max_block_end, seq reaches SEQ_STORE_LENGTH or ready_to_check_block holds
 // (the Go loop then runs should_end_block's do_end_block_check), or when fewer
 // bytes remain. Semantics are those of the Go loop of deflateCompressGreedy.
-// Registers across positions: DI pg, BX in_next, R13 in_cur_base, BP
-// nice_len (BP as a general register, not a frame pointer: see the file
-// header); the rest of the state is in the frame (C keeps most of it in
-// memory too: next_hashes is an array, which the search reads and writes at
-// h3-72(SP) / h4-68(SP)), and the search clobbers every other register.
+// Registers across positions: DI pg, BX in_next, R13 in_cur_base, R11 / BP
+// next_hashes[0] / [1] (as gcc keeps them; BP as a general register, not a
+// frame pointer: see the file header); the rest of the state is in the frame
+// (C keeps most of it in memory too), and the search clobbers every other
+// register.
 //
 // BOUNDS: preconditions (kept by deflateCompressGreedy): len(in) - st.inNext >=
 // 258; 0 <= st.inNext - st.inCurBase <= 32768; st.inBlockBegin <= st.inNext <
 // st.inMaxBlockEnd <= len(in); 0 <= st.seq < 50000; 1 <= st.minLen <= 258;
-// st.niceLen <= 258; the matchfinder invariant of hcsearch<>. The loop runs
-// only while in_next <= len(in) - 258 (checked before each position), so
-// the search (HCSEARCH258, R11 = 258) reads only inside in (hcsearch<>'s
-// BOUNDS, with next_hashes at h3-72(SP) / h4-68(SP)).
+// st.niceLen <= 258; the matchfinder invariant of hcLongestMatchAsmForTest's
+// BOUNDS. st.nextHash3 / st.nextHash4 are masked to 15 / 16 bits on entry
+// (HCSEARCH258's entry condition; the identity for the lz_hash values Go
+// passes). The loop runs only while in_next <= len(in) - 258 (checked before
+// each position), so the search (HCSEARCH258, max_len 258) reads only inside
+// in (hcLongestMatchAsmForTest's BOUNDS).
 // Other accesses: a literal reads in[in_next]; a skip (only if in_next +
 // length + 5 <= len(in)) reads the 4 bytes at in_next+2+i, i < length-1, all
 // before in_next+length+4 < len(in), and writes hash3Tab/hash4Tab/nextTab at
@@ -608,13 +622,14 @@ TEXT ·greedyLoopAsm(SB), NOSPLIT, $96-56
 	MOVQ CX, seqp-8(SP)
 	LEAQ GSEQ_END(DI), CX
 	MOVQ CX, seqend-48(SP)
-	MOVL 40(AX), CX
-	MOVL CX, h3-72(SP)
-	MOVL 44(AX), CX
-	MOVL CX, h4-68(SP)
+	MOVL 40(AX), R11
+	ANDL $0x7FFF, R11         // next_hashes[0] (masked: HCSEARCH258's entry condition)
+	MOVL 44(AX), BP
+	ANDL $0xFFFF, BP          // next_hashes[1]
 	MOVL 48(AX), CX
 	MOVL CX, minlen-56(SP)
-	MOVL 52(AX), BP
+	MOVL 52(AX), CX
+	MOVL CX, nicelen-64(SP)
 	MOVL 56(AX), CX
 	MOVL CX, depth-60(SP)
 
@@ -623,9 +638,8 @@ gstep:
 	JHI  gdone                // fewer than DEFLATE_MAX_MATCH_LEN bytes remain
 	MOVL minlen-56(SP), R10
 	DECL R10                  // best_len = min_len - 1
-	MOVL $258, R11
 	MOVL depth-60(SP), R12
-	HCSEARCH258(h3-72(SP), h4-68(SP), gns, gsl, gc4, gl4, ghv, gnb, gl5, gn5, gcd, ge8, ge1, gd24, gd16, gd8, gdd, ged, got)
+	HCSEARCH258(nicelen-64(SP), gns, gsl, gc4, gl4, ghv, gnb, gl5, gn5, gcd, ge8, ge1, gd24, gd16, gd8, gdd, ged, got)
 
 	// length >= min_len && (length > DEFLATE_MIN_MATCH_LEN || offset <= 4096)
 	CMPL R10, minlen-56(SP)
@@ -674,8 +688,6 @@ gmatch:
 	JHI  gskipdone            // count + 5 > in_end - (in_next + 1)
 	LEAQ 1(BX), CX
 	SUBQ R13, CX              // cur_pos
-	MOVL h3-72(SP), R14
-	MOVL h4-68(SP), R15
 	LEAQ 2(BX), SI            // the bytes hashed next
 	LEAL -1(R10), R12         // count
 
@@ -687,27 +699,23 @@ gskiploop:
 	XORL CX, CX
 
 gskipns:
-	ANDL   $0x7FFF, R14
-	MOVW   CX, (DI)(R14*2)    // hash3_tab[hash3] = cur_pos
-	ANDL   $0xFFFF, R15
-	MOVW   HASH4_OFF(DI)(R15*2), AX
+	MOVW   CX, (DI)(R11*2)    // hash3_tab[hash3] = cur_pos
+	MOVW   HASH4_OFF(DI)(BP*2), AX
 	MOVL   CX, DX
 	ANDL   $0x7FFF, DX
 	MOVW   AX, NEXT_OFF(DI)(DX*2) // next_tab[cur_pos] = hash4_tab[hash4]
-	MOVW   CX, HASH4_OFF(DI)(R15*2) // hash4_tab[hash4] = cur_pos
+	MOVW   CX, HASH4_OFF(DI)(BP*2) // hash4_tab[hash4] = cur_pos
 	MOVL   (SI), R14
 	INCQ   SI
-	MOVL   R14, R15
+	MOVL   R14, BP
 	ANDL   $0xFFFFFF, R14
-	IMUL3L $0x1E35A7BD, R14, R14
-	IMUL3L $0x1E35A7BD, R15, R15
-	SHRL   $17, R14
-	SHRL   $16, R15
+	IMUL3L $0x1E35A7BD, R14, R11
+	IMUL3L $0x1E35A7BD, BP, BP
+	SHRL   $17, R11
+	SHRL   $16, BP
 	INCL   CX
 	DECL   R12
 	JNZ    gskiploop
-	MOVL   R14, h3-72(SP)
-	MOVL   R15, h4-68(SP)
 
 gskipdone:
 	ADDQ R10, BX              // in_next += length
@@ -761,10 +769,8 @@ gdone:
 	SUBQ DX, CX
 	SHRQ $3, CX
 	MOVQ CX, 32(AX)
-	MOVL h3-72(SP), CX
-	MOVL CX, 40(AX)
-	MOVL h4-68(SP), CX
-	MOVL CX, 44(AX)
+	MOVL R11, 40(AX)
+	MOVL BP, 44(AX)
 	RET
 
 // The lazy loop's frame slots (seqp, freqs and stats at the greedy loop's
@@ -773,9 +779,7 @@ gdone:
 // nice_len and next_hashes from the frame (R10 best_len and R12 depth set by
 // the caller).
 #define LSEARCH(ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16, d8, dd, ed, ot) \
-	MOVL maxlen-80(SP), R11; \
-	MOVL nicelen-84(SP), BP; \
-	HCSEARCH(h3-72(SP), h4-68(SP), ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16, d8, dd, ed, ot)
+	HCSEARCH(maxlen-80(SP), nicelen-84(SP), ns, sl, c4, l4, hv, nb, l5, n5, cd, e8, e1, d24, d16, d8, dd, ed, ot)
 
 // LADJUST: adjust_max_and_nice_len(max_len, nice_len, in_end - in_next).
 #define LADJUST(lbl) \
@@ -867,8 +871,6 @@ lbl:
 	JHI    dn; \
 	MOVQ   BX, CX; \
 	SUBQ   R13, CX; \
-	MOVL   h3-72(SP), R14; \
-	MOVL   h4-68(SP), R15; \
 	LEAQ   1(BX), SI; \
 lp: \
 	CMPL   CX, $0x8000; \
@@ -897,27 +899,23 @@ sl: \
 	ADDQ   $0x8000, R13; \
 	XORL   CX, CX; \
 ns: \
-	ANDL   $0x7FFF, R14; \
-	MOVW   CX, (DI)(R14*2); \
-	ANDL   $0xFFFF, R15; \
-	MOVW   HASH4_OFF(DI)(R15*2), AX; \
+	MOVW   CX, (DI)(R11*2); \
+	MOVW   HASH4_OFF(DI)(BP*2), AX; \
 	MOVL   CX, DX; \
 	ANDL   $0x7FFF, DX; \
 	MOVW   AX, NEXT_OFF(DI)(DX*2); \
-	MOVW   CX, HASH4_OFF(DI)(R15*2); \
+	MOVW   CX, HASH4_OFF(DI)(BP*2); \
 	MOVL   (SI), R14; \
 	INCQ   SI; \
-	MOVL   R14, R15; \
+	MOVL   R14, BP; \
 	ANDL   $0xFFFFFF, R14; \
-	IMUL3L $0x1E35A7BD, R14, R14; \
-	IMUL3L $0x1E35A7BD, R15, R15; \
-	SHRL   $17, R14; \
-	SHRL   $16, R15; \
+	IMUL3L $0x1E35A7BD, R14, R11; \
+	IMUL3L $0x1E35A7BD, BP, BP; \
+	SHRL   $17, R11; \
+	SHRL   $16, BP; \
 	INCL   CX; \
 	DECL   R12; \
 	JNZ    lp; \
-	MOVL   R14, h3-72(SP); \
-	MOVL   R15, h4-68(SP); \
 dn: \
 	MOVL   cnt-108(SP), CX; \
 	ADDQ   CX, BX
@@ -938,19 +936,20 @@ dn: \
 // seq reaches SEQ_STORE_LENGTH or ready_to_check_block holds (the Go loop
 // then evaluates should_end_block). Semantics are those of the Go loop of
 // deflateCompressLazyGeneric. Registers across positions: DI pg, BX in_next,
-// R13 in_cur_base; BP carries nice_len into each search (a general register,
+// R13 in_cur_base, R11 / BP next_hashes[0] / [1] (BP a general register,
 // not a frame pointer: see the file header); the rest of the state is in the
-// frame.
+// frame (max_len / nice_len are the searches' memory operands).
 //
 // BOUNDS: preconditions (kept by deflateCompressLazyGeneric): st.inNext <
 // st.nextRecalcMinLen; 0 <= st.inNext - st.inCurBase <= 32768;
 // st.inBlockBegin <= st.inNext < st.inMaxBlockEnd <= len(in); 0 <= st.seq <
 // 50000; 1 <= st.minLen; st.niceLen <= st.maxLen <= 258; st.maxLen <=
 // len(in) - st.inNext or st.maxLen = 258; the matchfinder invariant of
-// hcsearch<>. Each search runs after LADJUST, so max_len <= len(in) - in_next
-// and nice_len <= max_len (hcsearch<>'s preconditions; its BOUNDS give the
-// accesses of each LSEARCH expansion, next_hashes at h3-72(SP) /
-// h4-68(SP)). A look-ahead search is at most at in_next+2 with a current
+// hcLongestMatchAsmForTest's BOUNDS; st.nextHash3 / st.nextHash4 are masked
+// on entry as in greedyLoopAsm. Each search runs after LADJUST, so max_len <=
+// len(in) - in_next and nice_len <= max_len (the search's preconditions;
+// hcLongestMatchAsmForTest's BOUNDS give the accesses of each LSEARCH
+// expansion). A look-ahead search is at most at in_next+2 with a current
 // match of length >= 3 <= max_len before it, so in_next < len(in) there.
 // Other accesses: a literal reads in[in_next-3 .. in_next] (positions already
 // passed); a skip of count bytes (only if in_next + count + 5 <= len(in))
@@ -992,10 +991,10 @@ TEXT ·lazyLoopAsm(SB), NOSPLIT, $112-56
 	MOVQ CX, seqp-8(SP)
 	LEAQ GSEQ_END(DI), CX
 	MOVQ CX, seqend-48(SP)
-	MOVL 48(AX), CX
-	MOVL CX, h3-72(SP)
-	MOVL 52(AX), CX
-	MOVL CX, h4-68(SP)
+	MOVL 48(AX), R11
+	ANDL $0x7FFF, R11         // next_hashes[0] (masked: HCSEARCH's entry condition)
+	MOVL 52(AX), BP
+	ANDL $0xFFFF, BP          // next_hashes[1]
 	MOVL 56(AX), CX
 	MOVL CX, minlen-76(SP)
 	MOVL 60(AX), CX
@@ -1128,10 +1127,8 @@ ldone:
 	SUBQ DX, CX
 	SHRQ $3, CX
 	MOVQ CX, 40(AX)
-	MOVL h3-72(SP), CX
-	MOVL CX, 48(AX)
-	MOVL h4-68(SP), CX
-	MOVL CX, 52(AX)
+	MOVL R11, 48(AX)
+	MOVL BP, 52(AX)
 	MOVL maxlen-80(SP), CX
 	MOVL CX, 60(AX)
 	MOVL nicelen-84(SP), CX

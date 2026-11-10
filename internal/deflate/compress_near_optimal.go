@@ -159,12 +159,45 @@ func (c *Compressor) findMinCostPath(blockLength uint32, cacheEnd int) {
 	ns := c.pnState
 	nodes := ns.optimumNodes[:]
 	cache := ns.matchCache[:]
-	costs := &ns.costs
 	slotFull := c.offsetSlotFull
 	cur := int(blockLength)
 	cp := cacheEnd
 
 	nodes[cur].costToEnd = 0
+	if useMinCostPathAsm && cur >= 1 && cur < len(nodes) && cp >= 0 && cp <= len(cache) {
+		// The loop below in assembly, at most minCostPathMaxPositions
+		// positions per call (the call is not preemptible).
+		for cur > 0 {
+			stop := max(cur-minCostPathMaxPositions, 0)
+			cp = minCostPathAsm(ns, slotFull, cur, cp, stop)
+			cur = stop
+		}
+	} else {
+		c.findMinCostPathGo(cur, cp)
+	}
+
+	c.resetSymbolFrequencies()
+	c.tallyItemList(blockLength)
+	deflateMakeHuffmanCodes(&c.freqs, &c.codes)
+}
+
+// minCostPathMaxPositions bounds the work of one minCostPathAsm call (it is
+// not preemptible): at most this many positions, each with at most
+// MAX_MATCHES_PER_POS matches and DEFLATE_MAX_MATCH_LEN - 2 lengths. An
+// estimate, measured once (T17.1): a call over 1024 positions of 256
+// one-length matches each, the worst work per call, took 0.33 ms.
+const minCostPathMaxPositions = 1024
+
+// findMinCostPathGo is the backward pass of findMinCostPath from node cur
+// (its costToEnd set) to node 0 with the match cache entries before cp: the
+// Go reference of minCostPathAsm and its fallback. port of the loop of
+// deflate_find_min_cost_path
+func (c *Compressor) findMinCostPathGo(cur, cp int) {
+	ns := c.pnState
+	nodes := ns.optimumNodes[:]
+	cache := ns.matchCache[:]
+	costs := &ns.costs
+	slotFull := c.offsetSlotFull
 	for {
 		cur--
 		cp--
@@ -213,10 +246,6 @@ func (c *Compressor) findMinCostPath(blockLength uint32, cacheEnd int) {
 			break
 		}
 	}
-
-	c.resetSymbolFrequencies()
-	c.tallyItemList(blockLength)
-	deflateMakeHuffmanCodes(&c.freqs, &c.codes)
 }
 
 // optimizeAndFlushBlock chooses the literals and matches of the block (the
