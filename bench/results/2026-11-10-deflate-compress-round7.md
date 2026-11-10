@@ -251,3 +251,10 @@ OVERALL: FAIL
 | 12 | 13 | 119.8% | 106.5% (nci/whole) | PASS |
 
 OVERALL: PASS
+
+## Addendum: independent confirmation
+
+A later independent re-run at HEAD (`2026-11-10-deflate-confirm-head.md`, three runs) reproduced L1, L3, L6 and L9 within
+0.3 geomean points, but measured L12 at 109.3-109.8% instead of the 119.8% above (C speeds identical, Go L12 5-15% lower
+on every file). The L12 figure above is therefore not confirmed; use about 110% (lowest row 100.0-102.8%). The gate still
+passes at L12.

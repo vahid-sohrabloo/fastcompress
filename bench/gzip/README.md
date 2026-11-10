@@ -141,11 +141,12 @@ so both sides decode the same input. For the `-noasm` row, build with `compare.s
 - Decompression: geomean 100.2-100.6% of libdeflate at levels 1, 6, 9 and 12, lowest row 96.9%; gate passed by a
   0.2-0.6 point margin that depends on the fast loop's code alignment (tuned on this CPU):
   `bench/results/2026-11-09-deflate-decode-round2-recheck.md`.
-- Compression (round 7): geomean 103.6% (L1), 101.6% (L3), 102.1% (L6), 102.8% (L9), 119.8% (L12); the gate
+- Compression (round 7): geomean 103.6% (L1), 101.6% (L3), 102.1% (L6), 102.8% (L9), about 110% (L12; round 7 measured 119.8%, the independent confirmation run 109.3-109.8%); the gate
   (geomean >= 100%, every row >= 95%, none below 90%) passes at every level. Lowest rows: L1 99.6% (x-ray, the only
-  row below 100%), L3 100.1% (mozilla), L6 101.4% (samba), L9 101.2% (xml), L12 106.5% (nci). The slow L12 rows
+  row below 100%), L3 100.1% (mozilla), L6 101.4% (samba), L9 101.2% (xml), L12 100.0-106.5% (nci). The slow L12 rows
   carry about +-2-3 points of rounding. Compressed sizes match libdeflate in all 65 rows:
-  `bench/results/2026-11-10-deflate-compress-round7.md`. Older rounds, kept as history (all failed the gate):
+  `bench/results/2026-11-10-deflate-compress-round7.md`, confirmed at HEAD in
+  `bench/results/2026-11-10-deflate-confirm-head.md` (L1-L9 and decode reproduce within 0.3 points; L12 does not). Older rounds, kept as history (all failed the gate):
   `bench/results/2026-11-08-deflate-compress-round5.md` (geomean 94.7-99.1%, L12 lowest row 81.8%) and the
   other `bench/results/*deflate-compress*` files.
 - Results come from one CPU; expect other CPUs to differ.

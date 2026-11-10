@@ -130,9 +130,9 @@
 // libdeflate's (geometric mean 100.2-100.6% at levels 1, 6, 9 and 12, a
 // margin that depends on code layout), and compression is as fast or
 // faster: geometric means of 103.6% (level 1), 101.6% (level 3), 102.1%
-// (level 6), 102.8% (level 9) and 119.8% (level 12) of libdeflate's
-// speed, with every one of the 13 inputs per level at 99.6% or more
-// (the lowest is x-ray at level 1, 99.6%; the slow level 12 rows carry
+// (level 6), 102.8% (level 9) and about 110% (level 12) of libdeflate's
+// speed, with every one of the 13 inputs per level at 99.4% or more
+// (the lowest is x-ray at level 1, 99.5-99.6%; the slow level 12 rows carry
 // about 2-3 points of rounding). The compression gate (geometric mean at
 // least 100%, every row at least 95%, none below 90%) is met at every
 // measured level. Results come from one CPU; expect other CPUs to differ.

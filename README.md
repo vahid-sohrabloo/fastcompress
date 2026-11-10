@@ -171,12 +171,12 @@ percentage of libdeflate's:
   | 3 | 101.6% | 100.1% (mozilla) |
   | 6 | 102.1% | 101.4% (samba) |
   | 9 | 102.8% | 101.2% (xml) |
-  | 12 | 119.8% | 106.5% (nci) |
+  | 12 | about 110% | 100.0-106.5% (nci) |
 
   The project's gate (geomean >= 100%, every row >= 95%, no row below
   90%) is met for compression at all five measured levels: every
-  geomean is above 100% and no row is below 99.6%. The one row below
-  100% is x-ray at level 1 (99.6%). The slow level 12 rows (nci 3.3,
+  geomean is above 100% and no row is below 99.4%. The rows below
+  100% are x-ray at level 1 (99.5-99.6%) and, in the larger confirmation set, tar/16K at level 3 (99.4%). The slow level 12 rows (nci 3.3,
   xml 4.1 MB/s) carry about +-2-3 points of rounding in "% of C". The
   compressed output is byte-identical to libdeflate's in all 65 rows.
 
