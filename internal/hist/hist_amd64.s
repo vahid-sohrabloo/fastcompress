@@ -2,30 +2,23 @@
 
 #include "textflag.h"
 
-// COUNT8(r): count the 8 bytes of r (AX or BX) into tables 0-3, byte i
-// into table i%4, as gcc compiles C's loop: the second byte of each pair
-// is read from the high-byte register (AH/BH), so a pair costs one shift.
-// Clobbers r, CX, DX.
-#define COUNT8(r, rh) \
-	MOVBLZX r, CX; \
-	MOVBLZX rh, DX; \
+// COUNT4(off, w, wh): count the 4 bytes at off(SI) into tables 0-3, byte i
+// into table i. The word is loaded with a 32-bit load, as C's
+// HIST_count_parallel_wksp does, so the four words of an iteration are
+// independent loads; the second byte is read from the high-byte register
+// (wh = AH or BH). Clobbers w, CX, DX.
+#define COUNT4(off, w, wh) \
+	MOVL    off(SI), w; \
+	MOVBLZX w, CX; \
+	MOVBLZX wh, DX; \
 	INCL    (DI)(CX*4); \
 	INCL    1024(DI)(DX*4); \
-	SHRQ    $16, r; \
-	MOVBLZX r, CX; \
-	MOVBLZX rh, DX; \
+	MOVL    w, CX; \
+	SHRL    $24, w; \
+	SHRL    $16, CX; \
+	MOVBLZX CL, CX; \
 	INCL    2048(DI)(CX*4); \
-	INCL    3072(DI)(DX*4); \
-	SHRQ    $16, r; \
-	MOVBLZX r, CX; \
-	MOVBLZX rh, DX; \
-	INCL    (DI)(CX*4); \
-	INCL    1024(DI)(DX*4); \
-	SHRQ    $16, r; \
-	MOVBLZX r, CX; \
-	MOVBLZX rh, DX; \
-	INCL    2048(DI)(CX*4); \
-	INCL    3072(DI)(DX*4)
+	INCL    3072(DI)(w*4)
 
 // func countStripesAsm(ws *[1024]uint32, src *byte, n int)
 TEXT ·countStripesAsm(SB), NOSPLIT, $0-24
@@ -38,11 +31,11 @@ loop16:
 	LEAQ 16(SI), AX
 	CMPQ AX, R8
 	JHI  tail
-	MOVQ (SI), AX
-	MOVQ 8(SI), BX
+	COUNT4(0, AX, AH)
+	COUNT4(4, BX, BH)
+	COUNT4(8, AX, AH)
+	COUNT4(12, BX, BH)
 	ADDQ $16, SI
-	COUNT8(AX, AH)
-	COUNT8(BX, BH)
 	JMP  loop16
 
 tail:
