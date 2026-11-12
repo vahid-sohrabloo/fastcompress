@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compare gobench (this port) against `zstd -b<level>` from C zstd v1.5.7.
 #
-#   bench/compare.sh [-mode c|d] [-l "1 3 7 11"] [-f "FILE[:BLOCK]..."] [-i SECS] [-g SECS] [-n RUNS] [-hp "7 11"] -label NAME
+#   bench/compare.sh [-mode c|d] [-l "1 3 7 11"] [-f "FILE[:BLOCK]..."] [-i SECS] [-g SECS] [-n RUNS] [-hp "7 11"] [-k] -label NAME
 #
 # Writes bench/results/<date>-<label>.md. Each row: taskset -c $CPU, RUNS
 # (default 3) interleaved C/Go runs, median speed reported. Both sides report
@@ -11,6 +11,11 @@
 # flagged "MISMATCH" (the port must be byte-identical, so ratios must be equal).
 # -hp LEVELS adds, for those levels, a third interleaved run per round with
 # gobench -hugepages (WithHugePages) and two more columns; "-" elsewhere.
+# -k adds klauspost/compress/zstd (bench/zstd, a nested module) as a third
+# interleaved run per round, with three more columns (MB/s, % of C, ratio).
+# Its output is not C's, so its ratio is shown, never compared; its levels are
+# its own named levels (fastest/default/better/best), not C's. With -mode d it
+# decodes the frames our (C-identical) encoder produced, the same bytes C decodes.
 # -mode d compares decompression speed (zstd -b's third number, gobench -mode d)
 # instead of compression (-mode c, the default).
 set -euo pipefail
@@ -23,6 +28,7 @@ CSECS=5   # zstd -i: seconds per benchmark pass (it times compression and decomp
 GSECS=5   # gobench -secs: minimum seconds of timed passes (same budget as zstd -i)
 RUNS=3
 HPLEVELS=""
+KP=""
 MODE=c
 CPU=${CPU:-2}
 while [ $# -gt 0 ]; do
@@ -33,6 +39,7 @@ while [ $# -gt 0 ]; do
     -g) GSECS=$2; shift 2 ;;
     -n) RUNS=$2; shift 2 ;;
     -hp) HPLEVELS=$2; shift 2 ;;
+    -k) KP=1; shift ;;
     -mode) MODE=$2; shift 2 ;;
     -label) LABEL=$2; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -40,13 +47,14 @@ while [ $# -gt 0 ]; do
 done
 case "$MODE" in c|d) ;; *) echo "-mode must be c or d" >&2; exit 2 ;; esac
 [ "$MODE" = c ] || [ -z "$HPLEVELS" ] || { echo "-hp applies to -mode c only" >&2; exit 2; }
-[ -n "$LABEL" ] || { echo "usage: $0 [-mode c|d] [-l \"1 3\"] [-f FILES] [-i SECS] [-g SECS] [-n RUNS] [-hp \"7 11\"] -label NAME" >&2; exit 2; }
+[ -n "$LABEL" ] || { echo "usage: $0 [-mode c|d] [-l \"1 3\"] [-f FILES] [-i SECS] [-g SECS] [-n RUNS] [-hp \"7 11\"] [-k] -label NAME" >&2; exit 2; }
 
 ZSTD=ref/zstd/programs/zstd
 [ -x "$ZSTD" ] || { echo "missing $ZSTD; run ref/fetch.sh" >&2; exit 1; }
 BIN=$(mktemp -d)
 trap 'rm -rf "$BIN"' EXIT
 go build -o "$BIN/gobench" ./bench/cmd/gobench
+[ -z "$KP" ] || (cd bench/zstd && go build -o "$BIN/zstdbench" .)
 
 # "file:block" entries; block 0 = whole file.
 SPECS=()
@@ -81,8 +89,13 @@ c_bench() { # level block file -> "MBps xRatio"
 go_bench() { # level block file [flags] -> "MBps ratio" ; non-zero exit on failure
   taskset -c "$CPU" "$BIN/gobench" -mode "$MODE" -level "$1" -block "$2" -secs "$GSECS" "${@:4}" "$3"
 }
+kp_bench() { # level block file -> "MBps ratio"
+  taskset -c "$CPU" "$BIN/zstdbench" -lib klauspost -mode "$MODE" -level "$1" -block "$2" -secs "$GSECS" "$3"
+}
 median() { sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
 
+KH=""; KS=""
+[ -z "$KP" ] || { KH=" klauspost MB/s | klauspost % of C | klauspost ratio |"; KS="---|---|---|"; }
 OUT=bench/results/$(date +%F)-$LABEL.md
 mkdir -p bench/results
 {
@@ -95,20 +108,22 @@ mkdir -p bench/results
   else
     echo "- median of $RUNS interleaved runs per cell; MB/s = 1e6 bytes/s of input (compression only)"
   fi
+  if [ -n "$KP" ]; then echo "- klauspost: \`bench/zstd -lib klauspost\` (same method; its own named levels; ratio shown, not comparable)"; fi
   echo
   if [ "$MODE" = d ]; then
-    echo "| file | level | block | C D-MB/s | Go D-MB/s | % of C | C ratio | Go ratio |"
-    echo "|---|---|---|---|---|---|---|---|"
+    echo "| file | level | block | C D-MB/s | Go D-MB/s | % of C | C ratio | Go ratio |${KH}"
+    echo "|---|---|---|---|---|---|---|---|${KS}"
   elif [ -n "$HPLEVELS" ]; then
-    echo "| file | level | block | C MB/s | Go MB/s | % of C | Go huge pages MB/s | huge pages % of C | C ratio | Go ratio |"
-    echo "|---|---|---|---|---|---|---|---|---|---|"
+    echo "| file | level | block | C MB/s | Go MB/s | % of C | Go huge pages MB/s | huge pages % of C | C ratio | Go ratio |${KH}"
+    echo "|---|---|---|---|---|---|---|---|---|---|${KS}"
   else
-    echo "| file | level | block | C MB/s | Go MB/s | % of C | C ratio | Go ratio |"
-    echo "|---|---|---|---|---|---|---|---|"
+    echo "| file | level | block | C MB/s | Go MB/s | % of C | C ratio | Go ratio |${KH}"
+    echo "|---|---|---|---|---|---|---|---|${KS}"
   fi
 } > "$OUT"
 
 PCTS=()
+KPCTS=()
 for spec in "${SPECS[@]}"; do
   f=${spec%:*}; blk=${spec##*:}
   bname=$(basename "$f"); blabel=whole
@@ -120,7 +135,7 @@ for spec in "${SPECS[@]}"; do
     if ! probe=$(go_bench "$lvl" "$blk" "$f" 2>&1); then
       echo "gobench failed: $probe" >&2; exit 1
     fi
-    cs=(); gs=(); hs=(); cr=""; gr=""; hp=""
+    cs=(); gs=(); hs=(); ks=(); kr=""; cr=""; gr=""; hp=""
     case " $HPLEVELS " in *" $lvl "*) hp=1 ;; esac
     for ((r = 0; r < RUNS; r++)); do
       read -r cm cr <<<"$(c_bench "$lvl" "$blk" "$f")"
@@ -128,6 +143,11 @@ for spec in "${SPECS[@]}"; do
       [ -n "$cm" ] && [ -n "$cr" ] || { echo "could not parse zstd -b output for $f" >&2; exit 1; }
       [ -n "$gm" ] && [ -n "$gr" ] || { echo "could not parse gobench output for $f" >&2; exit 1; }
       cs+=("$cm"); gs+=("$gm")
+      if [ -n "$KP" ]; then
+        read -r km kr <<<"$(kp_bench "$lvl" "$blk" "$f")"
+        [ -n "$km" ] && [ -n "$kr" ] || { echo "could not parse zstdbench output for $f" >&2; exit 1; }
+        ks+=("$km")
+      fi
       if [ -n "$hp" ]; then
         read -r hm hr <<<"$(go_bench "$lvl" "$blk" "$f" -hugepages)"
         [ "$hr" = "$gr" ] || { echo "huge-page ratio $hr differs from $gr for $f" >&2; exit 1; }
@@ -138,16 +158,23 @@ for spec in "${SPECS[@]}"; do
     gmed=$(printf '%s\n' "${gs[@]}" | median)
     pct=$(awk -v g="$gmed" -v c="$cmed" 'BEGIN{printf "%.1f", 100*g/c}')
     PCTS+=("$pct")
+    kcols=""
+    if [ -n "$KP" ]; then
+      kmed=$(printf '%s\n' "${ks[@]}" | median)
+      kpct=$(awk -v g="$kmed" -v c="$cmed" 'BEGIN{printf "%.1f", 100*g/c}')
+      KPCTS+=("$kpct")
+      kcols=" $kmed | $kpct% | $kr |"
+    fi
     cr=${cr#x}; flag=""
     [ "$cr" = "$gr" ] || flag=" MISMATCH"
     if [ -z "$HPLEVELS" ]; then
-      echo "| $bname | $lvl | $blabel | $cmed | $gmed | $pct% | $cr | $gr$flag |" >> "$OUT"
+      echo "| $bname | $lvl | $blabel | $cmed | $gmed | $pct% | $cr | $gr$flag |${kcols}" >> "$OUT"
     elif [ -n "$hp" ]; then
       hmed=$(printf '%s\n' "${hs[@]}" | median)
       hpct=$(awk -v g="$hmed" -v c="$cmed" 'BEGIN{printf "%.1f", 100*g/c}')
-      echo "| $bname | $lvl | $blabel | $cmed | $gmed | $pct% | $hmed | $hpct% | $cr | $gr$flag |" >> "$OUT"
+      echo "| $bname | $lvl | $blabel | $cmed | $gmed | $pct% | $hmed | $hpct% | $cr | $gr$flag |${kcols}" >> "$OUT"
     else
-      echo "| $bname | $lvl | $blabel | $cmed | $gmed | $pct% | - | - | $cr | $gr$flag |" >> "$OUT"
+      echo "| $bname | $lvl | $blabel | $cmed | $gmed | $pct% | - | - | $cr | $gr$flag |${kcols}" >> "$OUT"
     fi
   done
 done
@@ -155,6 +182,10 @@ done
 if [ ${#PCTS[@]} -gt 0 ]; then
   geo=$(printf '%s\n' "${PCTS[@]}" | awk '{s+=log($1); n++} END{printf "%.1f", exp(s/n)}')
   { echo; echo "Geometric mean of % of C over ${#PCTS[@]} rows: **$geo%**"; } >> "$OUT"
+  if [ -n "$KP" ]; then
+    kgeo=$(printf '%s\n' "${KPCTS[@]}" | awk '{s+=log($1); n++} END{printf "%.1f", exp(s/n)}')
+    { echo; echo "Geometric mean of klauspost % of C over ${#KPCTS[@]} rows: **$kgeo%**"; } >> "$OUT"
+  fi
 fi
 echo "wrote $OUT" >&2
 cat "$OUT"
