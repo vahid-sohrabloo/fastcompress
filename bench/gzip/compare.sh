@@ -177,10 +177,10 @@ for spec in "${SPECS[@]}"; do FILELIST+="$(basename "${spec%:*}"):$(blocklabel "
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-# -mode d with ours writes the libdeflate streams of one row to $TMP/z.bin: about the size of the largest
+# -mode d with a Go library writes the libdeflate streams of one row to $TMP/z.bin: about the size of the largest
 # input (level 0 slightly more; 16K blocks of the 212 MB silesia.tar give ~13k blocks, ~212 MB). Set TMPDIR
 # to a roomy filesystem if /tmp is small.
-if has_lib ours && [[ " $MODES " == *" d "* ]]; then
+if { has_lib ours || has_lib stdlib || has_lib klauspost; } && [[ " $MODES " == *" d "* ]]; then
   BIGGEST=0
   for spec in "${SPECS[@]}"; do sz=$(stat -c %s "${spec%:*}"); [ "$sz" -le "$BIGGEST" ] || BIGGEST=$sz; done
   NEED=$((BIGGEST + BIGGEST / 50 + 1048576))
@@ -208,9 +208,9 @@ run_cell() { # lib mode level block file [cpuprofile-path (ours only)]
   case "$lib" in
     ld) cmd=("$LDBENCH" -mode "$mode" -level "$lvl" -secs "$CSECS" "${bargs[@]}" -format "$FORMAT" "$file") ;;
     ours|stdlib|klauspost)
-      # ours -mode d decodes the libdeflate streams dumped by dump_z (the same
-      # bytes the C side decodes); ours -mode c compresses itself.
-      [ "$lib" != ours ] || [ "$mode" != d ] || bargs+=(-zin "$TMP/z.bin")
+      # -mode d: every Go library decodes the libdeflate streams dumped by dump_z
+      # (the same bytes the C side decodes); -mode c compresses itself.
+      [ "$mode" != d ] || bargs+=(-zin "$TMP/z.bin")
       [ -z "$prof" ] || bargs+=(-cpuprofile "$prof")
       cmd=("$GZ" -lib "$lib" -mode "$mode" -level "$lvl" -secs "$GSECS" "${bargs[@]}" -format "$FORMAT" "$file") ;;
     isal) cmd=("$ISAL" -lib isal -mode "$mode" -level "$lvl" -secs "$CSECS" "$file") ;;
@@ -268,7 +268,7 @@ for mode in $MODES; do
       for lib in ld ours stdlib klauspost isal; do RAT[$lib]=""; SZ[$lib]=""; SPEEDS[$lib]=""; done
       ours_na=""
       case " $OURS_NP_MODES " in *" $mode "*) ours_np=1 ;; *) ours_np="" ;; esac
-      if [ "$mode" = d ] && [ -z "$ours_np" ] && has_lib ours; then dump_z "$lvl" "$blk" "$f"; fi
+      if [ "$mode" = d ] && { has_lib ours || has_lib stdlib || has_lib klauspost; }; then dump_z "$lvl" "$blk" "$f"; fi
       for ((r = 0; r < RUNS; r++)); do
         for lib in ld ours stdlib klauspost isal; do
           has_lib "$lib" || continue
@@ -356,7 +356,7 @@ mkdir -p "$(dirname "$OUT")"
   echo "- timing: windows of ~1 s sized by loops, window mean per pass, windows < 0.5 s discarded, best window; MB/s = 1e6 bytes of uncompressed data per second; -block B = independent B-byte blocks on one reused (de)compressor"
   echo "- stdlib/klauspost: same numeric level for 1..9; \`-\` for levels 0 and 10..12 (no equivalent); ISA-L: levels 0..3, whole files"
   if has_lib ours; then
-    echo "- ours compresses and decompresses (raw and gzip, levels 0..12): for -mode c ours compresses the input itself (identity = exact byte count against C); for -mode d the compressed input is the libdeflate stream of the same level and blocks (ldbench -dumpz), decoded by both C and ours; the round trip is verified before timing"
+    echo "- ours compresses and decompresses (raw and gzip, levels 0..12): for -mode c ours compresses the input itself (identity = exact byte count against C); for -mode d the compressed input is the libdeflate stream of the same level and blocks (ldbench -dumpz), decoded by C and by every Go library; the round trip is verified before timing"
   fi
   [ -z "$OURS_NP_MODES" ] || echo "- **ours not ported for -mode${OURS_NP_MODES} -format $FORMAT: those Go cells are n/a and that gate is skipped (no rows)**"
   [ -z "$OURS_NA_LEVELS" ] || echo "- ours not ported (n/a) at levels:$OURS_NA_LEVELS"
