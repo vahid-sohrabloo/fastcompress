@@ -11,6 +11,7 @@
 # flagged "MISMATCH" (the port must be byte-identical, so ratios must be equal).
 # -hp LEVELS adds, for those levels, a third interleaved run per round with
 # gobench -hugepages (WithHugePages) and two more columns; "-" elsewhere.
+# PREBUILT=DIR in the environment uses DIR/gobench and DIR/zstdbench instead of go build.
 # -k adds klauspost/compress/zstd (bench/zstd, a nested module) as a third
 # interleaved run per round, with three more columns (MB/s, % of C, ratio).
 # Its output is not C's, so its ratio is shown, never compared; its levels are
@@ -53,8 +54,15 @@ ZSTD=ref/zstd/programs/zstd
 [ -x "$ZSTD" ] || { echo "missing $ZSTD; run ref/fetch.sh" >&2; exit 1; }
 BIN=$(mktemp -d)
 trap 'rm -rf "$BIN"' EXIT
-go build -o "$BIN/gobench" ./bench/cmd/gobench
-[ -z "$KP" ] || (cd bench/zstd && go build -o "$BIN/zstdbench" .)
+if [ -n "${PREBUILT:-}" ]; then
+  # PREBUILT=DIR: use DIR/gobench (and DIR/zstdbench with -k) instead of building
+  # them, for a machine without a Go toolchain.
+  cp "$PREBUILT/gobench" "$BIN/gobench"
+  [ -z "$KP" ] || cp "$PREBUILT/zstdbench" "$BIN/zstdbench"
+else
+  go build -o "$BIN/gobench" ./bench/cmd/gobench
+  [ -z "$KP" ] || (cd bench/zstd && go build -o "$BIN/zstdbench" .)
+fi
 
 # "file:block" entries; block 0 = whole file.
 SPECS=()
