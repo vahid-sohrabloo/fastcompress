@@ -12,7 +12,7 @@ Status: work in progress.
 - **Phase 2, the decoder, is done:** `NewReader`, `Decoder` (`DecodeAll`,
   the streaming reader), the dictionary and trainer functions, and the zip and
   snappy helpers. Every identifier of `klauspost/compress/zstd` is exported.
-  Compression is at 99.2% and decompression at 101.9% of C libzstd v1.5.7's
+  Compression is at 100.3% and decompression at 102.6% of C libzstd v1.5.7's
   speed overall (see [zstd speed](#zstd-speed)).
 
 ## Encoder output
@@ -239,11 +239,11 @@ right is better.
 
 | level | % of C's speed (geomean) | lowest row |
 |---|---|---|
-| 1 | 95.5% | 91.5% (samba) |
-| 3 | 97.9% | 86.9% (xml) |
-| 7 | 99.9% | 92.1% (`silesia.tar`, 1 MiB blocks) |
-| 11 | 103.7% | 92.7% (`silesia.tar`, 1 MiB blocks) |
-| all | 99.2% | |
+| 1 | 96.4% | 91.3% (ooffice) |
+| 3 | 98.8% | 95.0% (sao) |
+| 7 | 101.3% | 90.1% (`silesia.tar`, 128 KiB blocks) |
+| 11 | 105.0% | 97.3% (osdb) |
+| all | 100.3% | |
 
 ![zstd decompression: % of C](bench/img/zstd-decompress.svg)
 
@@ -253,15 +253,29 @@ percentage of C's speed:
 
 | level | ours | klauspost |
 |---|---|---|
-| 1 | 101.1% | 83.1% |
-| 3 | 102.6% | 88.7% |
-| 7 | 101.4% | 84.3% |
-| 11 | 102.5% | 85.1% |
-| all | 101.9% | 85.3% |
+| 1 | 102.1% | 83.5% |
+| 3 | 103.4% | 88.1% |
+| 7 | 102.3% | 86.1% |
+| 11 | 102.4% | 86.4% |
+| all | 102.6% | 86.0% |
 
-Our lowest decompression row is `silesia.tar` in 16 KiB blocks at level 7
-(83.8%); the 16 KiB rows are our weakest. klauspost falls to about 66% of
-C on the 128 KiB and 16 KiB rows.
+Our lowest decompression row is `mozilla` at level 7 (91.0%). klauspost
+falls to about 66% of C on the 128 KiB and 16 KiB rows.
+
+**Higher levels (13 to 22).** Ported from C as well (btultra, btultra2, the
+post-block splitter and long-distance matching), reached with
+`WithEncoderZstdLevel`; the output is C's. Speed as a percentage of C's, on
+four inputs (xml, dickens, ooffice and `silesia.tar` in 1 MiB blocks):
+
+| level | compression | decompression |
+|---|---|---|
+| 13 | 82-100% | 99-105% |
+| 16 | 106-116% | 101-103% |
+| 19 | 72-94% | 96-103% |
+| 22 | 71-80% | 102-105% |
+
+Levels 19 and 22 are our slowest: their parser (btultra2) runs in Go, while
+the faster levels' parser also has assembly.
 
 Expect other CPUs to give different numbers. The charts are drawn from the
 `bench/compare.sh` output by `bench/plot.py`.
