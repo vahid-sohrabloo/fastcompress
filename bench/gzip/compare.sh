@@ -9,6 +9,7 @@
 #
 # Writes bench/results/<date>-gzip-<label>.md, or -o PATH (a relative PATH is
 # relative to the repository root). Needs bash >= 4.4. See README.md.
+# PREBUILT=DIR in the environment uses DIR/gzbench instead of go build.
 set -euo pipefail
 if ! { [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }; }; then
   echo "bash >= 4.4 required" >&2; exit 2
@@ -193,7 +194,13 @@ fi
 if [ -n "$PROF" ]; then mkdir -p "$PROF"; PROF=$(cd "$PROF" && pwd); fi
 BUILDTAGS=()
 [ -z "$NOASM" ] || BUILDTAGS=(-tags noasm)
-(cd bench/gzip && go build "${BUILDTAGS[@]}" -o "$TMP/gzbench" .)
+if [ -n "${PREBUILT:-}" ]; then
+  # PREBUILT=DIR: use DIR/gzbench instead of building it (a machine without Go).
+  [ -z "$NOASM" ] || { echo "-noasm needs a gzbench built with -tags noasm, not PREBUILT" >&2; exit 2; }
+  cp "$PREBUILT/gzbench" "$TMP/gzbench"
+else
+  (cd bench/gzip && go build "${BUILDTAGS[@]}" -o "$TMP/gzbench" .)
+fi
 GZ=$TMP/gzbench
 ASMLABEL="on (default build)"
 [ -z "$NOASM" ] || ASMLABEL="OFF (ours built with -tags noasm; reported only, not a gate)"
@@ -248,8 +255,8 @@ ROWS=$TMP/rows.tsv
 : > "$BODY"; : > "$ROWS"
 OURS_NP_MODES=""    # modes where ours exited 3 (not ported; none at present): ours skipped for that mode
 OURS_NA_LEVELS=""   # levels where ours exited 4 (deduplicated)
-COLS="| file | level | block | C MB/s | Go MB/s | % of C | C ratio | Go ratio | stdlib MB/s | klauspost MB/s |"
-SEP="|---|---|---|---|---|---|---|---|---|---|"
+COLS="| file | level | block | C MB/s | Go MB/s | % of C | C ratio | Go ratio | stdlib MB/s | klauspost MB/s | stdlib ratio | klauspost ratio |"
+SEP="|---|---|---|---|---|---|---|---|---|---|---|---|"
 if [ -n "$ISAL" ]; then COLS+=" isal MB/s |"; SEP+="---|"; fi
 SIZECMP=exact   # becomes "ratio" if a producer printed no size
 
@@ -317,7 +324,7 @@ for mode in $MODES; do
       [ -n "${RAT[ours]}" ] || RAT[ours]="-"
       # mode d: ours decodes C's streams, so its ratio is C's by construction, not a measurement
       if [ "$mode" = d ] && [ "${RAT[ours]}" != - ]; then RAT[ours]="=C (same stream)"; fi
-      line="| $bname | $lvl | $blabel | $cmed | $gmed | $pct | ${RAT[ld]} | ${RAT[ours]}$flag | $smed | $kmed |"
+      line="| $bname | $lvl | $blabel | $cmed | $gmed | $pct | ${RAT[ld]} | ${RAT[ours]}$flag | $smed | $kmed | ${RAT[stdlib]:--} | ${RAT[klauspost]:--} |"
       if [ -n "$ISAL" ]; then line+=" $imed |"; fi
       echo "$line" >> "$BODY"
       unset RAT SZ SPEEDS
@@ -347,7 +354,10 @@ mkdir -p "$(dirname "$OUT")"
   echo "- load1 at start: $LOAD_START, at end: $LOAD_END; AC power online: $AC"
   echo "- C: libdeflate $LDTAG (ref/libdeflate); \`ldref version\`: $LDVER"
   echo "- C compiler: $CCV; flags (from \`make -n -B ldbench\` in ref/ldref; runtime asm dispatch on; impl above is from the sibling \`ldref\` binary built from the same sources): \`${CCFLAGS:-unknown}\`"
-  echo "- Go: $(go version); ours asm: $ASMLABEL; stdlib = compress/flate+gzip (unaffected by -tags noasm), klauspost = github.com/klauspost/compress@$(cd bench/gzip && go list -m -f '{{.Version}}' github.com/klauspost/compress) (unaffected by -tags noasm)"
+  # With PREBUILT (no Go toolchain) GO_VERSION and KP_VERSION may name what gzbench was built with.
+  GOV=${GO_VERSION:-$(go version 2>/dev/null || echo unknown)}
+  KPV=${KP_VERSION:-$(cd bench/gzip && go list -m -f '{{.Version}}' github.com/klauspost/compress 2>/dev/null || echo unknown)}
+  echo "- Go: $GOV; ours asm: $ASMLABEL; stdlib = compress/flate+gzip (unaffected by -tags noasm), klauspost = github.com/klauspost/compress@$KPV (unaffected by -tags noasm)"
   echo "- quick: $([ -n "$QUICK" ] && echo yes || echo no); files: $FILELIST"
   echo "- settings: -i $CSECS (C and ISA-L), -g $GSECS (Go), -n $RUNS (median, interleaved), -format $FORMAT, -mode $MODE, libs: $LIBS, levels: $LEVELS; isal: $ISALNOTE"
   echo "- identity check (-mode c): $([ "$SIZECMP" = exact ] && echo 'exact compressed byte count (third field of ldbench/gzbench)' || echo 'ratio string only for rows where a producer printed no size')"

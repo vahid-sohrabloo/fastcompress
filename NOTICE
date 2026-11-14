@@ -4,5 +4,10 @@ Copyright (c) Meta Platforms, Inc. and affiliates. libzstd is dual-licensed
 under the BSD 3-Clause license and GPLv2; this project uses it under the
 BSD 3-Clause license (see LICENSE).
 
-The public API follows that of github.com/klauspost/compress/zstd so that it
+Packages flate, gzip and zlib (and internal/deflate, internal/adler32) are a
+pure-Go port of libdeflate v1.26 (https://github.com/ebiggers/libdeflate),
+which is Copyright 2016 Eric Biggers and Copyright 2024 Google LLC, under the
+MIT license (see internal/deflate/NOTICE).
+
+The zstd public API follows that of github.com/klauspost/compress/zstd so that it
 can replace it. No code from that project is used.

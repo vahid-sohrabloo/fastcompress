@@ -39,7 +39,7 @@ import (
 
 func main() {
 	mode := flag.String("mode", "c", "c (compression) or d (decompression)")
-	level := flag.Int("level", 1, "C compression level: 1, 3, 7 or 11")
+	level := flag.Int("level", 1, "C compression level, 1 to 22 (1, 3, 7 and 11 use the named EncoderLevels)")
 	block := flag.Int("block", 0, "independent block size in bytes (0 = whole file)")
 	iters := flag.Int("iters", 1, "minimum number of counted ~1 s windows")
 	secs := flag.Float64("secs", 0, "also keep running until this many seconds of passes have been timed")
@@ -65,18 +65,20 @@ func main() {
 }
 
 func run(decode bool, level, block, iters int, secs float64, cpuprofile string, hugePages bool, path string) (err error) {
-	var l zstd.EncoderLevel
+	// 1, 3, 7 and 11 go through the named levels (the klauspost API); any
+	// other C level through the WithEncoderZstdLevel extension.
+	var lopt zstd.EOption
 	switch level {
 	case 1:
-		l = zstd.SpeedFastest
+		lopt = zstd.WithEncoderLevel(zstd.SpeedFastest)
 	case 3:
-		l = zstd.SpeedDefault
+		lopt = zstd.WithEncoderLevel(zstd.SpeedDefault)
 	case 7:
-		l = zstd.SpeedBetterCompression
+		lopt = zstd.WithEncoderLevel(zstd.SpeedBetterCompression)
 	case 11:
-		l = zstd.SpeedBestCompression
+		lopt = zstd.WithEncoderLevel(zstd.SpeedBestCompression)
 	default:
-		return fmt.Errorf("unsupported level %d (want 1, 3, 7 or 11)", level)
+		lopt = zstd.WithEncoderZstdLevel(level)
 	}
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -88,7 +90,7 @@ func run(decode bool, level, block, iters int, secs float64, cpuprofile string, 
 	if block <= 0 || block > len(src) {
 		block = len(src)
 	}
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(l), zstd.WithEncoderCRC(false), zstd.WithHugePages(hugePages))
+	enc, err := zstd.NewWriter(nil, lopt, zstd.WithEncoderCRC(false), zstd.WithHugePages(hugePages))
 	if err != nil {
 		return err
 	}

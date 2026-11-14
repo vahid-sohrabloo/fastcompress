@@ -12,9 +12,8 @@ Status: work in progress.
 - **Phase 2, the decoder, is done:** `NewReader`, `Decoder` (`DecodeAll`,
   the streaming reader), the dictionary and trainer functions, and the zip and
   snappy helpers. Every identifier of `klauspost/compress/zstd` is exported.
-  Decode speed is 101.1% of C
-  libzstd v1.5.7 overall; two rows are under 95% (nci level 1 at 94.5%,
-  silesia 16 KiB level 1 at 93.9%).
+  Compression is at 99.2% and decompression at 101.9% of C libzstd v1.5.7's
+  speed overall (see [zstd speed](#zstd-speed)).
 
 ## Encoder output
 
@@ -69,10 +68,13 @@ is bounded by `WithDecoderMaxMemory`. CI enforces this:
   C's dictionaries already load in zstd v1.5.5.
 - `TrainDict`, `TrainDictCover`, `TrainDictFastCover` and `CoverParams`
   are extensions: C's dictionary trainers (`ZDICT_trainFromBuffer`, COVER
-  and fastCover), byte-identical to C v1.5.7, parameters included. Levels
-  that would make C compress with btultra, btultra2, the btopt post-block
-  splitter or long-distance matching (not ported; C levels 13 and up)
-  return an error.
+  and fastCover), byte-identical to C v1.5.7, parameters included.
+- `WithEncoderZstdLevel(n)` is an extension: it runs C compression level
+  `n` (1 to 22) directly instead of one of the four `EncoderLevel`s, with
+  C's output at that level, including C's long-distance matching, which C
+  turns on by itself for levels 16 to 22 with a window of 128 MiB or more
+  (level 22 above 64 MiB or for an unknown size, or levels 16 to 21 with a
+  `WithWindowSize` of 128 MiB or more).
 - `EncoderLevelFromZstd` maps a zstd level to the highest `EncoderLevel`
   whose C level (1, 3, 7, 11) does not exceed it.
 
@@ -147,42 +149,55 @@ run pure Go: there is no arm64 assembly, and arm64 is only tested on CI.
 
 ### Speed
 
-Measured with `bench/gzip/compare.sh` on an i9-13900H (one core pinned,
-raw DEFLATE, the 12 Silesia files whole plus `silesia.tar` in independent
-blocks; amd64 assembly on) against libdeflate v1.26 built as it ships (its
-BMI2 decoder and SIMD paths on). Geometric mean of our speed as a
-percentage of libdeflate's:
+Single-threaded speed of raw DEFLATE against libdeflate v1.26 (built as it
+ships, with its BMI2 decoder and SIMD paths on), Go's `compress/flate` and
+[klauspost/compress/flate](https://github.com/klauspost/compress) v1.20.3,
+over the Silesia corpus: the 12 files whole, plus `silesia.tar` in
+independent 16 KiB, 128 KiB and 1 MiB blocks (15 rows per level). Each cell
+is the median of three interleaved runs of `bench/gzip/compare.sh`; amd64
+assembly on. Treat differences of a few percent as noise. The Go standard
+library and klauspost have no levels 10 to 12.
 
-- **Decompression** (`silesia.tar` in 1 MiB, 128 KiB and 16 KiB blocks):
-  100.2% to 100.6% at levels 1, 6, 9 and 12, lowest row 96.9%, in two
-  runs alternated with a pre-change build.
-  The margin over libdeflate is 0.2-0.6 points and depends on code
-  layout: most of the last 2% came from aligning the fast loop, tuned on
-  this one CPU (an earlier, 32-byte aligned version lost about half of
-  that gain when moved by 32 bytes; the current 64-byte alignment did
-  not). Expect parity, not a lead, on other CPUs.
-- **Compression** (the 12 Silesia files whole plus `silesia.tar` in 1 MiB
-  blocks, 13 rows per level), at or above libdeflate at every measured
-  level:
+![DEFLATE compression: speed vs ratio](bench/img/deflate-compress.svg)
 
-  | level | geomean | lowest row |
-  |---|---|---|
-  | 1 | 103.6% | 99.6% (x-ray) |
-  | 3 | 101.6% | 100.1% (mozilla) |
-  | 6 | 102.1% | 101.4% (samba) |
-  | 9 | 102.8% | 101.2% (xml) |
-  | 12 | about 110% | 100.0-106.5% (nci) |
+**Compression.** Our output is byte-identical to libdeflate's at every
+level (all 75 rows), so speed is the only difference between the two. The
+Go standard library and klauspost produce other output (2-9% larger than
+libdeflate's at the same level number), so the chart plots speed against
+compression ratio. A point further up and to the right is better.
 
-  The project's gate (geomean >= 100%, every row >= 95%, no row below
-  90%) is met for compression at all five measured levels: every
-  geomean is above 100% and no row is below 99.4%. The rows below
-  100% are x-ray at level 1 (99.5-99.6%) and, in the larger confirmation set, tar/16K at level 3 (99.4%). The slow level 12 rows (nci 3.3,
-  xml 4.1 MB/s) carry about +-2-3 points of rounding in "% of C". The
-  compressed output is byte-identical to libdeflate's in all 65 rows.
+| level | % of libdeflate's speed (geomean) | lowest row |
+|---|---|---|
+| 1 | 101.6% | 99.5% (ooffice) |
+| 3 | 99.1% | 96.5% (nci) |
+| 6 | 98.7% | 74.1% (nci; the other 14 rows are 96-101%) |
+| 9 | 98.0% | 86.4% (`silesia.tar`, 128 KiB blocks) |
+| 12 | 118.2% | 104.3% (sao) |
 
-The pure-Go build (`-tags noasm`) is slower and is not gated; arm64 has
-not been benchmarked. All results come from one CPU (the i9-13900H
-above); expect other CPUs to differ.
+![DEFLATE decompression: % of libdeflate](bench/img/deflate-decompress.svg)
+
+**Decompression.** Every library decodes the same libdeflate streams, so
+the bars compare like with like. Geometric mean of the percentage of
+libdeflate's speed:
+
+| level | ours | Go `compress/flate` | klauspost |
+|---|---|---|---|
+| 1 | 98.8% | 22.4% | 30.3% |
+| 3 | 97.6% | 21.7% | 28.6% |
+| 6 | 97.9% | 21.9% | 29.6% |
+| 9 | 97.4% | 23.0% | 30.5% |
+| 12 | 97.4% | - | - |
+
+Our lowest decompression row is samba at level 3 (91.6%). We decompress
+about 4.4 times as fast as the Go standard library and 3.3 times as fast as
+klauspost.
+
+The decoder's margin against libdeflate depends on the CPU and on code
+layout: the fast loop's alignment is tuned, and on another CPU the same
+code measured 100.2-100.6% of libdeflate. The pure-Go build (`-tags noasm`)
+is slower and is not measured here; arm64 has not been benchmarked. The
+charts are drawn from the `bench/gzip/compare.sh` output by
+`bench/plot.py`.
 
 ### Tests
 
@@ -205,15 +220,61 @@ and arm64 (default build, then `-tags noasm`), plus jobs for the other
 packages and for 386 / race `-short`. Details:
 [scripts/README-deflate-tests.md](scripts/README-deflate-tests.md).
 
-## Speed
+## zstd speed
 
-On an i9-13900H (one core, checksums off), compression speed against C
-`zstd -b` v1.5.7 over the Silesia corpus, as a geometric mean of the
-percentage of C's speed: 101.1% at level 1, 101.3% at level 3, 102.1% at
-level 7 and 101.2% at level 11 (101.4% overall; lowest row 97.9%). The
-compressed sizes are identical in every row.
+Single-threaded speed against C `zstd` v1.5.7 (`zstd -b -T1`) and
+[klauspost/compress/zstd](https://github.com/klauspost/compress) v1.20.3,
+over the Silesia corpus: the 12 files whole, plus `silesia.tar` in
+independent 16 KiB, 128 KiB, 1 MiB and 4 MiB blocks (16 rows per level).
+Checksums are off, and each cell is the median of three interleaved runs
+of `bench/compare.sh -k`. Treat differences of a few percent as noise.
+
+![zstd compression: speed vs ratio](bench/img/zstd-compress.svg)
+
+**Compression.** Our output is byte-identical to C's, so speed is the only
+difference between the two. klauspost produces different output: its named
+levels are its own and do not match C's, so the chart plots speed against
+compression ratio instead of speed alone. A point further up and to the
+right is better.
+
+| level | % of C's speed (geomean) | lowest row |
+|---|---|---|
+| 1 | 95.5% | 91.5% (samba) |
+| 3 | 97.9% | 86.9% (xml) |
+| 7 | 99.9% | 92.1% (`silesia.tar`, 1 MiB blocks) |
+| 11 | 103.7% | 92.7% (`silesia.tar`, 1 MiB blocks) |
+| all | 99.2% | |
+
+![zstd decompression: % of C](bench/img/zstd-decompress.svg)
+
+**Decompression.** Every library decodes the same frames (ours, which are
+C's), so the bars compare like with like. Geometric mean of the
+percentage of C's speed:
+
+| level | ours | klauspost |
+|---|---|---|
+| 1 | 101.1% | 83.1% |
+| 3 | 102.6% | 88.7% |
+| 7 | 101.4% | 84.3% |
+| 11 | 102.5% | 85.1% |
+| all | 101.9% | 85.3% |
+
+Our lowest decompression row is `silesia.tar` in 16 KiB blocks at level 7
+(83.8%); the 16 KiB rows are our weakest. klauspost falls to about 66% of
+C on the 128 KiB and 16 KiB rows.
+
+Expect other CPUs to give different numbers. The charts are drawn from the
+`bench/compare.sh` output by `bench/plot.py`.
 
 ## Credits
 
-This is a port of [zstd](https://github.com/facebook/zstd). Credit goes to
-Yann Collet and the zstd contributors. See LICENSE.
+- `zstd` is a port of [zstd](https://github.com/facebook/zstd) v1.5.7, by
+  Yann Collet and the zstd contributors (Copyright Meta Platforms, Inc. and
+  affiliates; BSD 3-Clause, see [LICENSE](LICENSE)).
+- `flate`, `gzip` and `zlib` are a port of
+  [libdeflate](https://github.com/ebiggers/libdeflate) v1.26, by Eric
+  Biggers and the libdeflate contributors (MIT, see
+  [internal/deflate/NOTICE](internal/deflate/NOTICE)).
+- The `zstd` API follows
+  [klauspost/compress/zstd](https://github.com/klauspost/compress) so that it
+  can replace it; no code from that project is used.
