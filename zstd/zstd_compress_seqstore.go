@@ -193,11 +193,15 @@ func seqToCodes(ss *seqStore) bool {
 	ofCodes := ss.ofCode[:nbSeq]
 	mlCodes := ss.mlCode[:nbSeq]
 	seqCodes(ss.sequences, llCodes, ofCodes, mlCodes)
+	// Indexed in the whole code table, as in C: in a post-block-splitter
+	// chunk (deriveSeqStoreChunk) longLengthPos may equal nbSeq, and C
+	// then writes the first code of the next chunk, which is rebuilt
+	// before it is read.
 	if ss.longLengthType == lltLiteralLength {
-		llCodes[ss.longLengthPos] = maxLL
+		ss.llCode[ss.longLengthPos] = maxLL
 	}
 	if ss.longLengthType == lltMatchLength {
-		mlCodes[ss.longLengthPos] = maxML
+		ss.mlCode[ss.longLengthPos] = maxML
 	}
 	return false
 }

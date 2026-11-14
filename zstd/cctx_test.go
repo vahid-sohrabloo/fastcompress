@@ -98,17 +98,21 @@ func optCases() []compress2Case {
 	return []compress2Case{{12, false, 0}, {13, true, 16}, {14, false, 16}, {15, true, 16}, {16, false, 16}}
 }
 
-// ported reports whether this port has the match finder that compress2
-// selects with c for an input of n bytes: fast, dfast, greedy/lazy/lazy2
-// (row-based or hash chain), btlazy2 and btopt, without the post-block
-// splitter. Other inputs make compress2 return errStrategyUnsupported
-// (unless they are too small to search at all).
-func (c compress2Case) ported(n int) bool {
+// ported reports whether this port has everything compress2 selects with c
+// for an input of n bytes. Every strategy, the post-block splitter and
+// long-distance matching (which C enables for btopt and above with window
+// log 27 or more, ZSTD_resolveEnableLdm) are ported, so it is always true;
+// the tests keep calling it so that a future refusal shows up here.
+func (c compress2Case) ported(n int) bool { return true }
+
+// splitterOn reports whether compress2 runs the post-block splitter with c
+// for an input of n bytes.
+func (c compress2Case) splitterOn(n int) bool {
 	var p cctxParams
 	cctxParamsInit(&p, c.level)
 	p.cParams.windowLog = c.windowLog
 	cp := getCParamsFromCCtxParams(&p, uint64(n), 0, cpmNoAttachDict)
-	return cp.strategy <= zstdBtopt && resolveBlockSplitterMode(psAuto, &cp) != psEnable
+	return resolveBlockSplitterMode(psAuto, &cp) == psEnable
 }
 
 // seqStep is one compress2 call on a reused context.
@@ -409,7 +413,7 @@ func TestCompress2ReuseMultiBlock(t *testing.T) {
 		if len(src) > 256<<10 {
 			opt.level = 16
 		}
-		if getCParams(opt.level, uint64(len(src)), 0).strategy != zstdBtopt || !opt.ported(len(src)) {
+		if getCParams(opt.level, uint64(len(src)), 0).strategy != zstdBtopt || opt.splitterOn(len(src)) {
 			t.Fatalf("%s: %s is not btopt without post-splitter", name, opt)
 		}
 		steps = append(steps, seqStep{name, opt, src})
@@ -521,7 +525,7 @@ func TestCompress2OverflowCorrectionBtopt(t *testing.T) {
 	}{{13, "text256KiB"}, {14, "zstd-format.md"}, {13, "text128KiB+1"}} {
 		src := inputs[tc.name]
 		c := compress2Case{level: tc.level, windowLog: 16}
-		if getCParams(tc.level, uint64(len(src)), 0).strategy != zstdBtopt || !c.ported(len(src)) {
+		if getCParams(tc.level, uint64(len(src)), 0).strategy != zstdBtopt || c.splitterOn(len(src)) {
 			t.Fatalf("%s: %s is not btopt without post-splitter", tc.name, c)
 		}
 		checkOverflowCorrection(t, c, tc.name, src)

@@ -60,14 +60,6 @@ func TrainDict(samples [][]byte, maxDictSize int) ([]byte, error) {
 // chosen ones after a search, p unchanged otherwise. Output and parameters
 // are byte-identical to C's (single-threaded: ties go to the first
 // parameters C tries).
-//
-// Extension limits: levels that make C compress with what this port does
-// not have are refused with an error rather than giving other bytes than
-// C: the btultra and btultra2 strategies (C levels 13 and up for small
-// samples, 16 and up otherwise), the btopt post-block splitter (btopt with
-// windowLog 17 or more: C levels 13 to 16 at some sizes) and long-distance
-// matching (C level 22 with a dictionary or test sample of 64 MiB or
-// more).
 func TrainDictCover(samples [][]byte, maxDictSize int, p CoverParams) ([]byte, CoverParams, error) {
 	s, err := newTrainSamples(samples, maxDictSize)
 	if err != nil {
@@ -352,9 +344,7 @@ const (
 // checksum, dictID) in dst with cd and returns its size.
 // C: zstd_compress.c:ZSTD_compress_usingCDict, through
 // ZSTD_compressBegin_usingCDict_internal, ZSTD_compressBegin_internal and
-// ZSTD_compressEnd_public. Parameters for which C enables long-distance
-// matching are refused (LDM is not ported), and so are the strategies this
-// port does not have (btultra, btultra2, the btopt post-block splitter).
+// ZSTD_compressEnd_public.
 func (c *cctx) compressUsingCDict(dst, src []byte, cd *cdict) (int, error) {
 	pledgedSrcSize := uint64(len(src))
 	useCDict := pledgedSrcSize < cdictParamsSrcSizeCutoff ||
@@ -373,9 +363,7 @@ func (c *cctx) compressUsingCDict(dst, src []byte, cd *cdict) (int, error) {
 	params.compressionLevel = cd.compressionLevel
 	params.useRowMatchFinder = resolveRowMatchFinderMode(psAuto, &params.cParams)
 	params.postBlockSplitter = resolveBlockSplitterMode(psAuto, &params.cParams)
-	if params.cParams.strategy >= zstdBtopt && params.cParams.windowLog >= 27 { // C: ZSTD_resolveEnableLdm
-		return 0, &buildDictError{code: int(dErrGeneric), err: "long-distance matching is not ported", notPorted: true}
-	}
+	params.ldmParams.enableLdm = resolveEnableLdm(psAuto, &params.cParams)
 	params.maxBlockSize = resolveMaxBlockSize(0)
 
 	// Increase window log to fit the entire dictionary and source if the
@@ -393,7 +381,7 @@ func (c *cctx) compressUsingCDict(dst, src []byte, cd *cdict) (int, error) {
 		c.resetCCtxUsingCDict(cd, &params, pledgedSrcSize, false)
 	} else {
 		c.resetCCtxInternal(&params, pledgedSrcSize, cd.dictContentSize, false)
-		dictID, err := compressInsertDictionary(c.blockState.prevCBlock, &c.blockState.matchState, &c.appliedParams,
+		dictID, err := compressInsertDictionary(c.blockState.prevCBlock, &c.blockState.matchState, &c.ldmState, &c.appliedParams,
 			cd.dictContent, cd.dictContentType, dtlmFast, tfpForCCtx)
 		if err != nil {
 			return 0, trainError(int(dErrDictionaryCorrupted), err.Error())
@@ -401,9 +389,6 @@ func (c *cctx) compressUsingCDict(dst, src []byte, cd *cdict) (int, error) {
 		c.dictID = dictID
 	}
 	n, err := c.compressEnd(dst, src)
-	if errors.Is(err, errStrategyUnsupported) { // btultra, btultra2, the post-block splitter
-		return 0, &buildDictError{code: int(dErrGeneric), err: err.Error(), notPorted: true}
-	}
 	if err != nil {
 		code := int(dErrGeneric)
 		if errors.Is(err, errDstSizeTooSmall) {
@@ -514,12 +499,16 @@ func trainWorkers(workerMemory uint64) int {
 }
 
 // compressMemoryEstimate estimates what checking one candidate takes: a
-// CDict and a context at level (their tables), dst, and the dictionary
-// copies.
+// CDict and a context at level (their tables, and the context's LDM table
+// where C enables long-distance matching), dst, and the dictionary copies.
 func compressMemoryEstimate(level int, maxSampleSize int, maxDictSize uint64) uint64 {
 	cp := getCParamsInternal(level, uint64(maxSampleSize), maxDictSize, cpmUnknown)
 	tables := uint64(5)<<cp.hashLog + uint64(4)<<cp.chainLog
-	return 2*tables + 4*blockSizeMax + uint64(compressBound(maxSampleSize)) + 3*maxDictSize
+	ldm := ldmParams{enableLdm: resolveEnableLdm(psAuto, &cp)}
+	if ldm.enableLdm == psEnable {
+		ldmAdjustParameters(&ldm, &cp)
+	}
+	return 2*tables + ldmGetTableSize(ldm) + 4*blockSizeMax + uint64(compressBound(maxSampleSize)) + 3*maxDictSize
 }
 
 // maxSampleSize is the size of the largest sample.

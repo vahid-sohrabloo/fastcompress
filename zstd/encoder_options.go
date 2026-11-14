@@ -54,6 +54,7 @@ type EOption func(*encoderOptions) error
 // encoderOptions holds the options an Encoder was created with.
 type encoderOptions struct {
 	level        EncoderLevel
+	zlevel       int // WithEncoderZstdLevel: C level 1..22; 0 = use level
 	checksum     bool
 	windowLog    uint32 // 0 = level default
 	maxEncodeAll int    // max concurrent EncodeAll calls (contexts held at once)
@@ -279,6 +280,30 @@ func WithEncoderLevel(l EncoderLevel) EOption {
 		return nil
 	}
 }
+
+// WithEncoderZstdLevel selects a C compression level directly, between 1
+// and 22, instead of one of the four EncoderLevels; it overrides
+// WithEncoderLevel. The output is C's at that level, including C's
+// long-distance matching, which C enables by itself for levels 16 to 22
+// with a window log of 27 or more (ZSTD_resolveEnableLdm: btopt or above;
+// level 22 above 64 MiB or of unknown size, or a WithWindowSize of 128 MiB
+// or more).
+// Cannot be changed with ResetWithOptions.
+//
+// Extension (klauspost has no equivalent). C: ZSTD_c_compressionLevel.
+func WithEncoderZstdLevel(level int) EOption {
+	return func(o *encoderOptions) error {
+		if level < 1 || level > maxEncoderZstdLevel {
+			return fmt.Errorf("zstd: zstd level must be between 1 and %d, got %d", maxEncoderZstdLevel, level)
+		}
+		o.zlevel = level
+		return nil
+	}
+}
+
+// maxEncoderZstdLevel is the highest level WithEncoderZstdLevel accepts
+// (C: ZSTD_maxCLevel).
+const maxEncoderZstdLevel = maxCLevel
 
 // WithZeroFrames will encode 0 length input as full frames.
 // This can be needed for compatibility with zstandard usage,

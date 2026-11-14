@@ -20,9 +20,10 @@ type streamCase struct {
 	level      int    // C level; 1/3/7/11 can go through the Writer, any level through cctxStream
 	windowLog  uint32 // 0 = level default
 	checksum   bool
-	chunk      int   // uniform chunk size; 0 = random sizes in 1..200000 (seed 1)
-	flushEvery int   // flush after every flushEvery-th chunk; 0 = never
-	pledged    int64 // pledged content size; <= 0 = unknown
+	chunk      int         // uniform chunk size; 0 = random sizes in 1..200000 (seed 1)
+	flushEvery int         // flush after every flushEvery-th chunk; 0 = never
+	pledged    int64       // pledged content size; <= 0 = unknown
+	ldm        paramSwitch // long-distance matching (C: ZSTD_c_enableLongDistanceMatching); psAuto = C's choice; cctxStream only
 }
 
 func (sc streamCase) String() string {
@@ -43,6 +44,9 @@ func (sc streamCase) String() string {
 	}
 	if sc.pledged > 0 {
 		s += "/pledged" + strconv.FormatInt(sc.pledged, 10)
+	}
+	if sc.ldm != psAuto {
+		s += "/ldm" + strconv.Itoa(int(sc.ldm))
 	}
 	return s
 }
@@ -102,6 +106,9 @@ func (sc streamCase) crefArgs(n int) []string {
 	if sc.pledged > 0 {
 		args = append(args, "-pledged-size", strconv.FormatInt(sc.pledged, 10))
 	}
+	if sc.ldm != psAuto {
+		args = append(args, "-ldm", strconv.Itoa(int(sc.ldm)))
+	}
 	return args
 }
 
@@ -158,6 +165,7 @@ func cctxStream(t testing.TB, sc streamCase, src []byte) []byte {
 	if sc.pledged > 0 {
 		c.setPledgedSrcSize(uint64(sc.pledged))
 	}
+	c.requestedParams.ldmParams.enableLdm = sc.ldm
 	var res []byte
 	buf := make([]byte, 0, cStreamOutSize)
 	feed := func(in []byte, op endDirective) {
@@ -281,8 +289,11 @@ func (r *extDictRuns) take() map[string]int {
 // extDict segment, and checks the output against cref for each strategy's
 // extDict block compressor, which each case must run (extDictHook). Levels
 // 1, 3, 7 and 11 go through the Writer; greedy (level 5) and the unknown-
-// size btlazy2 and btopt levels (13, 16) through cctxStream. A pledged
-// size steers level 11 to btlazy2 (<= 256 KiB) and btopt (<= 16 KiB).
+// size btlazy2, btopt, btultra and btultra2 levels (13, 16, 18, 19)
+// through cctxStream, with windowLog 16 or less (no post-block splitter)
+// and 17 (with it); btultra2 has no extDict compressor of its own, it runs
+// btultra's. A pledged size steers level 11 to btlazy2 (<= 256 KiB) and
+// btopt (<= 16 KiB).
 func TestCrefStreamExtDict(t *testing.T) {
 	names, inputs := streamInputs(t)
 	var runs extDictRuns
@@ -314,12 +325,22 @@ func TestCrefStreamExtDict(t *testing.T) {
 		{11, 10, true, "btopt", 2 << 10},
 		{13, 14, false, "btlazy2", 32 << 10},
 		{16, 16, false, "btopt", 128 << 10},
+		{18, 16, false, "btultra", 128 << 10},
+		{19, 15, false, "btultra", 64 << 10},
+		// window log 17: the post-block splitter runs too
+		{16, 17, false, "btopt", 384 << 10},
+		{19, 17, false, "btultra", 384 << 10},
 	} {
 		ran := false
+		nInputs := 0
 		for _, name := range names {
 			src := inputs[name]
 			if len(src) < tc.minSize {
 				continue
+			}
+			// -short: the splitter cases (slow) take the first input only
+			if nInputs++; testing.Short() && tc.windowLog == 17 && tc.level >= 16 && nInputs > 1 {
+				break
 			}
 			for _, chunk := range []int{1000, 0} {
 				for _, flush := range []int{7, 0} {
@@ -377,7 +398,7 @@ func extDictName(sc streamCase) string {
 	}
 	cp := getCParamsFromCCtxParams(&p, size, 0, cpmNoAttachDict)
 	name := [...]string{zstdFast: "fast", zstdDfast: "dfast", zstdGreedy: "greedy", zstdLazy: "lazy", zstdLazy2: "lazy2",
-		zstdBtlazy2: "btlazy2", zstdBtopt: "btopt", zstdBtultra: "btultra", zstdBtultra2: "btultra2"}[cp.strategy]
+		zstdBtlazy2: "btlazy2", zstdBtopt: "btopt", zstdBtultra: "btultra", zstdBtultra2: "btultra"}[cp.strategy] // C: no btultra2 extDict variant
 	if rowMatchFinderSupported(cp.strategy) {
 		if resolveRowMatchFinderMode(psAuto, &cp) == psEnable {
 			return name + "-row"

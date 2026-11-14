@@ -293,11 +293,14 @@ func TestDictCref(t *testing.T) {
 	})
 }
 
-// TestDictCCtxLevels runs the context with a dictionary at levels 2 to 12
+// TestDictCCtxLevels runs the context with a dictionary at levels 2 to 22
 // (the strategies levels 1, 3, 7 and 11 do not reach with the test
-// dictionaries: greedy and lazy, hash-chain and row; from level 13 C's
-// strategies or post-block splitter are not ported) against `cref
-// compress`, for inputs either side of the attach cutoffs.
+// dictionaries: greedy and lazy, hash-chain and row; from level 13 btopt,
+// btultra and btultra2, whose dictMatchState and extDict compressors are
+// btultra's for both) against `cref compress`, for inputs either side of the
+// attach cutoffs, and with the post-block splitter (btopt and above when
+// the dictionary and input reach window log 17). -short runs levels 13 to
+// 22 in steps of 3.
 func TestDictCCtxLevels(t *testing.T) {
 	names, inputs := dictInputs(t)
 	var keep []string
@@ -314,7 +317,10 @@ func TestDictCCtxLevels(t *testing.T) {
 		if d.raw {
 			dct = dctRawContent
 		}
-		for level := 2; level <= 12; level++ {
+		for level := 2; level <= 22; level++ {
+			if testing.Short() && level > 13 && (level-13)%3 != 0 {
+				continue
+			}
 			t.Run(d.name+"/L"+strconv.Itoa(level), func(t *testing.T) {
 				t.Parallel()
 				c := newCCtx()
@@ -329,6 +335,11 @@ func TestDictCCtxLevels(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					if c.appliedParams.postBlockSplitter == psEnable {
+						runs.mu.Lock()
+						runs.seen["splitter"]++
+						runs.mu.Unlock()
+					}
 					want := creftest.Run(t, src, append([]string{"compress", "-level", strconv.Itoa(level), "-checksum", "1", "-pledged", "1"}, dargs...)...)
 					if !bytes.Equal(got, want) { // the context writes C's ID 0 for raw content
 						t.Fatalf("%s: frame differs from C", name)
@@ -339,7 +350,8 @@ func TestDictCCtxLevels(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		runs.require(t, "dms/greedy-hc", "dms/lazy-hc", "dms/lazy2-hc", "dms/greedy-row", "dms/lazy-row",
-			"dms/lazy2-row", "attach/3", "copy/3", "attach/4", "copy/4")
+			"dms/lazy2-row", "attach/3", "copy/3", "attach/4", "copy/4",
+			"dms/btopt", "dms/btultra", "attach/8", "copy/8", "attach/9", "copy/9", "splitter")
 	})
 }
 

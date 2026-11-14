@@ -31,10 +31,14 @@ import (
 // The zero value is not usable: EncodeAll panics and the streaming methods
 // return an error.
 type Encoder struct {
-	o     encoderOptions
-	cd    *cdict        // the dictionary of o, digested; shared by all contexts
-	cctxs sync.Pool     // *cctx configured from o; one per concurrent EncodeAll
-	sem   chan struct{} // WithEncoderConcurrency: one slot per context EncodeAll holds; nil until NewWriter
+	o  encoderOptions
+	cd *cdict // the dictionary of o, digested; shared by all contexts
+	// cctxs has one slot per concurrent EncodeAll (WithEncoderConcurrency).
+	// A slot holds its context for the Encoder's lifetime, created on first
+	// use (nil until then), so the match tables are reused across calls
+	// instead of being rebuilt whenever the GC empties a pool. nil until
+	// NewWriter.
+	cctxs chan *cctx
 	s     encStream
 }
 
@@ -69,8 +73,10 @@ func NewWriter(w io.Writer, opts ...EOption) (*Encoder, error) {
 			return nil, err
 		}
 	}
-	e.cctxs.New = func() any { return e.newCCtx() }
-	e.sem = make(chan struct{}, e.o.maxEncodeAll)
+	e.cctxs = make(chan *cctx, e.o.maxEncodeAll)
+	for range e.o.maxEncodeAll {
+		e.cctxs <- nil
+	}
 	e.s.w = w
 	e.s.pledged = -1
 	cd, err := makeCDict(&e.o)
@@ -132,7 +138,11 @@ func (e *Encoder) configure(c *cctx) {
 
 // configureParams sets c's C parameters (not the dictionary) from o.
 func configureParams(c *cctx, o *encoderOptions) {
-	c.setLevel(zstdLevels[o.level])
+	level := zstdLevels[o.level]
+	if o.zlevel != 0 {
+		level = o.zlevel
+	}
+	c.setLevel(level)
 	c.setChecksum(o.checksum)
 	_ = c.setWindowLog(o.windowLog) // in range: validated by WithWindowSize
 	c.requestedParams.literalCompressionMode = o.literalCompressionMode()
@@ -155,26 +165,30 @@ func configureParams(c *cctx, o *encoderOptions) {
 // most WithEncoderConcurrency calls hold a context at once; further calls
 // wait for one to finish.
 func (e *Encoder) EncodeAll(src, dst []byte) []byte {
-	if e.sem == nil {
+	if e.cctxs == nil {
 		panic(errEncoderZero)
 	}
 	if len(src) == 0 && !e.o.zeroFrames {
 		return dst
 	}
-	e.sem <- struct{}{}
+	c := <-e.cctxs
 	// A panic releases the slot but drops the context: its state may be
-	// half-updated, so it does not go back to the pool.
-	defer func() { <-e.sem }()
-	c := e.cctxs.Get().(*cctx)
+	// half-updated, so the slot gets a fresh one on its next use.
+	held := c
+	defer func() { e.cctxs <- held }()
+	held = nil
+	if c == nil {
+		c = newCCtx()
+	}
 	if cctxHeldHook != nil {
 		cctxHeldHook()
 	}
-	e.configure(c) // ResetWithOptions may have changed the options since c was pooled
+	e.configure(c) // ResetWithOptions may have changed the options since c was last used
 	dst, err := c.compress2(dst, src)
 	if err != nil {
 		panic(err) // unreachable with validated options
 	}
-	e.cctxs.Put(c)
+	held = c
 	if e.o.padMultiple > 1 {
 		dst = addPadding(dst, e.o.padMultiple)
 	}
@@ -237,7 +251,7 @@ func appendPadding(b []byte, total int64, n int) []byte {
 // C: ZSTD_compressStream2(ZSTD_e_continue), repeated until p is consumed.
 // Errors, including those of the io.Writer, are sticky until Reset.
 func (e *Encoder) Write(p []byte) (n int, err error) {
-	if e.sem == nil {
+	if e.cctxs == nil {
 		return 0, errEncoderZero
 	}
 	s := &e.s
@@ -276,7 +290,7 @@ func (e *Encoder) Write(p []byte) (n int, err error) {
 // Every chunk read is passed to Write; how the input is split does not
 // change the output.
 func (e *Encoder) ReadFrom(r io.Reader) (n int64, err error) {
-	if e.sem == nil {
+	if e.cctxs == nil {
 		return 0, errEncoderZero
 	}
 	s := &e.s
@@ -310,7 +324,7 @@ func (e *Encoder) ReadFrom(r io.Reader) (n int64, err error) {
 // C: ZSTD_compressStream2(ZSTD_e_flush), repeated until it returns 0. With
 // nothing written since Reset (no frame started) it does nothing.
 func (e *Encoder) Flush() error {
-	if e.sem == nil {
+	if e.cctxs == nil {
 		return errEncoderZero
 	}
 	s := &e.s
@@ -335,7 +349,7 @@ func (e *Encoder) Flush() error {
 // the pledged one; Close returns that error too when nothing was written
 // (where C would pledge 0 instead). Closing a closed Encoder returns nil.
 func (e *Encoder) Close() error {
-	if e.sem == nil {
+	if e.cctxs == nil {
 		return errEncoderZero
 	}
 	s := &e.s
@@ -410,7 +424,7 @@ func (e *Encoder) ResetContentSize(w io.Writer, size int64) {
 // allowed); on error nothing is reset. The new options apply to the next
 // stream and to EncodeAll. A new dictionary is digested here.
 func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
-	if e.sem == nil {
+	if e.cctxs == nil {
 		return errEncoderZero
 	}
 	o := e.o
@@ -419,8 +433,8 @@ func (e *Encoder) ResetWithOptions(w io.Writer, opts ...EOption) error {
 			return err
 		}
 	}
-	if o.level != e.o.level || o.windowLog != e.o.windowLog || o.maxEncodeAll != e.o.maxEncodeAll || o.concBlocks != e.o.concBlocks || o.lowerMem != e.o.lowerMem || o.hugePages != e.o.hugePages {
-		return errors.New("zstd: WithEncoderLevel, WithWindowSize, WithEncoderConcurrency, WithConcurrentBlocks, WithLowerEncoderMem and WithHugePages cannot be changed with ResetWithOptions")
+	if o.level != e.o.level || o.zlevel != e.o.zlevel || o.windowLog != e.o.windowLog || o.maxEncodeAll != e.o.maxEncodeAll || o.concBlocks != e.o.concBlocks || o.lowerMem != e.o.lowerMem || o.hugePages != e.o.hugePages {
+		return errors.New("zstd: WithEncoderLevel, WithEncoderZstdLevel, WithWindowSize, WithEncoderConcurrency, WithConcurrentBlocks, WithLowerEncoderMem and WithHugePages cannot be changed with ResetWithOptions")
 	}
 	newDict := len(o.dict) != len(e.o.dict) || len(o.dict) > 0 && &o.dict[0] != &e.o.dict[0] ||
 		o.dictRaw != e.o.dictRaw || o.dictID != e.o.dictID

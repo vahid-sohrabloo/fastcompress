@@ -4,7 +4,6 @@ package zstd
 
 import (
 	"errors"
-	"strings"
 	"syscall"
 	"testing"
 )
@@ -44,22 +43,6 @@ func TestBuildDictTooLarge(t *testing.T) {
 		if !errors.As(err, &ce) || ce.code != 34 {
 			t.Fatalf("history %d: err = %v, want C error 34 (dictionaryCreation_failed)", size, err)
 		}
-	}
-}
-
-// TestBuildDictLDMRefused checks that parameters C would run with
-// long-distance matching (level 22 with a 64 MiB history: btultra2,
-// windowLog 27) are refused before the CDict is built, since LDM is not
-// ported.
-func TestBuildDictLDMRefused(t *testing.T) {
-	if testing.Short() {
-		t.Skip("maps 64 MiB of address space")
-	}
-	hist := hugeZeroMapping(t, 64<<20)
-	_, err := finalizeDictionary(hist, nil, 22, 1, repStartValue, nil)
-	var ce *buildDictError
-	if !errors.As(err, &ce) || ce.code != int(dErrGeneric) || !strings.Contains(err.Error(), "long-distance") {
-		t.Fatalf("err = %v, want the LDM refusal", err)
 	}
 }
 

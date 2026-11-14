@@ -112,7 +112,7 @@ func optParseFast(ms *matchState, ss *seqStore, rep *[repNum]uint32, ip, anchor,
 		}
 
 		// update all costs
-		setBasePrices(o)
+		setBasePrices(o, 0)
 		p.ip, p.anchor = ip, anchor
 	}
 }

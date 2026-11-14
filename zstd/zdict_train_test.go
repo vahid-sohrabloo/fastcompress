@@ -404,22 +404,42 @@ func checkTrainOrCrash(t *testing.T, mode string, samples [][]byte, maxDict int,
 	checkTrain(t, mode, samples, maxDict, p)
 }
 
-// TestTrainDictLevelRefused checks the extension limit: levels whose
-// parameters need a strategy this port lacks (btultra at C level 13 for
-// 4 KiB samples, btultra2 at 22) fail with an error marked not ported,
-// from the finalize step (fixed parameters) and from the search.
-func TestTrainDictLevelRefused(t *testing.T) {
+// TestTrainDictUltraLevels checks the trainers at levels that select
+// btultra (C level 13 for 4 KiB samples) and btultra2 (22) without the
+// post-block splitter: the dictionary and parameters, from the finalize
+// step (fixed parameters) and from the search, must equal C's.
+func TestTrainDictUltraLevels(t *testing.T) {
 	samples := buildDictSamples(t)[:30]
 	for _, lv := range []int{13, 22} {
 		for _, p := range []CoverParams{{K: 100, D: 8, Level: lv}, {D: 8, Steps: 2, Level: lv}} {
-			_, _, err := TrainDictCover(samples, 4096, p)
-			_, _, err2 := TrainDictFastCover(samples, 4096, p)
-			for _, e := range []error{err, err2} {
-				var ce *buildDictError
-				if !errors.As(e, &ce) || !ce.notPorted || ce.code != int(dErrGeneric) {
-					t.Fatalf("level %d %+v: err = %v, want the not-ported refusal", lv, p, e)
-				}
-			}
+			checkTrain(t, "train-cover", samples, 4096, p)
+			checkTrain(t, "train-fastcover", samples, 4096, p)
+		}
+	}
+}
+
+// TestTrainDictSplitterLevels checks the trainers at levels whose sample
+// compressions (in the finalize step and the parameter search) run the
+// post-block splitter: btopt (16), btultra (18) and btultra2 (19) on
+// samples of about 136 KiB (34 generated samples each), at least 128 KiB
+// and six dictionary sizes, so that C compresses them with the level's
+// parameters for the sample size (window log 18) rather than the CDict's,
+// with enough sequences for the splitter to cut. The dictionary
+// and parameters must equal C's.
+func TestTrainDictSplitterLevels(t *testing.T) {
+	gen := buildDictSamples(t)
+	var samples [][]byte
+	for i := 0; i+34 <= len(gen); i += 34 {
+		samples = append(samples, slices.Concat(gen[i:i+34]...))
+	}
+	levels := []int{16, 18, 19}
+	if testing.Short() {
+		levels = []int{19}
+	}
+	for _, lv := range levels {
+		for _, p := range []CoverParams{{K: 200, D: 8, Level: lv}, {D: 8, Steps: 2, Level: lv}} {
+			checkTrain(t, "train-cover", samples, 8192, p)
+			checkTrain(t, "train-fastcover", samples, 8192, p)
 		}
 	}
 }
@@ -435,8 +455,8 @@ func TestTrainDictNegativeSize(t *testing.T) {
 // lengths in cuts) with a trainer and parameters picked by mode, and a
 // level and a maxDict above 64 KiB picked by sel. Nothing may panic; the
 // dictionary and parameters, or the C error code, must equal cref's
-// (where C crashes, Go must return an error; at levels 13 and up, Go may
-// refuse as not ported). F and K stay small: large ones take gigabytes.
+// (where C crashes, Go must return an error; Go may refuse long-distance
+// matching as not ported). F and K stay small: large ones take gigabytes.
 func FuzzTrainDict(f *testing.F) {
 	gen := buildDictSamples(f)
 	f.Add(uint8(0), uint8(0), uint16(4096), slices.Concat(gen[:20]...), []byte{64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64})
@@ -487,9 +507,8 @@ func FuzzTrainDict(f *testing.F) {
 			}
 			var ce *buildDictError
 			if errors.As(err, &ce) && ce.notPorted {
-				// Only the two refusals may skip C: a missing strategy
-				// (errStrategyUnsupported) and long-distance matching.
-				if !strings.Contains(ce.err, errStrategyUnsupported.Error()) && !strings.Contains(ce.err, "long-distance matching") {
+				// Only a missing block compressor may skip C.
+				if !strings.Contains(ce.err, errStrategyUnsupported.Error()) {
 					t.Fatalf("not-ported refusal from an unexpected path: %v", err)
 				}
 				return

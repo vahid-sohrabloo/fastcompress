@@ -70,6 +70,71 @@ func TestEncodeAllCref(t *testing.T) {
 	}
 }
 
+// TestEncodeAllZstdLevelCref requires EncodeAll with WithEncoderZstdLevel
+// to equal C's ZSTD_compress2 at that level, for every level 1..22 and every
+// input (levels 13 and up only for inputs up to 4 MiB, which leaves out
+// the Silesia files), with a fresh Encoder per input (a fresh cctx, like
+// cref's), plus a 512 KiB window (restic's setting) on the same inputs.
+func TestEncodeAllZstdLevelCref(t *testing.T) {
+	names, inputs := sortedInputs(t)
+	step, wls := 1, []uint32{0, 19}
+	if testing.Short() {
+		step, wls = 3, []uint32{19} // levels 1, 4, ..., 19; restic's window only
+	}
+	for level := 1; level <= maxEncoderZstdLevel; level += step {
+		for _, wl := range wls {
+			for _, name := range names {
+				in := inputs[name]
+				if level > 12 && len(in) > 4<<20 {
+					continue
+				}
+				opts := []EOption{WithEncoderZstdLevel(level), WithZeroFrames(true)}
+				var extra []string
+				if wl != 0 {
+					opts = append(opts, WithWindowSize(1<<wl))
+					extra = []string{"-window-log", strconv.Itoa(int(wl))}
+				}
+				want := crefLevel(t, level, in, extra...)
+				got := newTestEncoder(t, opts...).EncodeAll(in, nil)
+				if !bytes.Equal(got, want) {
+					t.Errorf("L%d/w%d/%s: EncodeAll differs from cref (got %d bytes, want %d)", level, wl, name, len(got), len(want))
+				}
+			}
+		}
+	}
+}
+
+// TestWithEncoderZstdLevel checks the accepted range, that the option
+// overrides WithEncoderLevel and that ResetWithOptions rejects a change.
+func TestWithEncoderZstdLevel(t *testing.T) {
+	for _, bad := range []int{-1, 0, 23, 24} {
+		if _, err := NewWriter(nil, WithEncoderZstdLevel(bad)); err == nil {
+			t.Errorf("WithEncoderZstdLevel(%d): no error", bad)
+		}
+	}
+	// Every level is accepted, including those for which C enables
+	// long-distance matching (btopt and above with window log 27 or more).
+	for _, tc := range []struct{ level, windowLog int }{{1, 0}, {21, 0}, {22, 0}, {16, 27}, {21, 29}, {22, 29}} {
+		opts := []EOption{WithEncoderZstdLevel(tc.level)}
+		if tc.windowLog != 0 {
+			opts = append(opts, WithWindowSize(1<<tc.windowLog))
+		}
+		if _, err := NewWriter(nil, opts...); err != nil {
+			t.Errorf("level %d, window log %d: %v", tc.level, tc.windowLog, err)
+		}
+	}
+	in := creftest.Inputs(t)["text16KiB"]
+	a := newTestEncoder(t, WithEncoderLevel(SpeedBestCompression), WithEncoderZstdLevel(1)).EncodeAll(in, nil)
+	b := newTestEncoder(t, WithEncoderLevel(SpeedFastest)).EncodeAll(in, nil)
+	if !bytes.Equal(a, b) {
+		t.Error("WithEncoderZstdLevel(1) did not override WithEncoderLevel(SpeedBestCompression)")
+	}
+	e := newTestEncoder(t, WithEncoderZstdLevel(5))
+	if err := e.ResetWithOptions(nil, WithEncoderZstdLevel(6)); err == nil {
+		t.Error("ResetWithOptions changed WithEncoderZstdLevel without an error")
+	}
+}
+
 // TestEncodeAllAppends checks EncodeAll appends to dst and leaves its
 // existing content alone.
 func TestEncodeAllAppends(t *testing.T) {

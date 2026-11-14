@@ -54,9 +54,9 @@ type frameParameters struct {
 // cctxParams holds the requested or applied compression parameters. C:
 // zstd_compress_internal.h:ZSTD_CCtx_params_s. Only the fields the ported
 // stages read are present; later stages add theirs. The fields C has but
-// this port does not (format is always ZSTD_f_zstd1, no LDM, no external
-// sequence producer, no targetCBlockSize, no multithreading) keep their C
-// defaults implicitly.
+// this port does not (format is always ZSTD_f_zstd1, no external sequence
+// producer, no targetCBlockSize, no multithreading) keep their C defaults
+// implicitly.
 type cctxParams struct {
 	cParams                compressionParameters
 	fParams                frameParameters
@@ -66,6 +66,7 @@ type cctxParams struct {
 	postBlockSplitter      paramSwitch
 	preBlockSplitterLevel  int
 	maxBlockSize           int // 0 = default (C: ZSTD_resolveMaxBlockSize)
+	ldmParams              ldmParams
 }
 
 // fseRepeat. C: fse.h:FSE_repeat
@@ -128,6 +129,27 @@ type fseCTablesMetadata struct {
 	fseTablesBuffer        [maxFSEHeadersSize]byte
 	fseTablesSize          int
 	lastCountSize          int // accounts for a bug in 1.3.4, see entropyCompressSeqStoreInternal
+}
+
+// entropyCTablesMetadata. C: zstd_compress_internal.h:ZSTD_entropyCTablesMetadata_t
+type entropyCTablesMetadata struct {
+	hufMetadata hufCTablesMetadata
+	fseMetadata fseCTablesMetadata
+}
+
+// maxNbBlockSplits. C: zstd_compress_internal.h:ZSTD_MAX_NB_BLOCK_SPLITS
+const maxNbBlockSplits = 196
+
+// blockSplitCtx is the post-block splitter's workspace.
+// C: zstd_compress_internal.h:ZSTD_blockSplitCtx
+type blockSplitCtx struct {
+	fullSeqStoreChunk  seqStore
+	firstHalfSeqStore  seqStore
+	secondHalfSeqStore seqStore
+	currSeqStore       seqStore
+	nextSeqStore       seqStore
+	partitions         [maxNbBlockSplits]uint32
+	entropyMetadata    entropyCTablesMetadata
 }
 
 // Workspace sizes in bytes. C: zstd_compress_internal.h
@@ -596,6 +618,10 @@ type matchState struct {
 	// dictMatchState is the attached CDict's match state, searched in
 	// place (read-only), or nil.
 	dictMatchState *matchState
+
+	// ldmSeqStore holds the block's long-distance matches, which the
+	// optimal parser takes as candidates (set by ldmBlockCompress), or nil.
+	ldmSeqStore *rawSeqStore
 
 	opt optState // optimal parser state
 

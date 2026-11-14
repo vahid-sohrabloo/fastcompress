@@ -43,16 +43,18 @@ func TestBtoptFewLiteralsCref(t *testing.T) {
 // parser prices: after rescaleFreqs (first block, then the downscale of
 // later blocks) and after the setBasePrices that follows each run of
 // updateStats, with random sequences. The fast path relies on
-// litLengthSumBasePrice >= bitWeight(litLengthFreq[c]) for every code
-// (the sum of the frequencies is at least each one), so a change that
-// breaks that invariant fails here.
+// litLengthSumBasePrice >= weight(litLengthFreq[c], optLevel) for every
+// code (the sum of the frequencies is at least each one, and both weights
+// are monotonic), so a change that breaks that invariant fails here. Both
+// optLevel 0 (bitWeight) and 2 (fracWeight) are checked.
 func TestLLIncPriceInvariant(t *testing.T) {
 	r := rand.New(rand.NewPCG(21, 22))
+	var optLevel int
 	check := func(o *optState, when string) {
 		t.Helper()
 		for l := uint32(1); l <= 256; l++ {
-			if got, want := llIncPrice(l, o), llPrice(l, o)-llPrice(l-1, o); got != want {
-				t.Fatalf("%s: llIncPrice(%d) = %d, llPrice difference %d", when, l, got, want)
+			if got, want := llIncPrice(l, o, optLevel), llPrice(l, o, optLevel)-llPrice(l-1, o, optLevel); got != want {
+				t.Fatalf("optLevel %d, %s: llIncPrice(%d) = %d, llPrice difference %d", optLevel, when, l, got, want)
 			}
 		}
 	}
@@ -60,10 +62,11 @@ func TestLLIncPriceInvariant(t *testing.T) {
 	for i := range lits {
 		lits[i] = byte(r.IntN(64))
 	}
-	for range 20 {
+	for i := range 20 {
+		optLevel = 2 * (i % 2)
 		o := &optState{symbolCosts: &entropyCTables{}}
 		for range 8 {
-			rescaleFreqs(o, lits[:1000+r.IntN(len(lits)-1000)])
+			rescaleFreqs(o, lits[:1000+r.IntN(len(lits)-1000)], optLevel)
 			if o.priceType == zopPredef {
 				t.Fatal("expected dynamic prices")
 			}
@@ -73,7 +76,7 @@ func TestLLIncPriceInvariant(t *testing.T) {
 					ll := uint32(r.IntN(1 << uint(r.IntN(17))))
 					updateStats(o, ll, lits, uint32(1+r.IntN(1<<20)), uint32(3+r.IntN(1000)))
 				}
-				setBasePrices(o)
+				setBasePrices(o, optLevel)
 				check(o, "after updateStats")
 			}
 		}

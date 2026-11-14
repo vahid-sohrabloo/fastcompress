@@ -11,17 +11,18 @@ import (
 // GC safety: on Linux a table of at least hugeMinBytes is a slice of an
 // anonymous mmap made by hugeMap, outside the Go heap. The GC neither scans
 // nor frees that memory, which is safe because the tables hold only uint32
-// indices and tag bytes, never Go pointers. A mapping is unmapped in two
-// places only:
+// indices, tag bytes and LDM entries (two uint32s), never Go pointers. A
+// mapping is unmapped in two places only:
 //   - hugeTables.get, when a table outgrows its mapping: the old slice is
-//     the table being replaced, and the match state is its only holder
-//     (rowAsm/btAsm's raw pointers are cleared at every block end, and
-//     CDicts never use hugeTables);
+//     the table being replaced, and the match state (the LDM state for the
+//     LDM table) is its only holder (rowAsm/btAsm's raw pointers are
+//     cleared at every block end, and CDicts never use hugeTables);
 //   - hugeTables.free, the cleanup registered on the owning cctx: it runs
 //     once the cctx is unreachable, so nothing can still use its tables.
-//     The cctx is released by the GC when the Encoder (or its sync.Pool,
-//     which drops idle contexts across GC cycles) no longer holds it;
-//     Close does not unmap, as the Encoder may still be reused.
+//     The cctx is released by the GC when the Encoder no longer holds it
+//     (EncodeAll drops a context after a panic; otherwise the Encoder keeps
+//     its contexts for its lifetime); Close does not unmap, as the Encoder
+//     may still be reused.
 
 // hugeMinBytes is the smallest table backed by huge pages. A table below
 // it would waste most of a 2 MiB page and fits the TLB's reach anyway.
@@ -36,6 +37,7 @@ const (
 	hugeChain
 	hugeHash3
 	hugeTag
+	hugeLdm // the long-distance matcher's hash table
 	hugeSlots
 )
 
@@ -106,4 +108,17 @@ func resizeHugeTagTable(h *hugeTables, t []byte, n int) []byte {
 		}
 	}
 	return resizeTagTable(t, n)
+}
+
+// resizeHugeLdmTable returns the LDM hash table t with n entries, taking a
+// new table from h when t must grow and h can supply it. Its content is
+// not kept current (the caller clears it, as C does on every reset).
+func resizeHugeLdmTable(h *hugeTables, t []ldmEntry, n int) []ldmEntry {
+	if cap(t) < n {
+		if b := h.get(hugeLdm, n*int(unsafe.Sizeof(ldmEntry{}))); b != nil {
+			return unsafe.Slice((*ldmEntry)(unsafe.Pointer(unsafe.SliceData(b))), n)
+		}
+		return make([]ldmEntry, n)
+	}
+	return t[:n]
 }

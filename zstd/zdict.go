@@ -82,8 +82,7 @@ func BuildDict(o BuildDictOptions) ([]byte, error) {
 type buildDictError struct {
 	code int    // C: ZSTD_ErrorCode
 	err  string // the failing step's error, if it has a Go one
-	// notPorted: C would go on, through a path that is not ported (LDM,
-	// btultra, btultra2, the btopt post-block splitter)
+	// notPorted: C would go on, through a path that is not ported
 	notPorted bool
 	// undefined: C's behaviour is undefined here (it crashes)
 	undefined bool
@@ -151,15 +150,15 @@ type entropyStats struct {
 // frame parameters, unknown size).
 // C: zstd_compress.c:ZSTD_compressBegin_usingCDict_deprecated, through
 // ZSTD_compressBegin_usingCDict_internal (the CDict's parameters: the size
-// is unknown) and ZSTD_compressBegin_internal. LDM stays disabled
-// (ZSTD_resolveEnableLdm needs btopt or above with windowLog >= 27;
-// analyzeEntropy refuses such parameters before getting here).
+// is unknown) and ZSTD_compressBegin_internal. C enables LDM for a CDict
+// built with btopt or above and windowLog >= 27 (ZSTD_resolveEnableLdm).
 func (c *cctx) compressBeginUsingCDict(cd *cdict) {
 	// C: ZSTD_CCtxParams_init_internal(&cctxParams, &params, ZSTD_NO_CLEVEL)
 	var params cctxParams
 	params.cParams = cd.matchState.cParams
 	params.useRowMatchFinder = resolveRowMatchFinderMode(psAuto, &params.cParams)
 	params.postBlockSplitter = resolveBlockSplitterMode(psAuto, &params.cParams)
+	params.ldmParams.enableLdm = resolveEnableLdm(psAuto, &params.cParams)
 	params.maxBlockSize = resolveMaxBlockSize(0)
 
 	if cd.dictContentSize > 0 {
@@ -188,6 +187,9 @@ func (c *cctx) compressBlockDeprecated(dst, src []byte) (int, error) {
 		ms.forceNonContiguous = false
 		ms.nextToUpdate = ms.window.dictLimit
 	}
+	if c.appliedParams.ldmParams.enableLdm == psEnable {
+		windowUpdate(&c.ldmState.window, src, false)
+	}
 	// overflow check and correction for block mode; src ends at nextSrc
 	srcIdx := ms.window.nextSrc - uint32(len(src))
 	overflowCorrectIfNeeded(ms, &c.appliedParams, srcIdx, srcIdx+uint32(len(src)))
@@ -207,9 +209,9 @@ func (c *cctx) compressBlockDeprecated(dst, src []byte) (int, error) {
 // cut to one; samples the context rejects as larger than its own block size
 // are skipped. C: zdict.c:ZDICT_countEStats
 //
-// It fails only for what this port does not have (btultra, btultra2, and
-// btopt's post-block splitter with windowLog >= 17: C levels 13 and up),
-// where C would go on.
+// Block mode never runs the post-block splitter (C's
+// ZSTD_compressContinue_internal with frame 0), and every strategy has a
+// block compressor, so the notPorted error below is not expected.
 func countEStats(c *cctx, cd *cdict, windowLog uint32, st *entropyStats, src, work []byte, debug io.Writer) error {
 	if maxSize := min(blockSizeMax, 1<<windowLog); len(src) > maxSize {
 		src = src[:maxSize] // protection vs large samples
@@ -346,14 +348,6 @@ func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [
 	var cdParams cctxParams
 	cctxParamsInit(&cdParams, 0)
 	cdParams.cParams = cParams
-	// compressBeginUsingCDict does not port C's LDM, which
-	// ZSTD_resolveEnableLdm turns on for btopt and above with windowLog >=
-	// 27 (C level 22 with a history of 64 MiB or more). Refuse rather than
-	// differ from C, before building the CDict (whose parameters these
-	// are); BuildDict's levels (<= 11) never get here.
-	if cp := getCParamsFromCCtxParams(&cdParams, contentSizeUnknown, uint64(len(dict)), cpmCreateCDict); cp.strategy >= zstdBtopt && cp.windowLog >= 27 {
-		return 0, &buildDictError{code: int(dErrGeneric), err: fmt.Sprintf("level %d needs long-distance matching, which is not ported", level), notPorted: true}
-	}
 	cd, err := createCDictAdvanced2(dict, dctRawContent, &cdParams)
 	if err != nil {
 		debugf(debug, "Not enough memory \n")
@@ -472,13 +466,6 @@ func analyzeEntropy(dst []byte, level int, samples [][]byte, dict []byte, reps [
 // as `cref finalize-dict` gives C, so content is never truncated.
 // C: zdict.c:ZDICT_finalizeDictionary (C's minContentSize is
 // ZDICT_maxRep(repStartValue); it is the largest of reps here)
-//
-// Precondition: level must not select C's long-distance matcher (btopt or
-// above with windowLog >= 27, reachable from C level 22 with a 64 MiB
-// history): it is not ported, and analyzeEntropy returns an error instead.
-// So it does for levels that select btultra, btultra2 or the btopt
-// post-block splitter (not ported either)
-// when a sample is compressed.
 func finalizeDictionary(content []byte, samples [][]byte, level int, dictID uint32, reps [repNum]uint32, debug io.Writer) ([]byte, error) {
 	return finalizeDictionaryCap(content, samples, level, dictID, reps, uint64(len(content))+zdictCapacityExtra, debug)
 }

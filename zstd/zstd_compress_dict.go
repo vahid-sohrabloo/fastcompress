@@ -191,7 +191,7 @@ func initCDictInternal(cd *cdict, dict []byte, dct dictContentType, params cctxP
 	// < 8 bytes.
 	params.compressionLevel = clevelDefault
 	params.fParams.contentSizeFlag = true
-	dictID, err := compressInsertDictionary(&cd.cBlockState, &cd.matchState, &params, dict, dct, dtlmFull, tfpForCDict)
+	dictID, err := compressInsertDictionary(&cd.cBlockState, &cd.matchState, nil, &params, dict, dct, dtlmFull, tfpForCDict)
 	if err != nil {
 		return err
 	}
@@ -231,9 +231,10 @@ func checkDictReps(rep [repNum]uint32, dictContentSize int) error {
 	return nil
 }
 
-// compressInsertDictionary loads dict into bs and ms and returns its
-// dictionary ID. C: zstd_compress.c:ZSTD_compress_insertDictionary (no LDM)
-func compressInsertDictionary(bs *compressedBlockState, ms *matchState, params *cctxParams, dict []byte,
+// compressInsertDictionary loads dict into bs and ms (and ls, if not nil
+// and LDM is enabled) and returns its dictionary ID.
+// C: zstd_compress.c:ZSTD_compress_insertDictionary
+func compressInsertDictionary(bs *compressedBlockState, ms *matchState, ls *ldmState, params *cctxParams, dict []byte,
 	dct dictContentType, dtlm dictTableLoadMethod, tfp tableFillPurpose) (uint32, error) {
 	if len(dict) < 8 {
 		if dct == dctFullDict {
@@ -246,26 +247,26 @@ func compressInsertDictionary(bs *compressedBlockState, ms *matchState, params *
 
 	// dict restricted modes
 	if dct == dctRawContent {
-		loadDictionaryContent(ms, params, dict, dtlm, tfp)
+		loadDictionaryContent(ms, ls, params, dict, dtlm, tfp)
 		return 0, nil
 	}
 
 	if binary.LittleEndian.Uint32(dict) != dictMagic {
 		if dct == dctAuto {
-			loadDictionaryContent(ms, params, dict, dtlm, tfp)
+			loadDictionaryContent(ms, ls, params, dict, dtlm, tfp)
 			return 0, nil
 		}
 		return 0, errDictionaryWrong
 	}
 
 	// dict as full zstd dictionary
-	return loadZstdDictionary(bs, ms, params, dict, dtlm, tfp)
+	return loadZstdDictionary(bs, ms, ls, params, dict, dtlm, tfp)
 }
 
 // loadZstdDictionary loads a zstd dictionary (magic number already
 // checked, len(dict) >= 8) and returns its ID.
 // C: zstd_compress.c:ZSTD_loadZstdDictionary
-func loadZstdDictionary(bs *compressedBlockState, ms *matchState, params *cctxParams, dict []byte,
+func loadZstdDictionary(bs *compressedBlockState, ms *matchState, ls *ldmState, params *cctxParams, dict []byte,
 	dtlm dictTableLoadMethod, tfp tableFillPurpose) (uint32, error) {
 	var dictID uint32
 	if !params.fParams.noDictIDFlag {
@@ -275,7 +276,7 @@ func loadZstdDictionary(bs *compressedBlockState, ms *matchState, params *cctxPa
 	if err != nil {
 		return 0, err
 	}
-	loadDictionaryContent(ms, params, dict[eSize:], dtlm, tfp)
+	loadDictionaryContent(ms, ls, params, dict[eSize:], dtlm, tfp)
 	return dictID, nil
 }
 
@@ -401,12 +402,16 @@ func loadCEntropy(bs *compressedBlockState, dict []byte) (int, error) {
 }
 
 // loadDictionaryContent appends src to ms's window and indexes it into the
-// match finder tables. C: zstd_compress.c:ZSTD_loadDictionaryContent (no
-// LDM). C also calls ZSTD_overflowCorrectIfNeeded before filling the
-// tables; with at most currentMax - windowStartIndex bytes loaded into a
-// window that was just reset (every path here loads into a fresh CDict),
-// the index cannot exceed currentMax, so it never corrects.
-func loadDictionaryContent(ms *matchState, params *cctxParams, src []byte, dtlm dictTableLoadMethod, tfp tableFillPurpose) {
+// match finder tables, and into the long-distance matcher's (ls) when it
+// is not nil and LDM is enabled. C: zstd_compress.c:ZSTD_loadDictionaryContent.
+// C also calls ZSTD_overflowCorrectIfNeeded before filling the tables;
+// with at most currentMax - windowStartIndex bytes loaded into a window
+// that was just reset (every path here loads into a fresh CDict or a
+// freshly reset context), the index cannot exceed currentMax, so it never
+// corrects.
+func loadDictionaryContent(ms *matchState, ls *ldmState, params *cctxParams, src []byte, dtlm dictTableLoadMethod, tfp tableFillPurpose) {
+	loadLdmDict := params.ldmParams.enableLdm == psEnable && ls != nil
+
 	{ // Ensure large dictionaries can't cause index overflow
 
 		// Allow the dictionary to set indices up to exactly currentMax.
@@ -434,6 +439,14 @@ func loadDictionaryContent(ms *matchState, params *cctxParams, src []byte, dtlm 
 	baseIdx := ms.window.baseIdx
 	iend := len(ms.window.base) // src ends the window's prefix
 	ip := iend - len(src)
+
+	if loadLdmDict { // Load the entire dict into LDM matchfinders.
+		windowUpdate(&ls.window, src, false)
+		// src ends the LDM window's prefix too
+		lend := len(ls.window.base)
+		ls.loadedDictEnd = uint32(lend) + ls.window.baseIdx // C: forceWindow ? 0 : iend - base
+		ldmFillHashTable(ls, lend-len(src), lend, &params.ldmParams)
+	}
 
 	// If the dict is larger than we can reasonably index in our tables,
 	// only load the suffix.

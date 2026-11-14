@@ -505,9 +505,12 @@ func overrideCParams(cParams *compressionParameters, overrides *compressionParam
 
 // getCParamsFromCCtxParams. srcSizeHint == 0 means 0.
 // C: zstd_compress.c:ZSTD_getCParamsFromCCtxParams (no srcSizeHint
-// parameter and no LDM yet: both keep their C defaults, 0 and disabled).
+// parameter: it keeps its C default, 0).
 func getCParamsFromCCtxParams(p *cctxParams, srcSizeHint uint64, dictSize uint64, mode cParamMode) compressionParameters {
 	cParams := getCParamsInternal(p.compressionLevel, srcSizeHint, dictSize, mode)
+	if p.ldmParams.enableLdm == psEnable {
+		cParams.windowLog = ldmDefaultWindowLog
+	}
 	overrideCParams(&cParams, &p.cParams)
 	return adjustCParamsInternal(cParams, srcSizeHint, dictSize, mode, p.useRowMatchFinder)
 }
@@ -581,10 +584,19 @@ type cctx struct {
 	cBlocks    [2]compressedBlockState
 	seqStore   seqStore
 
-	tmpWorkspace []byte   // C: tmpWorkspace, used for entropy
-	splitStats   *fpStats // pre-block-splitter workspace (C: tmpWorkspace too)
-	bmi2         bool
-	hugePages    bool // WithHugePages: back the large match tables with huge pages
+	// Long-distance matching. C: ldmState, ldmSequences, maxNbLdmSequences
+	ldmState          ldmState // long distance matching state
+	ldmSequences      []rawSeq // storage for the ldm output sequences
+	maxNbLdmSequences int
+
+	tmpWorkspace []byte         // C: tmpWorkspace, used for entropy
+	splitStats   *fpStats       // pre-block-splitter workspace (C: tmpWorkspace too)
+	blockSplit   *blockSplitCtx // post-block-splitter workspace (C: blockSplitCtx)
+	// splitBlocks counts the blocks the post-block splitter cut into more
+	// than one partition (a test statistic; C has no equivalent).
+	splitBlocks int
+	bmi2        bool
+	hugePages   bool // WithHugePages: back the large match tables with huge pages
 
 	// Streaming. C's inBufferMode and outBufferMode are always
 	// ZSTD_bm_buffered here (the stable modes are not exposed).
@@ -697,10 +709,7 @@ func (c *cctx) compress2(dst, src []byte) ([]byte, error) {
 // buffers (C: ZSTD_compress2 sets both modes to ZSTD_bm_stable).
 // C: zstd_compress.c:ZSTD_CCtx_init_compressStream2 (single-threaded, no
 // prefix dictionary). The CDict is always the local dictionary's, so C's
-// override of the level by the CDict's does not apply. LDM stays disabled:
-// ZSTD_resolveEnableLdm enables it only for strategy >= btopt with
-// windowLog >= 27, which levels 1, 3, 7 and 11 never reach (btopt is
-// selected only for a pledged size <= 16 KiB, which caps windowLog at 14).
+// override of the level by the CDict's does not apply.
 func (c *cctx) initCompressStream2(endOp endDirective, inSize int, buffered bool) error {
 	params := c.requestedParams
 	if err := c.initLocalDict(); err != nil { // Init the local dict if present.
@@ -719,6 +728,7 @@ func (c *cctx) initCompressStream2(endOp endDirective, inSize int, buffered bool
 		params.cParams = getCParamsFromCCtxParams(&params, pledgedSrcSize, dictSize, mode)
 	}
 	params.postBlockSplitter = resolveBlockSplitterMode(params.postBlockSplitter, &params.cParams)
+	params.ldmParams.enableLdm = resolveEnableLdm(params.ldmParams.enableLdm, &params.cParams)
 	params.useRowMatchFinder = resolveRowMatchFinderMode(params.useRowMatchFinder, &params.cParams)
 	params.maxBlockSize = resolveMaxBlockSize(params.maxBlockSize)
 	if err := c.compressBeginInternal(&params, pledgedSrcSize, buffered); err != nil {
@@ -810,12 +820,19 @@ func dictTooBig(loadedDictSize int) bool { return loadedDictSize > chunkSizeMax 
 // checks overflow correction.
 func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, loadedDictSize int, buffered bool) {
 	c.isFirstBlock = true
+	// Set applied params early so we can modify them for LDM, and point
+	// params at the applied params.
 	c.appliedParams = *params
 	params = &c.appliedParams
+	if params.ldmParams.enableLdm == psEnable {
+		// Adjust long distance matching parameters
+		ldmAdjustParameters(&c.appliedParams.ldmParams, &params.cParams)
+	}
 
 	windowSize := max(1, min(uint64(1)<<params.cParams.windowLog, pledgedSrcSize))
 	blockSize := min(params.maxBlockSize, int(windowSize))
 	nbSeq := maxNbSeq(blockSize, params.cParams.minMatch)
+	maxNbLdmSeq := ldmGetMaxNbSeq(params.ldmParams, blockSize)
 
 	needsIndexReset := indexTooCloseToMax(&c.blockState.matchState.window) || dictTooBig(loadedDictSize) || !c.initialized
 
@@ -838,6 +855,29 @@ func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, load
 		c.blockState.matchState.huge = newHugeTables(c)
 	}
 	resetMatchState(&c.blockState.matchState, &params.cParams, params.useRowMatchFinder, needsIndexReset, resetTargetCCtx)
+
+	// ldm hash table and bucketOffsets table
+	if params.ldmParams.enableLdm == psEnable {
+		ls := &c.ldmState
+		ldmHSize := 1 << params.ldmParams.hashLog
+		ls.hashTable = resizeHugeLdmTable(c.blockState.matchState.huge, ls.hashTable, ldmHSize)
+		clear(ls.hashTable)
+		if cap(c.ldmSequences) < maxNbLdmSeq {
+			c.ldmSequences = make([]rawSeq, maxNbLdmSeq)
+		}
+		c.ldmSequences = c.ldmSequences[:maxNbLdmSeq]
+		c.maxNbLdmSequences = maxNbLdmSeq
+
+		windowInit(&ls.window)
+		ls.loadedDictEnd = 0
+
+		numBuckets := 1 << (params.ldmParams.hashLog - params.ldmParams.bucketSizeLog)
+		if cap(ls.bucketOffsets) < numBuckets {
+			ls.bucketOffsets = make([]byte, numBuckets)
+		}
+		ls.bucketOffsets = ls.bucketOffsets[:numBuckets]
+		clear(ls.bucketOffsets)
+	}
 
 	// sequences storage
 	ss := &c.seqStore
@@ -1089,6 +1129,8 @@ func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) b
 			return compressBlockBtlazy2DictMatchState
 		case zstdBtopt:
 			return compressBlockBtoptDictMatchState
+		case zstdBtultra, zstdBtultra2:
+			return compressBlockBtultraDictMatchState
 		}
 		return nil
 	}
@@ -1108,6 +1150,8 @@ func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) b
 			return compressBlockBtlazy2ExtDict
 		case zstdBtopt:
 			return compressBlockBtoptExtDict
+		case zstdBtultra, zstdBtultra2:
+			return compressBlockBtultraExtDict
 		}
 		return nil
 	}
@@ -1127,6 +1171,10 @@ func selectBlockCompressor(strat strategy, rowMatchfinder bool, mode dictMode) b
 			return compressBlockBtlazy2
 		case zstdBtopt:
 			return compressBlockBtopt
+		case zstdBtultra:
+			return compressBlockBtultra
+		case zstdBtultra2:
+			return compressBlockBtultra2
 		}
 	}
 	return nil
@@ -1141,13 +1189,16 @@ const (
 )
 
 // buildSeqStore runs the match finder over the block src at srcIdx.
-// C: zstd_compress.c:ZSTD_buildSeqStore (no LDM, no external sequences)
+// C: zstd_compress.c:ZSTD_buildSeqStore (no external sequences: C's
+// externSeqStore is always empty, so its skips and its branch are no-ops)
 func (c *cctx) buildSeqStore(src []byte, srcIdx uint32) (int, error) {
 	ms := &c.blockState.matchState
 	// See C issue 3090. MIN_CBLOCK_SIZE was reduced from 3 to 2, so 1 is
 	// added to compensate. This guard also keeps the entropy stage's
 	// maxCSize positive (see entropyCompressSeqStoreWExtLitBuffer).
 	if len(src) < minCBlockSize+blockHeaderSize+1+1 {
+		// C: ZSTD_ldm_skipRawSeqStoreBytes / ZSTD_ldm_skipSequences of the
+		// (empty) externSeqStore
 		return bssNoCompress, nil // don't even attempt compression below a certain srcSize
 	}
 	resetSeqStore(&c.seqStore)
@@ -1165,12 +1216,32 @@ func (c *cctx) buildSeqStore(src []byte, srcIdx uint32) (int, error) {
 	// select and store sequences
 	mode := matchStateDictMode(ms)
 	c.blockState.nextCBlock.rep = c.blockState.prevCBlock.rep
-	compressor := selectBlockCompressor(c.appliedParams.cParams.strategy,
-		rowMatchFinderUsed(c.appliedParams.cParams.strategy, c.appliedParams.useRowMatchFinder), mode)
-	if compressor == nil {
-		return 0, errStrategyUnsupported
+	var lastLLSize int
+	if c.appliedParams.ldmParams.enableLdm == psEnable {
+		ldmSeqStore := rawSeqStore{seq: c.ldmSequences, capacity: c.maxNbLdmSequences}
+		// src's index in the LDM window: both windows end where the chunk
+		// given to compressContinueInternal ends (ms.window.nextSrc).
+		ldmSrcIdx := c.ldmState.window.nextSrc - (ms.window.nextSrc - srcIdx)
+		// Updates ldmSeqStore.size
+		if err := ldmGenerateSequences(&c.ldmState, &ldmSeqStore, &c.appliedParams.ldmParams, ldmSrcIdx, len(src)); err != nil {
+			return 0, err
+		}
+		// Updates ldmSeqStore.pos
+		var err error
+		lastLLSize, err = ldmBlockCompress(&ldmSeqStore, ms, &c.seqStore, &c.blockState.nextCBlock.rep,
+			c.appliedParams.useRowMatchFinder, src, srcIdx)
+		if err != nil {
+			return 0, err
+		}
+	} else { // not long range mode
+		compressor := selectBlockCompressor(c.appliedParams.cParams.strategy,
+			rowMatchFinderUsed(c.appliedParams.cParams.strategy, c.appliedParams.useRowMatchFinder), mode)
+		if compressor == nil {
+			return 0, errStrategyUnsupported
+		}
+		ms.ldmSeqStore = nil
+		lastLLSize = compressor(ms, &c.seqStore, &c.blockState.nextCBlock.rep, src, srcIdx)
 	}
-	lastLLSize := compressor(ms, &c.seqStore, &c.blockState.nextCBlock.rep, src, srcIdx)
 	// C: ZSTD_storeLastLiterals
 	c.seqStore.literals = append(c.seqStore.literals, src[len(src)-lastLLSize:]...)
 	return bssCompress, nil
@@ -1297,8 +1368,7 @@ func (c *cctx) optimalBlockSize(src []byte, blockSizeMax int, splitLevel int, st
 
 // compressFrameChunk compresses src into one or more blocks, consuming all
 // of it. The frame header is already written.
-// C: zstd_compress.c:ZSTD_compress_frameChunk (no targetCBlockSize, no
-// post-block splitter)
+// C: zstd_compress.c:ZSTD_compress_frameChunk (no targetCBlockSize)
 func (c *cctx) compressFrameChunk(dst, src []byte, lastFrameChunk bool) (int, error) {
 	blockSizeMax := c.blockSizeMax
 	remaining := len(src)
@@ -1309,9 +1379,6 @@ func (c *cctx) compressFrameChunk(dst, src []byte, lastFrameChunk bool) (int, er
 
 	if c.appliedParams.fParams.checksumFlag && len(src) > 0 {
 		c.xxhState.Write(src)
-	}
-	if c.appliedParams.postBlockSplitter == psEnable {
-		return 0, errStrategyUnsupported
 	}
 
 	for remaining > 0 {
@@ -1340,24 +1407,34 @@ func (c *cctx) compressFrameChunk(dst, src []byte, lastFrameChunk bool) (int, er
 		}
 
 		block := src[ip : ip+blockSize]
-		cSize, err := c.compressBlockInternal(dst[op+blockHeaderSize:], block, ipIdx, true)
-		if err != nil {
-			return 0, err
-		}
-		if cSize == 0 { // block is not compressible
-			cSize, err = noCompressBlock(dst[op:], block, lastBlock)
+		var cSize int
+		if c.appliedParams.postBlockSplitter == psEnable { // C: ZSTD_blockSplitterEnabled
+			var err error
+			cSize, err = c.compressBlockSplitBlock(dst[op:], block, ipIdx, lastBlock)
 			if err != nil {
 				return 0, err
 			}
 		} else {
-			var cBlockHeader uint32
-			if cSize == 1 {
-				cBlockHeader = lastBlock + btRLE<<1 + uint32(blockSize)<<3
-			} else {
-				cBlockHeader = lastBlock + btCompressed<<1 + uint32(cSize)<<3
+			var err error
+			cSize, err = c.compressBlockInternal(dst[op+blockHeaderSize:], block, ipIdx, true)
+			if err != nil {
+				return 0, err
 			}
-			writeLE24(dst[op:], cBlockHeader)
-			cSize += blockHeaderSize
+			if cSize == 0 { // block is not compressible
+				cSize, err = noCompressBlock(dst[op:], block, lastBlock)
+				if err != nil {
+					return 0, err
+				}
+			} else {
+				var cBlockHeader uint32
+				if cSize == 1 {
+					cBlockHeader = lastBlock + btRLE<<1 + uint32(blockSize)<<3
+				} else {
+					cBlockHeader = lastBlock + btCompressed<<1 + uint32(cSize)<<3
+				}
+				writeLE24(dst[op:], cBlockHeader)
+				cSize += blockHeaderSize
+			}
 		}
 
 		// savings ensures that splitting doesn't worsen expansion of
@@ -1514,6 +1591,9 @@ func (c *cctx) compressContinueInternal(dst, src []byte, lastFrameChunk bool) (i
 	if !windowUpdate(&ms.window, src, ms.forceNonContiguous) {
 		ms.forceNonContiguous = false
 		ms.nextToUpdate = ms.window.dictLimit
+	}
+	if c.appliedParams.ldmParams.enableLdm == psEnable {
+		windowUpdate(&c.ldmState.window, src, false)
 	}
 
 	cSize, err := c.compressFrameChunk(dst, src, lastFrameChunk)
