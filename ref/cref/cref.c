@@ -26,6 +26,8 @@
  *                   level's value)
  *   -row R          ZSTD_c_useRowMatchFinder: 0 auto (default), 1 enable,
  *                   2 disable
+ *   -ldm L          ZSTD_c_enableLongDistanceMatching: 0 auto (default),
+ *                   1 enable, 2 disable
  *
  * MODES
  *
@@ -58,6 +60,11 @@
  *   -salt-out FILE: after each step, append a text line to FILE with the
  *   row match finder's state of the context's match state:
  *   "<hashSalt as 16 hex digits> <hashSaltEntropy decimal>\n".
+ *
+ * compress-cdict -dict FILE [-level L]
+ *   ZSTD_createCDict(dict, level) (ZSTD_dlm_byCopy, ZSTD_dct_auto) and
+ *   ZSTD_compress_usingCDict (content size, no checksum, dictID), as the
+ *   dictionary trainers compress their test samples. Output: the frame.
  *
  * stream [common opts, -pledged default 0] -chunks N1,N2,... -flush-after i,j,...
  *   Feeds the input in chunks of the given sizes (must sum to the input length;
@@ -267,7 +274,7 @@ static void dieErr(size_t rc) {
 }
 
 typedef struct {
-    int level, checksum, pledged, windowLog, rawDict, tablelog, flags, litMode, row;
+    int level, checksum, pledged, windowLog, rawDict, tablelog, flags, litMode, row, ldm;
     const char* cparams;
     const char* dictFile;
     unsigned long long seed;
@@ -328,6 +335,7 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-lit-mode"))   o->litMode = atoi(v);
         else if (!strcmp(a, "-cparams"))    o->cparams = v;
         else if (!strcmp(a, "-row"))        o->row = atoi(v);
+        else if (!strcmp(a, "-ldm"))        o->ldm = atoi(v);
         else if (!strcmp(a, "-tablelog"))   o->tablelog = atoi(v);
         else if (!strcmp(a, "-flags"))      o->flags = atoi(v);
         else if (!strcmp(a, "-seed"))       o->seed = strtoull(v, NULL, 0);
@@ -393,6 +401,10 @@ static ZSTD_CCtx* newCCtx(const Opts* o) {
         r = ZSTD_CCtx_setParameter(c, ZSTD_c_useRowMatchFinder, o->row);
         if (ZSTD_isError(r)) dieZ("set useRowMatchFinder", r);
     }
+    if (o->ldm) {
+        r = ZSTD_CCtx_setParameter(c, ZSTD_c_enableLongDistanceMatching, o->ldm);
+        if (ZSTD_isError(r)) dieZ("set enableLongDistanceMatching", r);
+    }
     if (o->dictFile) {
         FILE* f = fopen(o->dictFile, "rb");
         if (!f) die("cannot open dict file");
@@ -446,6 +458,28 @@ static int cmdCompress(const Opts* o, const unsigned char* src, size_t n) {
         feed(c, ZSTD_e_end, src, n, &out, &olen, &ocap);
     }
     writeAll(out, olen);
+    return 0;
+}
+
+/* cmdCompressCDict: ZSTD_createCDict(dict, level) (ZSTD_dlm_byCopy,
+ * ZSTD_dct_auto) and one ZSTD_compress_usingCDict call with a
+ * ZSTD_compressBound(n) output buffer, as the dictionary trainers check a
+ * candidate (cover.c:COVER_checkTotalCompressedSize). */
+static int cmdCompressCDict(const Opts* o, const unsigned char* src, size_t n) {
+    if (!o->dictFile) die("compress-cdict needs -dict");
+    FILE* f = fopen(o->dictFile, "rb");
+    if (!f) die("cannot open dict file");
+    size_t dn; void* d = readAll(f, &dn); fclose(f);
+    ZSTD_CDict* cd = ZSTD_createCDict(d, dn, o->level);
+    if (!cd) die("ZSTD_createCDict");
+    ZSTD_CCtx* c = ZSTD_createCCtx();
+    if (!c) die("ZSTD_createCCtx");
+    size_t cap = ZSTD_compressBound(n);
+    unsigned char* out = malloc(cap ? cap : 1);
+    if (!out) die("oom");
+    size_t r = ZSTD_compress_usingCDict(c, out, cap, src, n, cd);
+    if (ZSTD_isError(r)) dieZ("ZSTD_compress_usingCDict", r);
+    writeAll(out, r);
     return 0;
 }
 
@@ -933,6 +967,7 @@ int main(int argc, char** argv) {
     if (!strcmp(m, "compress"))      rc = cmdCompress(&o, src, n);
     else if (!strcmp(m, "stream"))   rc = cmdStream(&o, src, n);
     else if (!strcmp(m, "compress-seq")) rc = cmdCompressSeq(&o, src, n);
+    else if (!strcmp(m, "compress-cdict")) rc = cmdCompressCDict(&o, src, n);
     else if (!strcmp(m, "xxh64"))    rc = cmdXxh64(&o, src, n);
     else if (!strcmp(m, "hist"))     rc = cmdHist(src, n);
     else if (!strcmp(m, "fse"))      rc = cmdFse(&o, src, n);
