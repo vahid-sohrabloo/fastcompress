@@ -157,7 +157,7 @@ same: \
 
 // func optParseAsm(p *optAsmParams) (status int)
 //
-// C: zstd_opt.c:ZSTD_compressBlock_opt_generic (optLevel 0, noDict, mls 4
+// C: zstd_opt.c:ZSTD_compressBlock_opt_generic (optLevel 0, noDict, mls 3
 // to 6, dynamic prices, compressed literals) from p.ip, up to the first
 // segment to store: the forward pass (first matches, then each further
 // position priced through a literal or the matches found there), then the

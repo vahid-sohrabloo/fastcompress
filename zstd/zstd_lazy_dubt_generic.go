@@ -161,4 +161,9 @@ type btAsmParams struct {
 	sufficientLen uint32    // 84
 	iLimit        int       // 88: the end of the input
 	ok            bool      // 96
+	// mls 3 (the optimal parser's hash3 table; read by the amd64 code only)
+	hashTable3    *uint32 // 104: ms.hashTable3
+	nextToUpdate3 *uint32 // 112: &ms.nextToUpdate3
+	hash3Shift    uint32  // 120: 32 - hashLog3
+	mls3          uint32  // 124: 1 for mls 3 (minMatch 3 and the hash3 lookup), else 0
 }

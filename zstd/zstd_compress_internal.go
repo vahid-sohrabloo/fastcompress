@@ -584,7 +584,11 @@ type matchState struct {
 	loadedDictEnd uint32
 	// nextToUpdate is the index from which to continue table updates.
 	nextToUpdate uint32
-	hashLog3     uint32 // dispatch table for matches of len==3 : larger == faster, more memory
+	// nextToUpdate3 is compressBlockOptGeneric's nextToUpdate3 (C: a local
+	// of ZSTD_compressBlock_opt_generic, set to nextToUpdate at the start
+	// of each block), kept here so the assembly reaches it through btAsm.
+	nextToUpdate3 uint32
+	hashLog3      uint32 // dispatch table for matches of len==3 : larger == faster, more memory
 
 	hashTable  []uint32
 	hashTable3 []uint32

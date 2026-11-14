@@ -55,7 +55,7 @@ func optParseAsm(p *optAsmParams) (status int)
 // with the statistics set by rescaleFreqs) in assembly, storing into ss and
 // returning the last literals' size. It returns ok = false, doing nothing,
 // when the assembly is off or a precondition fails: ms.btAsm set up for this
-// block with mls 4 to 6 (btAsmSetup), dynamic prices with compressed
+// block with mls 4 to 6, or 3 on amd64 (btAsmSetup), dynamic prices with compressed
 // literals, minMatch 3 or 4 (minML), 0 < ip, a block of at most
 // blockSizeMax, sufficientLen below optNum, and the finder's preconditions
 // at ip (btGetAllMatchesFast's), which then hold at every later position

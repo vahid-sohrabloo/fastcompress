@@ -2,6 +2,9 @@
 
 package zstd
 
+// btAsmMls3: no assembly here (see zstd_lazy_dubt_amd64.go).
+const btAsmMls3 = false
+
 func insertDUBT1(ms *matchState, curr uint32, inputEnd int, nbCompares, btLow uint32) {
 	insertDUBT1Generic(ms, curr, inputEnd, nbCompares, btLow)
 }

@@ -7,6 +7,9 @@ import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 // useDubtAsm selects the assembly binary-tree loops (baseline amd64).
 var useDubtAsm bool
 
+// btAsmMls3: btGetAllNoDictAsm handles mls 3 (the hash3 table) here.
+const btAsmMls3 = true
+
 func init() {
 	cpu.RegisterAsm("dubt", &useDubtAsm, func() bool { return true })
 }
@@ -39,7 +42,7 @@ func dubtSearchAsm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbC
 //go:noescape
 func insertBt1Asm(bt *uint32, b *byte, ip, iend int, curr, baseIdx, btMask, nbCompares, btLow, windowLow, matchIndex uint32) (bestLength int, matchEndIdx uint32)
 
-// btGetAllNoDictAsm is btGetAllMatches (noDict, mls 4 to 6; see it) for
+// btGetAllNoDictAsm is btGetAllMatches (noDict, mls 3 to 6; see it) for
 // the block set up in p, at ip, with ll0 = 1 for true: nothing in a
 // skipped area, else the tree updated up to ip (updateTreeInternal) and
 // insertBtAndGetAllMatches; see btGetAllNoDict and btGetAllMatchesFast for

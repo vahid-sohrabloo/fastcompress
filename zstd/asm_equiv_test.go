@@ -290,7 +290,7 @@ func FuzzEncodeAsmEquiv(f *testing.F) {
 
 // TestAsmEquivParams compresses one input with explicit compression
 // parameters that no level table reaches (every strategy from fast to
-// btopt with minMatch 3 to 7, so the hash-chain and binary-tree assembly
+// btultra2 with minMatch 3 to 7, so the hash-chain and binary-tree assembly
 // run with mls 6, and random table sizes; hash chain or row for the lazy
 // strategies), each without and with a raw-content dictionary loaded into
 // the context, and requires C's frame (cref -cparams/-row). The inputs
@@ -327,7 +327,7 @@ func TestAsmEquivParams(t *testing.T) {
 		dict []byte
 	}
 	var cases []pcase
-	for s := zstdFast; s <= zstdBtopt; s++ {
+	for s := zstdFast; s <= zstdBtultra2; s++ {
 		for mm := uint32(3); mm <= 7; mm++ {
 			for _, row := range []paramSwitch{psDisable, psEnable} {
 				if row == psEnable && (s < zstdGreedy || s > zstdLazy2) {
@@ -378,7 +378,7 @@ func TestAsmEquivParams(t *testing.T) {
 			t.Fatalf("%+v row %d n %d dict %d: the frame differs from C's%s", c.cp, c.row, c.n, len(c.dict), firstDiff(got, want))
 		}
 		hc := c.cp.strategy >= zstdGreedy && c.cp.strategy <= zstdLazy2 && c.row == psDisable && asmOn("hc")
-		bt := c.cp.strategy == zstdBtlazy2 && asmOn("dubt") || c.cp.strategy == zstdBtopt && c.cp.minMatch > 3 && asmOn("dubt")
+		bt := c.cp.strategy == zstdBtlazy2 && asmOn("dubt") || c.cp.strategy >= zstdBtopt && (c.cp.minMatch > 3 || btAsmMls3) && asmOn("dubt")
 		if (hc || bt) && c.dict == nil && cc.blockState.matchState.asmCalls+cc.blockState.matchState.asmLoopRuns == 0 {
 			t.Fatalf("%+v row %d n %d dict %d: the assembly never ran", c.cp, c.row, c.n, len(c.dict))
 		}
@@ -387,7 +387,7 @@ func TestAsmEquivParams(t *testing.T) {
 		lazy := c.cp.strategy >= zstdGreedy && c.cp.strategy <= zstdLazy2
 		loop := c.cp.strategy == zstdFast && asmOn("fast") || c.cp.strategy == zstdDfast && asmOn("doublefast") ||
 			lazy && c.row == psDisable && asmOn("hc") || lazy && c.row == psEnable && asmOn("row") ||
-			c.cp.strategy == zstdBtlazy2 && asmOn("dubt") || c.cp.strategy == zstdBtopt && c.cp.minMatch > 3 && asmOn("opt")
+			c.cp.strategy == zstdBtlazy2 && asmOn("dubt") || c.cp.strategy == zstdBtopt && (c.cp.minMatch > 3 || btAsmMls3) && asmOn("opt")
 		if loop && c.dict == nil && c.n >= 4<<10 && cc.blockState.matchState.asmLoopRuns == 0 {
 			t.Fatalf("%+v row %d n %d: the assembly match loop never ran", c.cp, c.row, c.n)
 		}

@@ -339,30 +339,45 @@ bbad:
 #define BP_DICTLIMIT 80
 #define BP_SUFF 84
 #define BP_ILIMIT 88
+#define BP_HASH3 104
+#define BP_NEXT3 112
+#define BP_H3SHIFT 120
+#define BP_MLS3 124
 
 // func btGetAllNoDictAsm(p *btAsmParams, ip int, rep *[repNum]uint32, ll0, lengthToBeat uint32) (mnum uint32, bad bool)
 //
-// C: zstd_opt.c:ZSTD_btGetAllMatches_internal (noDict, mls 4 to 6): no
+// C: zstd_opt.c:ZSTD_btGetAllMatches_internal (noDict, mls 3 to 6): no
 // matches in an area skipped after a long match (curr < nextToUpdate),
 // else ZSTD_updateTree_internal (each position from nextToUpdate up to ip
 // inserted with ZSTD_insertBt1, extDict 0) and
 // ZSTD_insertBtAndGetAllMatches. A caller that updated the tree first
 // (btGetAllNoDict) has nextToUpdate == curr, for which the update does
-// nothing.
+// nothing. With mls 3 (p.mls3; the tree hashes 4 bytes as for mls 4, C's
+// ZSTD_hashPtr default), repcodes compare 3 bytes (ZSTD_readMINMATCH) and
+// the HC3 match finder (ZSTD_insertAndFindFirstIndexHash3, through
+// *p.nextToUpdate3) runs before the tree search.
 // Registers as in the functions above. Frame: 0(SP) dummy32, 8(SP)
 // nextPtr, 16(SP) bestLength, 24(SP) matchEndIdx, 28(SP) mnum, 32(SP)
 // curr, 36(SP) btLow, 40(SP) matchLow, 44(SP) windowLow, 48(SP) hash,
 // 56(SP) p, 64(SP) btMask, 68(SP) baseIdx, 72(SP) the first candidate,
-// 80(SP) the position being inserted (C's idx), 84(SP) its btLow.
+// 80(SP) the position being inserted (C's idx), 84(SP) its btLow, 88(SP)
+// minMatch (3 or 4), 92(SP) the mask of its bytes in a 32-bit load.
 //
 // Bounds: btGetAllNoDict checks 0 < ip, ip + 8 <= iLimit <= len(b) and
 // lowestValid <= curr; btAsmSetup checks the table sizes and lowestValid >=
 // baseIdx. So windowLow (>= lowestValid) and matchLow lie in [baseIdx,
-// curr]; a repcode is read only at an index in [windowLow, curr), and a
-// tree candidate only at one >= matchLow (>= windowLow while updating)
-// and (MATCHLEN) before the position searched. The inserted positions are
-// in [nextToUpdate, ip) with baseIdx <= nextToUpdate (checked by the
-// callers that update here), so their 8 hashed bytes lie in b[:ip+8].
+// curr]; a repcode is read only at an index in [windowLow, curr) (4 bytes,
+// then from minMatch on below iLimit), and a tree candidate only at one >=
+// matchLow (>= windowLow while updating) and (MATCHLEN) before the position
+// searched. The inserted positions are in [nextToUpdate, ip) with baseIdx
+// <= nextToUpdate (checked by the callers that update here), so their 8
+// hashed bytes lie in b[:ip+8]. HC3 (mls 3): btAsmSetup checks 0 <
+// hashLog3, len(hashTable3) >= 1<<hashLog3 and baseIdx <= nextToUpdate3,
+// whose later values are all searched indices (> baseIdx); so the
+// positions hashed (4 bytes each) are in [0, ip), every hash3 (a 32-bit
+// value shifted right by 32 - hashLog3 <= 31) indexes hashTable3, and the
+// candidate (>= matchLow >= baseIdx) is read only when its position is
+// below ip (else bad), counting up to iLimit.
 TEXT ·btGetAllNoDictAsm(SB), NOSPLIT, $96-37
 	MOVQ p+0(FP), AX
 	MOVQ AX, 56(SP)
@@ -522,6 +537,15 @@ search:
 	ADDL     $9, CX
 	MOVL     CX, 24(SP)         // matchEndIdx = curr + 8 + 1
 
+	// minMatch = mls == 3 ? 3 : 4
+	MOVL $4, 88(SP)
+	MOVL $0xffffffff, 92(SP)
+	CMPL BP_MLS3(AX), $0
+	JEQ  mmset
+	MOVL $3, 88(SP)
+	MOVL $0x00ffffff, 92(SP)
+
+mmset:
 	// repcodes: for repCode in [ll0, ll0 + 3)
 	MOVL ll0+24(FP), R10
 	LEAL 3(R10), R11
@@ -553,13 +577,17 @@ repgot:
 	MOVQ R8, R12
 	SUBQ DX, R12                // ip - repOffset (DX zero-extended)
 	MOVL (SI)(R12*1), CX
-	CMPL CX, (BX)
+	XORL (BX), CX
+	ANDL 92(SP), CX             // ZSTD_readMINMATCH(ip, minMatch) == ZSTD_readMINMATCH(ip - repOffset, minMatch)
 	JNE  repnext
-	// repLen = count(ip+4, ip+4-repOffset, iLimit) + 4
-	LEAQ 4(SI)(R12*1), R12
+	// repLen = count(ip+minMatch, ip+minMatch-repOffset, iLimit) + minMatch
+	MOVL 88(SP), CX
+	ADDQ SI, R12
+	ADDQ CX, R12
+	LEAQ (BX)(CX*1), R14
 	MOVQ R9, R15
 	SUBQ R8, R15
-	SUBQ $4, R15
+	SUBQ CX, R15
 	XORL R13, R13
 
 rc8:
@@ -567,7 +595,7 @@ rc8:
 	CMPQ CX, R15
 	JA   rctail
 	MOVQ (R12)(R13*1), CX
-	XORQ 4(BX)(R13*1), CX
+	XORQ (R14)(R13*1), CX
 	JNE  rcdiff
 	ADDQ $8, R13
 	JMP  rc8
@@ -582,13 +610,14 @@ rctail:
 	CMPQ    R13, R15
 	JAE     rcdone
 	MOVBLZX (R12)(R13*1), CX
-	CMPB    CX, 4(BX)(R13*1)
+	CMPB    CX, (R14)(R13*1)
 	JNE     rcdone
 	INCQ    R13
 	JMP     rctail
 
 rcdone:
-	ADDQ $4, R13                // repLen
+	MOVL 88(SP), CX
+	ADDQ CX, R13                // repLen
 	CMPQ R13, 16(SP)
 	JLE  repnext
 	MOVQ R13, 16(SP)
@@ -618,6 +647,109 @@ repret:
 	RET
 
 repdone:
+	// HC3 match finder: mls 3 and bestLength < 3
+	CMPL BP_MLS3(AX), $0
+	JEQ  hupdate
+	CMPQ 16(SP), $3
+	JGE  hupdate
+
+	// matchIndex3 = ZSTD_insertAndFindFirstIndexHash3: hashTable3[hash3]
+	// = idx for idx in [nextToUpdate3, curr), then nextToUpdate3 = curr;
+	// hash3 = ((le32 << 8) * prime3bytes) >> (32 - hashLog3)
+	MOVQ BP_NEXT3(AX), R12
+	MOVL (R12), R13             // idx
+	MOVQ BP_HASH3(AX), R14
+	MOVL BP_H3SHIFT(AX), CX
+
+h3loop:
+	CMPL   R13, 32(SP)
+	JAE    h3found
+	MOVL   R13, DX
+	SUBL   68(SP), DX           // its position (zero-extended)
+	MOVL   (SI)(DX*1), DX
+	SHLL   $8, DX
+	IMUL3L $0x1e35a7bd, DX, DX  // prime3bytes
+	SHRL   CX, DX
+	MOVL   R13, (R14)(DX*4)
+	INCL   R13
+	JMP    h3loop
+
+h3found:
+	MOVL   32(SP), DX
+	MOVL   DX, (R12)            // nextToUpdate3 = curr
+	MOVL   (BX), DX
+	SHLL   $8, DX
+	IMUL3L $0x1e35a7bd, DX, DX
+	SHRL   CX, DX
+	MOVL   (R14)(DX*4), R14     // matchIndex3
+	CMPL   R14, 40(SP)
+	JB     hupdate              // matchIndex3 < matchLow
+	MOVL   32(SP), R10
+	SUBL   R14, R10             // curr - matchIndex3
+	CMPL   R10, $0x40000
+	JAE    hupdate              // heuristic : longer distance likely too expensive (1<<18)
+	MOVL   R14, R12
+	SUBL   68(SP), R12          // its position (zero-extended)
+	CMPQ   R12, R8
+	JAE    gbad                 // not before ip (impossible)
+
+	// mlen = count(ip, match, iLimit)
+	ADDQ SI, R12
+	MOVQ R9, R15
+	SUBQ R8, R15
+	XORL R13, R13
+
+h3c8:
+	LEAQ 8(R13), CX
+	CMPQ CX, R15
+	JA   h3ctail
+	MOVQ (R12)(R13*1), CX
+	XORQ (BX)(R13*1), CX
+	JNE  h3cdiff
+	ADDQ $8, R13
+	JMP  h3c8
+
+h3cdiff:
+	BSFQ CX, CX
+	SHRQ $3, CX
+	ADDQ CX, R13
+	JMP  h3cdone
+
+h3ctail:
+	CMPQ    R13, R15
+	JAE     h3cdone
+	MOVBLZX (R12)(R13*1), CX
+	CMPB    CX, (BX)(R13*1)
+	JNE     h3cdone
+	INCQ    R13
+	JMP     h3ctail
+
+h3cdone:
+	// save best solution: mlen >= 3 (> bestLength), matches[0] (no prior one)
+	CMPQ R13, $3
+	JB   hupdate
+	MOVQ R13, 16(SP)            // bestLength
+	MOVQ BP_MATCHES(AX), R12
+	LEAL 3(R10), CX
+	MOVL CX, (R12)              // off = offsetToOffBase(curr - matchIndex3)
+	MOVL R13, 4(R12)            // len
+	MOVL $1, 28(SP)             // mnum
+	MOVL BP_SUFF(AX), CX
+	CMPQ R13, CX
+	JA   h3ret                  // mlen > sufficientLen: best possible length
+	LEAQ (R8)(R13*1), CX
+	CMPQ CX, R9
+	JNE  hupdate
+
+h3ret:
+	MOVQ BP_NEXT(AX), CX
+	MOVL 32(SP), DX
+	INCL DX
+	MOVL DX, (CX)               // nextToUpdate = curr + 1: skip insertion
+	MOVL $1, mnum+32(FP)
+	RET
+
+hupdate:
 	// hashTable[h] = curr
 	MOVQ BP_HASH(AX), CX
 	MOVQ 48(SP), DX

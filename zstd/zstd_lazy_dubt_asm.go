@@ -59,15 +59,22 @@ func insertBt1Loop(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, b
 
 // btAsmSetup prepares ms.btAsm for compressBlockOptGeneric's noDict
 // searches (with their match table) or btlazy2's (matches nil) over a
-// block ending at iend (a position in ms.window.base), for mls 4 to 6 (mls
-// 3 adds the optimal parser's hash3 table, left to the Go code).
+// block ending at iend (a position in ms.window.base), for mls 4 to 6, and
+// on amd64 (btAsmMls3) for the optimal parser's mls 3, which adds its hash3
+// table: then 0 < hashLog3 (so a hash3 is below 1<<hashLog3 <=
+// len(hashTable3)) and baseIdx <= ms.nextToUpdate3, which compressBlockOptGeneric
+// has just set to nextToUpdate. Every later value of nextToUpdate3 is the
+// index of a searched position (> baseIdx), so the positions hashed into
+// hashTable3 always lie in the window's buffer.
 func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int) {
 	p := &ms.btAsm
 	p.ok = false
 	cParams := &ms.cParams
 	b := ms.window.base
 	btMask := uint32(1)<<(cParams.chainLog-1) - 1
-	if !useDubtAsm || mls < 4 || mls > 6 || len(ms.hashTable) < 1<<cParams.hashLog || len(ms.chainTable) < 2*int(btMask+1) ||
+	mls3 := mls == 3 && btAsmMls3 && matches != nil && ms.hashLog3 > 0 && len(ms.hashTable3) >= 1<<ms.hashLog3 &&
+		ms.nextToUpdate3 >= ms.window.baseIdx
+	if !useDubtAsm || (mls < 4 && !mls3) || mls > 6 || len(ms.hashTable) < 1<<cParams.hashLog || len(ms.chainTable) < 2*int(btMask+1) ||
 		iend > len(b) || len(b) == 0 || ms.window.lowLimit < ms.window.baseIdx {
 		return
 	}
@@ -91,12 +98,18 @@ func btAsmSetup(ms *matchState, matches *[optSize]optMatch, mls uint32, iend int
 	if matches != nil {
 		p.matches = &matches[0]
 	}
+	if mls3 {
+		p.hashTable3 = &ms.hashTable3[0]
+		p.nextToUpdate3 = &ms.nextToUpdate3
+		p.hash3Shift = 32 - ms.hashLog3
+		p.mls3 = 1
+	}
 	if ms.loadedDictEnd != 0 {
 		p.isDictionary = 1
 	}
 }
 
-// btGetAllNoDict is insertBtAndGetAllMatches (noDict, mls 4 to 6) in
+// btGetAllNoDict is insertBtAndGetAllMatches (noDict, mls 3 to 6) in
 // assembly, writing into matches, with ms.btAsm set up for this block. ok
 // is false (nothing done) when it is not set up or a precondition fails:
 // matches is the table btAsmSetup was given (the assembly writes there),

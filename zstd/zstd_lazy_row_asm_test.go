@@ -146,6 +146,10 @@ func TestBtAsmParamsLayout(t *testing.T) {
 		{"dictLimit", unsafe.Offsetof(p.dictLimit), 80},
 		{"sufficientLen", unsafe.Offsetof(p.sufficientLen), 84},
 		{"iLimit", unsafe.Offsetof(p.iLimit), 88},
+		{"hashTable3", unsafe.Offsetof(p.hashTable3), 104},
+		{"nextToUpdate3", unsafe.Offsetof(p.nextToUpdate3), 112},
+		{"hash3Shift", unsafe.Offsetof(p.hash3Shift), 120},
+		{"mls3", unsafe.Offsetof(p.mls3), 124},
 	} {
 		if c.got != c.want {
 			t.Errorf("btAsmParams.%s at offset %d, the assembly expects %d", c.name, c.got, c.want)

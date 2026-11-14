@@ -313,6 +313,25 @@ func mlPrice(matchLength uint32, o *optState, optLevel int) uint32 {
 		bitCostMultiplier/5 // heuristic : make matches a bit more costly to favor less sequences -> faster decompression speed
 }
 
+// offCodePriceTerm is offsetPrice (dynamic statistics) for offset code
+// offCode without offCodeSumBasePrice: in uint32 arithmetic, as offsetPrice,
+// offsetPrice(offBase) == offCodePriceTerm(highbit32(offBase)) +
+// offCodeSumBasePrice. It changes only with offCodeFreq[offCode].
+func offCodePriceTerm(o *optState, offCode uint32, optLevel int) uint32 {
+	price := offCode*bitCostMultiplier - weight(o.offCodeFreq[offCode], optLevel)
+	if optLevel < 2 && offCode >= 20 {
+		price += (offCode - 19) * 2 * bitCostMultiplier // handicap for long distance offsets, favor decompression speed
+	}
+	return price
+}
+
+// mlCodePriceTerm is mlPrice (dynamic statistics) for match length code
+// mlc without matchLengthSumBasePrice, as offCodePriceTerm.
+func mlCodePriceTerm(o *optState, mlc uint32, optLevel int) uint32 {
+	return uint32(mlBits[mlc])*bitCostMultiplier - weight(o.matchLengthFreq[mlc], optLevel) +
+		bitCostMultiplier/5 // heuristic : make matches a bit more costly to favor less sequences -> faster decompression speed
+}
+
 // updateStats counts a sequence into the statistics.
 // C: zstd_opt.c:ZSTD_updateStats
 func updateStats(o *optState, litLength uint32, literals []byte, offBase, matchLength uint32) {
@@ -1175,7 +1194,8 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 	if cParams.minMatch == 3 {
 		minML = 3
 	}
-	nextToUpdate3 := ms.nextToUpdate
+	ms.nextToUpdate3 = ms.nextToUpdate
+	nextToUpdate3 := &ms.nextToUpdate3
 
 	opt := optStatePtr.priceTable
 	matches := optStatePtr.matchTable
@@ -1201,6 +1221,20 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 	// init
 	rescaleFreqs(optStatePtr, src, optLevel)
 	dynamic := optStatePtr.priceType != zopPredef // set by rescaleFreqs; getMatchPrice's two schemes
+	// With dynamic statistics, offsetPrice and mlPrice are a base price
+	// plus a term that depends only on the offset or match length code and
+	// its frequency: that term per code (offCodePriceTerm,
+	// mlCodePriceTerm), refreshed for the codes of each sequence stored.
+	var offCodePrice [maxOff + 1]uint32
+	var mlCodePrice [maxML + 1]uint32
+	if dynamic {
+		for offCode := range uint32(maxOff + 1) {
+			offCodePrice[offCode] = offCodePriceTerm(optStatePtr, offCode, optLevel)
+		}
+		for mlc := range uint32(maxML + 1) {
+			mlCodePrice[mlc] = mlCodePriceTerm(optStatePtr, mlc, optLevel)
+		}
+	}
 	if ip == prefixStart {
 		ip++
 	}
@@ -1218,7 +1252,7 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 		{
 			litlen := uint32(ip - anchor)
 			ll0 := litlen == 0
-			nbMatches := btGetAllMatches(matches, ms, &nextToUpdate3, ip, iend, rep, ll0, minML, mls, mode)
+			nbMatches := btGetAllMatches(matches, ms, nextToUpdate3, ip, iend, rep, ll0, minML, mls, mode)
 			if ldmLive {
 				optLdmProcessMatchCandidate(&ldm, matches, &nbMatches, uint32(ip-istart), uint32(iend-ip), minML)
 			}
@@ -1269,11 +1303,12 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 			for matchNb := range nbMatches {
 				offBase := matches[matchNb].off
 				end := matches[matchNb].len
-				offPrice := offsetPrice(offBase, optStatePtr, optLevel) // with dynamic statistics: getMatchPrice = offPrice + mlPrice
+				// with dynamic statistics: getMatchPrice = offsetPrice + mlPrice
+				offPrice := offCodePrice[highbit32(offBase)] + optStatePtr.offCodeSumBasePrice + optStatePtr.matchLengthSumBasePrice
 				for ; pos <= end; pos++ {
 					var matchPrice int
 					if dynamic {
-						matchPrice = int(offPrice + mlPrice(pos, optStatePtr, optLevel))
+						matchPrice = int(offPrice + mlCodePrice[mlCode(pos-minMatch)])
 					} else {
 						matchPrice = int(getMatchPrice(offBase, pos, optStatePtr, optLevel))
 					}
@@ -1349,7 +1384,7 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 				ll0 := opt[cur].litlen == 0
 				previousPrice := opt[cur].price
 				basePrice := previousPrice + llPrice(0, optStatePtr, optLevel)
-				nbMatches := btGetAllMatches(matches, ms, &nextToUpdate3, inr, iend, &opt[cur].rep, ll0, minML, mls, mode)
+				nbMatches := btGetAllMatches(matches, ms, nextToUpdate3, inr, iend, &opt[cur].rep, ll0, minML, mls, mode)
 				if ldmLive {
 					optLdmProcessMatchCandidate(&ldm, matches, &nbMatches, uint32(inr-istart), uint32(iend-inr), minML)
 				}
@@ -1375,13 +1410,14 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 					if matchNb > 0 {
 						startML = matches[matchNb-1].len + 1
 					}
-					offPrice := offsetPrice(offset, optStatePtr, optLevel)
+					// offsetPrice and mlPrice's base, with dynamic statistics
+					offPrice := offCodePrice[highbit32(offset)] + optStatePtr.offCodeSumBasePrice + optStatePtr.matchLengthSumBasePrice
 
 					for mlen := lastML; mlen >= startML; mlen-- { // scan downward
 						pos := cur + mlen
 						var price int
 						if dynamic {
-							price = basePrice + int(offPrice+mlPrice(mlen, optStatePtr, optLevel))
+							price = basePrice + int(offPrice+mlCodePrice[mlCode(mlen-minMatch)]) // offsetPrice + mlPrice
 						} else {
 							price = basePrice + int(getMatchPrice(offset, mlen, optStatePtr, optLevel))
 						}
@@ -1472,6 +1508,11 @@ func compressBlockOptGeneric(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 				}
 
 				updateStats(optStatePtr, llen, b[anchor:], offBase, mlen)
+				if dynamic {
+					offCode, mlc := highbit32(offBase), mlCode(mlen-minMatch)
+					offCodePrice[offCode] = offCodePriceTerm(optStatePtr, offCode, optLevel)
+					mlCodePrice[mlc] = mlCodePriceTerm(optStatePtr, mlc, optLevel)
+				}
 				storeSeq(ss, int(llen), b[anchor:], offBase, int(mlen))
 				anchor += int(advance)
 				ip = anchor

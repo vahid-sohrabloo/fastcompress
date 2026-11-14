@@ -63,8 +63,8 @@ func TestOptAsmParamsLayout(t *testing.T) {
 // lengths crossing the llCode table's end and powers of two inside a
 // forward pass), copies from up to 3 MiB back (offset codes >= 20, priced
 // with the long-distance handicap) and copies longer than optNum, over
-// full-size blocks; mls 4 to 6, random search depths and target lengths
-// (sufficientLen up to optNum - 1).
+// full-size blocks; mls 3 (with its hash3 table) to 6, random search depths
+// and target lengths (sufficientLen up to optNum - 1).
 func TestOptAsmEquiv(t *testing.T) {
 	text := readTestdata(t, "dickens-32k.raw")
 	r := rand.New(rand.NewPCG(20, 6))
@@ -95,7 +95,7 @@ func TestOptAsmEquiv(t *testing.T) {
 	savedOpt, savedDubt := useOptAsm, useDubtAsm
 	defer func() { useOptAsm, useDubtAsm = savedOpt, savedDubt }()
 	useDubtAsm = true
-	for _, mls := range []uint32{4, 5, 6} {
+	for _, mls := range []uint32{3, 4, 5, 6} {
 		const baseIdx = 3
 		cp := compressionParameters{
 			windowLog:    23,
@@ -112,6 +112,10 @@ func TestOptAsmEquiv(t *testing.T) {
 			ms.cParams = cp
 			ms.hashTable = make([]uint32, 1<<cp.hashLog)
 			ms.chainTable = make([]uint32, 1<<cp.chainLog)
+			if mls == 3 {
+				ms.hashLog3 = min(hashLog3Max, cp.windowLog)
+				ms.hashTable3 = make([]uint32, 1<<ms.hashLog3)
+			}
 			ms.nextToUpdate = baseIdx
 			ms.opt.matchTable = new([optSize]optMatch)
 			ms.opt.priceTable = new([optSize]optimal)
@@ -144,7 +148,8 @@ func TestOptAsmEquiv(t *testing.T) {
 			if msGo.opt.litFreq != msAsm.opt.litFreq || msGo.opt.offCodeFreq != msAsm.opt.offCodeFreq ||
 				msGo.opt.litLengthFreq != msAsm.opt.litLengthFreq || msGo.opt.matchLengthFreq != msAsm.opt.matchLengthFreq ||
 				!slices.Equal(msAsm.hashTable, msGo.hashTable) || !slices.Equal(msAsm.chainTable, msGo.chainTable) ||
-				msAsm.nextToUpdate != msGo.nextToUpdate {
+				msAsm.nextToUpdate != msGo.nextToUpdate || !slices.Equal(msAsm.hashTable3, msGo.hashTable3) ||
+				msAsm.nextToUpdate3 != msGo.nextToUpdate3 {
 				t.Fatalf("mls %d block [%d, %d): the statistics or tables differ from Go's", mls, pos, pos+n)
 			}
 			if n > 8 && msAsm.asmLoopRuns == runs {
@@ -182,7 +187,7 @@ func TestOptAsmOptNumBound(t *testing.T) {
 	useDubtAsm = true
 	const pad = 8
 	sentinel := optimal{price: -12345, off: 0xdeadbeef, mlen: 0xdeadbeef, litlen: 0xdeadbeef, rep: [3]uint32{1, 2, 3}}
-	for _, mls := range []uint32{4, 5, 6} {
+	for _, mls := range []uint32{3, 4, 5, 6} {
 		for _, tl := range []uint32{64, 4095} {
 			for _, ws := range [][2]uint32{{10, 6}, {17, 1}, {23, 3}} { // windowLog, searchLog
 				const baseIdx = 3
@@ -198,6 +203,10 @@ func TestOptAsmOptNumBound(t *testing.T) {
 					ms.cParams = cp
 					ms.hashTable = make([]uint32, 1<<cp.hashLog)
 					ms.chainTable = make([]uint32, 1<<cp.chainLog)
+					if mls == 3 {
+						ms.hashLog3 = min(hashLog3Max, cp.windowLog)
+						ms.hashTable3 = make([]uint32, 1<<ms.hashLog3)
+					}
 					ms.nextToUpdate = baseIdx
 					pt := make([]optimal, optSize+2*pad)
 					mt := make([]optMatch, optSize+2*pad)
@@ -247,6 +256,53 @@ func TestOptAsmOptNumBound(t *testing.T) {
 					pos += n
 				}
 			}
+		}
+	}
+}
+
+// TestOptAsmMls3Levels compresses with the C levels whose parameters have
+// minMatch 3 (btultra and btultra2 at 18 to 22 for large inputs; btopt at
+// 14 and btultra at 16 for inputs up to 256 KiB), with the assembly off and
+// on: the frames must be equal, and with it on the assembly must have run
+// for mls 3 (btGetAllNoDictAsm with the hash3 table: matchState.asmCalls
+// for the btultra levels' Go match loop, asmLoopRuns for btopt's
+// optParseAsm).
+func TestOptAsmMls3Levels(t *testing.T) {
+	text := readTestdata(t, "dickens-32k.raw")
+	big := make([]byte, 0, 300<<10)
+	for len(big) < 300<<10 { // > 256 KiB: the default parameter table
+		big = append(big, text...)
+		big[len(big)-1-len(big)%977]++
+	}
+	for _, c := range []struct {
+		level int
+		src   []byte
+	}{{14, text}, {16, text}, {18, big}, {19, big}, {20, big}, {21, big}, {22, big}} {
+		cc := newCCtx()
+		cc.setLevel(c.level)
+		var off, on []byte
+		var err error
+		withAsm(t, false, func() { off, err = cc.compress2(nil, c.src) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		ms := &cc.blockState.matchState
+		if ms.cParams.minMatch != 3 {
+			t.Fatalf("level %d: minMatch %d, want 3", c.level, ms.cParams.minMatch)
+		}
+		withAsm(t, true, func() { on, err = cc.compress2(nil, c.src) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(off, on) {
+			t.Fatalf("level %d: the assembly changes the frame (%d vs %d bytes)", c.level, len(on), len(off))
+		}
+		ran := ms.asmCalls
+		if ms.cParams.strategy == zstdBtopt {
+			ran = ms.asmLoopRuns
+		}
+		if ran == 0 {
+			t.Fatalf("level %d (strategy %d): the mls 3 assembly never ran", c.level, ms.cParams.strategy)
 		}
 	}
 }

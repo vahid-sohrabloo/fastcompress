@@ -12,17 +12,20 @@ import (
 )
 
 // TestBtAsmBlockEquiv is TestHcAsmLazyEquiv for the binary-tree assembly:
-// btlazy2 (dubtFindBestMatchAsm, insertDUBT1Asm, dubtSearchAsm) and btopt
-// (btGetAllNoDictAsm, insertBt1Asm) run block by block with the Go code and
-// with the assembly, each on its own copy of the same match state, for mls
-// 4 to 6, the dictionary flag with the window starting after the first
+// btlazy2 (dubtFindBestMatchAsm, insertDUBT1Asm, dubtSearchAsm), btopt and
+// btultra (btGetAllNoDictAsm, insertBt1Asm; btopt through optParseFast,
+// btultra through the Go match loop) run block by block with the Go code
+// and with the assembly, each on its own copy of the same match state, for
+// mls 4 to 6 and, for btopt and btultra where the assembly handles it
+// (btAsmMls3), mls 3 with its hash3 table, the dictionary flag with the window starting after the first
 // index (C's isDictionary candidate bound; see TestHcAsmLazyEquiv for why
 // no public API reaches it), and random table sizes and window logs, over
 // text, random bytes and short-period runs (long matches overlapping their
 // source, after which the searches skip positions below nextToUpdate). The
 // sequences, literals, repcodes, final tables and lazySkipping must agree,
 // and the assembly must have run (for btlazy2, the parser lazyBtRun, not
-// only its finder). On an AVX2 host it runs again without AVX2.
+// only its finder). With mls 3, hashTable3 must agree too, as must
+// nextToUpdate3 (C's local, whose effect on hashTable3 later blocks see). On an AVX2 host it runs again without AVX2.
 func TestBtAsmBlockEquiv(t *testing.T) {
 	withAsm(t, true, func() { testBtAsmBlockEquiv(t) })
 	if cpu.X86.HasAVX2 {
@@ -58,8 +61,11 @@ func testBtAsmBlockEquiv(t *testing.T) {
 	}
 	saved := useDubtAsm
 	defer func() { useDubtAsm = saved }()
-	for _, strat := range []strategy{zstdBtlazy2, zstdBtopt} {
-		for _, mls := range []uint32{4, 5, 6} {
+	for _, strat := range []strategy{zstdBtlazy2, zstdBtopt, zstdBtultra} {
+		for _, mls := range []uint32{3, 4, 5, 6} {
+			if mls == 3 && (strat == zstdBtlazy2 || !btAsmMls3) {
+				continue // btlazy2 searches with mls >= 4
+			}
 			for _, dict := range []bool{false, true} {
 				const baseIdx = 5
 				start := 0
@@ -82,6 +88,10 @@ func testBtAsmBlockEquiv(t *testing.T) {
 					ms.cParams = cp
 					ms.hashTable = make([]uint32, 1<<cp.hashLog)
 					ms.chainTable = make([]uint32, 1<<cp.chainLog)
+					if mls == 3 {
+						ms.hashLog3 = min(hashLog3Max, cp.windowLog)
+						ms.hashTable3 = make([]uint32, 1<<ms.hashLog3)
+					}
 					ms.nextToUpdate = lowLimit
 					if dict {
 						ms.loadedDictEnd = lowLimit + 1
@@ -99,8 +109,11 @@ func testBtAsmBlockEquiv(t *testing.T) {
 					ss.sequences = make([]seqDef, 0, 1<<15)
 				}
 				compress := func(ms *matchState, ss *seqStore, rep *[repNum]uint32, blk []byte, idx uint32) int {
-					if strat == zstdBtopt {
+					switch strat {
+					case zstdBtopt:
 						return compressBlockBtopt(ms, ss, rep, blk, idx)
+					case zstdBtultra:
+						return compressBlockBtultra(ms, ss, rep, blk, idx)
 					}
 					return compressBlockBtlazy2(ms, ss, rep, blk, idx)
 				}
@@ -120,7 +133,8 @@ func testBtAsmBlockEquiv(t *testing.T) {
 							strat, mls, dict, cp, pos, pos+n, len(ssAsm.sequences), len(ssGo.sequences))
 					}
 					if !slices.Equal(msAsm.hashTable, msGo.hashTable) || !slices.Equal(msAsm.chainTable, msGo.chainTable) ||
-						msAsm.nextToUpdate != msGo.nextToUpdate || msAsm.lazySkipping != msGo.lazySkipping {
+						msAsm.nextToUpdate != msGo.nextToUpdate || msAsm.lazySkipping != msGo.lazySkipping ||
+						!slices.Equal(msAsm.hashTable3, msGo.hashTable3) || msAsm.nextToUpdate3 != msGo.nextToUpdate3 {
 						t.Fatalf("strategy %d mls %d dict %v block [%d, %d): the tables or lazySkipping differ from Go's", strat, mls, dict, pos, pos+n)
 					}
 					pos += n

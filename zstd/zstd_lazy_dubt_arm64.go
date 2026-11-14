@@ -7,6 +7,10 @@ import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 // useDubtAsm selects the assembly binary-tree loops (baseline arm64).
 var useDubtAsm bool
 
+// btAsmMls3: btGetAllNoDictAsm does not handle mls 3 (the hash3 table)
+// here; btAsmSetup leaves mls 3 to the Go code.
+const btAsmMls3 = false
+
 func init() {
 	cpu.RegisterAsm("dubt", &useDubtAsm, func() bool { return true })
 }
