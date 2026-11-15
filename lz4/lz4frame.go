@@ -8,11 +8,10 @@ import (
 )
 
 // The frame format of lz4frame.c (lz4 v1.11.1, Copyright (c) Yann Collet,
-// BSD 2-Clause): single-threaded frame compression (LZ4F_compressBegin,
+// BSD 2-Clause): frame compression (LZ4F_compressBegin,
 // LZ4F_compressUpdate, LZ4F_flush, LZ4F_compressEnd, LZ4F_compressFrame and
-// the dictionary variants). C's multi-threaded mode (nbWorkers >= 1) is not
-// ported: it produces the same frames as single-threaded mode for
-// independent blocks, and other frames for linked blocks.
+// the dictionary variants), single-threaded or cut into jobs compressed by
+// goroutines (nbWorkers >= 1, frame_mt.go).
 
 // BlockSizeID selects the maximum block size of a frame (C:
 // LZ4F_blockSizeID_t). 0 selects Block64KB.
@@ -49,6 +48,17 @@ type Preferences struct {
 	CompressionLevel int
 	AutoFlush        bool // compress each input at once, without buffering a block
 	FavorDecSpeed    bool // levels 10 to 12: prefer faster decoding
+	// NbWorkers: 0 compresses on the calling goroutine; from 1, the content
+	// is cut into jobs (1 MB, or one block when larger) compressed by up to
+	// NbWorkers goroutines (at most 1024) and emitted in order (C:
+	// nbWorkers). The frame is C's for the same content and flush points
+	// whatever NbWorkers (from 1) and the scheduling: with independent
+	// blocks it is the single-threaded frame; with linked blocks each job
+	// restarts with the previous 64 KB as dictionary (C's lz4 -T), which
+	// differs slightly from the single-threaded frame. Output lags behind
+	// input: Update, Flush and End emit the jobs completed, the dst bounds
+	// (CompressBoundFrame) count them.
+	NbWorkers int
 }
 
 // Frame errors (C: LZ4F_errorCodes).
@@ -137,9 +147,13 @@ func CompressFrameBound(srcSize int, p *Preferences) int {
 }
 
 // CompressBoundFrame returns the largest output of one Writer step
-// compressing srcSize bytes, flush and end included (C: LZ4F_compressBound
-// for single-threaded frames).
+// compressing srcSize bytes, flush and end included (C: LZ4F_compressBound;
+// with NbWorkers and without AutoFlush the jobs srcSize starts, plus every
+// job in flight, which C emits over several calls).
 func CompressBoundFrame(srcSize int, p *Preferences) int {
+	if p != nil && !p.AutoFlush && mtEligible(p) {
+		return mtCompressBound(srcSize, p)
+	}
 	if p != nil && p.AutoFlush {
 		pp := *p
 		if _, err := BlockSize(pp.BlockSizeID); err != nil {
@@ -216,6 +230,8 @@ type frameCCtx struct {
 	rawDict      CDict
 	rawDictFast  *Stream
 	rawDictHC    *StreamHC
+	mt           *frameMT // multi-threaded frames (kept across frames)
+	mtActive     bool     // the current frame is cut into jobs
 }
 
 // C: LZ4F_initStream
@@ -291,8 +307,13 @@ func (c *frameCCtx) begin(dst []byte, dict []byte, cdict *CDict, p *Preferences)
 	if _, err := BlockSize(prefs.BlockSizeID); err != nil {
 		return 0, err
 	}
+	if c.mtActive {
+		c.mt.abort() // jobs of an abandoned frame
+		c.mtActive = false
+	}
 	c.cStage = 0
 	c.prefs = prefs
+	mtFrame := mtEligible(&prefs)
 
 	want := ctxFast
 	if prefs.CompressionLevel >= LevelHCMin {
@@ -313,7 +334,8 @@ func (c *frameCCtx) begin(dst []byte, dict []byte, cdict *CDict, p *Preferences)
 		c.ctxType = want
 	}
 
-	if dict != nil && prefs.BlockIndependent {
+	// a raw dictionary is a CDict for independent blocks and for jobs
+	if dict != nil && (prefs.BlockIndependent || mtFrame) {
 		cdict = c.digestRawDict(dict)
 		dict = nil
 	}
@@ -330,6 +352,9 @@ func (c *frameCCtx) begin(dst []byte, dict []byte, cdict *CDict, p *Preferences)
 		required := linked
 		if !prefs.AutoFlush {
 			required = c.maxBlockSize + linked
+		}
+		if mtFrame {
+			required = 0 // jobs have their own buffers
 		}
 		if len(c.tmpBuff) < required {
 			c.tmpBuff = make([]byte, required)
@@ -368,7 +393,86 @@ func (c *frameCCtx) begin(dst []byte, dict []byte, cdict *CDict, p *Preferences)
 	}
 	dst[op] = headerChecksum(dst[4:op])
 	op++
+	if mtFrame {
+		if c.mt == nil {
+			c.mt = new(frameMT)
+		}
+		c.mt.begin(c)
+		c.mtActive = true
+	}
 	c.cStage = 1
+	return op, nil
+}
+
+// dstEmitter appends job output to dst (the dst-based API).
+type dstEmitter struct {
+	dst []byte
+	op  int
+}
+
+func (e *dstEmitter) emit(b []byte) error {
+	if len(e.dst)-e.op < len(b) {
+		return ErrDstTooSmallFrame
+	}
+	e.op += copy(e.dst[e.op:], b)
+	return nil
+}
+
+// mtFail ends a frame whose job or output failed (C: LZ4F_invalidateFrame).
+func (c *frameCCtx) mtFail(err error) error {
+	c.mt.abort()
+	c.mtActive = false
+	c.cStage = 0
+	return err
+}
+
+// mtUpdate is LZ4F_compressUpdate for a frame cut into jobs, emitting
+// output through emit.
+func (c *frameCCtx) mtUpdate(src []byte, stable bool, mode blockCompressMode, emit func([]byte) error) error {
+	if c.cStage != 1 {
+		return ErrStage
+	}
+	if err := c.mt.update(src, stable, mode, emit); err != nil {
+		return c.mtFail(err)
+	}
+	if c.prefs.ContentChecksum {
+		c.xxh.Write(src)
+	}
+	c.totalInSize += uint64(len(src))
+	return nil
+}
+
+// mtFlush is LZ4F_flush for a frame cut into jobs: every job is emitted.
+func (c *frameCCtx) mtFlush(emit func([]byte) error) error {
+	if c.cStage != 1 {
+		return ErrStage
+	}
+	if err := c.mt.flush(emit); err != nil {
+		return c.mtFail(err)
+	}
+	return nil
+}
+
+// mtEnd is LZ4F_compressEnd for a frame cut into jobs: the jobs through
+// emit, then the end mark and checksum into tail (8 bytes).
+func (c *frameCCtx) mtEnd(tail []byte, emit func([]byte) error) (int, error) {
+	if c.cStage != 1 {
+		return 0, ErrStage
+	}
+	if c.prefs.ContentSize != 0 && c.prefs.ContentSize != c.totalInSize {
+		return 0, c.mtFail(ErrFrameSize)
+	}
+	if err := c.mt.flush(emit); err != nil {
+		return 0, c.mtFail(err)
+	}
+	binary.LittleEndian.PutUint32(tail, 0)
+	op := 4
+	if c.prefs.ContentChecksum {
+		binary.LittleEndian.PutUint32(tail[op:], c.xxh.Sum32())
+		op += 4
+	}
+	c.mtActive = false
+	c.cStage = 0
 	return op, nil
 }
 
@@ -493,10 +597,16 @@ func (c *frameCCtx) flushBlock(dst []byte) (int, error) {
 	return n, nil
 }
 
-// update is C's LZ4F_st_update; dst must hold CompressBoundFrame(len(src)).
+// update is C's LZ4F_compressUpdate (LZ4F_st_update, or the jobs); dst
+// must hold CompressBoundFrame(len(src)).
 func (c *frameCCtx) update(dst, src []byte, stableSrc bool, mode blockCompressMode) (int, error) {
 	if c.cStage != 1 {
 		return 0, ErrStage
+	}
+	if c.mtActive {
+		e := dstEmitter{dst: dst}
+		err := c.mtUpdate(src, stableSrc, mode, e.emit)
+		return e.op, err
 	}
 	blockSize := c.maxBlockSize
 	op := 0
@@ -606,6 +716,11 @@ func (c *frameCCtx) flush(dst []byte) (int, error) {
 	if c.cStage != 1 {
 		return 0, ErrStage
 	}
+	if c.mtActive {
+		e := dstEmitter{dst: dst}
+		err := c.mtFlush(e.emit)
+		return e.op, err
+	}
 	return c.flushBlock(dst)
 }
 
@@ -613,6 +728,18 @@ func (c *frameCCtx) flush(dst []byte) (int, error) {
 func (c *frameCCtx) end(dst []byte) (int, error) {
 	if c.cStage != 1 {
 		return 0, ErrStage
+	}
+	if c.mtActive {
+		if len(dst) < 8 {
+			return 0, c.mtFail(ErrDstTooSmallFrame)
+		}
+		e := dstEmitter{dst: dst[:len(dst)-8]}
+		var tail [8]byte
+		n, err := c.mtEnd(tail[:], e.emit)
+		if err != nil {
+			return 0, err
+		}
+		return e.op + copy(dst[e.op:], tail[:n]), nil
 	}
 	if c.prefs.ContentSize != 0 && c.prefs.ContentSize != c.totalInSize {
 		c.cStage = 0
@@ -646,6 +773,12 @@ func (c *frameCCtx) compressFrame(dst, src []byte, dict []byte, cdict *CDict, p 
 	prefs.AutoFlush = true
 	if bs, err := BlockSize(prefs.BlockSizeID); err == nil && len(src) <= bs {
 		prefs.BlockIndependent = true
+	}
+	if mtEligible(&prefs) {
+		// a single job is the single-threaded frame, without the setup
+		if bs, err := BlockSize(prefs.BlockSizeID); err != nil || len(src) <= mtJobSize(bs) {
+			prefs.NbWorkers = 0
+		}
 	}
 	if len(dst) < CompressFrameBound(len(src), &prefs) {
 		return 0, ErrDstTooSmallFrame

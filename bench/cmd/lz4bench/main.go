@@ -5,7 +5,9 @@
 // bench.c compresses each file into one frame with the CLI's preferences:
 // independent blocks (linked with -BD, lz4bench -linked), no checksums, a
 // dictionary with -D (lz4bench -dict), favorDecSpeed with --favor-decSpeed
-// (lz4bench -favor), and with a custom block size the
+// (lz4bench -favor), nbWorkers with -T# (lz4bench -T: the frame cut into
+// jobs, compressed by that many goroutines; C reads stable input in place),
+// and with a custom block size the
 // block size ID that holds it, autoFlush, and one LZ4F_compressUpdate per
 // block-sized chunk (unstable input), on one reused LZ4F_cctx; a file smaller
 // than the block is compressed with LZ4F_compressFrame. Decompression decodes
@@ -39,12 +41,13 @@ func main() {
 	linked := flag.Bool("linked", false, "linked blocks (lz4 -BD)")
 	dictFile := flag.String("dict", "", "dictionary file (lz4 -D: its last 64 KiB, digested once into a CDict)")
 	favor := flag.Bool("favor", false, "favorDecSpeed (lz4 --favor-decSpeed)")
+	workers := flag.Int("T", 0, "worker goroutines (Preferences.NbWorkers, lz4 -T#; 0: single-threaded)")
 	flag.Parse()
 	if flag.NArg() != 1 || (*mode != "c" && *mode != "d") {
-		fmt.Fprintln(os.Stderr, "usage: lz4bench [-mode c|d] [-level N] [-block N] [-linked] [-dict F] [-favor] [-secs S] [-cpuprofile F] FILE")
+		fmt.Fprintln(os.Stderr, "usage: lz4bench [-mode c|d] [-level N] [-block N] [-linked] [-dict F] [-favor] [-T N] [-secs S] [-cpuprofile F] FILE")
 		os.Exit(2)
 	}
-	o := opts{decode: *mode == "d", level: *level, block: *block, linked: *linked, favor: *favor, dictFile: *dictFile}
+	o := opts{decode: *mode == "d", level: *level, block: *block, linked: *linked, favor: *favor, dictFile: *dictFile, workers: *workers}
 	if err := run(o, *secs, *cpuprofile, flag.Arg(0)); err != nil {
 		fmt.Fprintln(os.Stderr, "lz4bench:", err)
 		os.Exit(1)
@@ -68,7 +71,7 @@ func blockSizeID(blockSize int) (lz4.BlockSizeID, bool) {
 
 type opts struct {
 	decode, linked, favor bool
-	level, block          int
+	level, block, workers int
 	dictFile              string
 }
 
@@ -96,7 +99,7 @@ func run(o opts, secs float64, cpuprofile, path string) error {
 		block = 4 << 20
 	}
 	id, custom := blockSizeID(block)
-	prefs := lz4.Preferences{CompressionLevel: level, AutoFlush: custom, FavorDecSpeed: o.favor}
+	prefs := lz4.Preferences{CompressionLevel: level, AutoFlush: custom, FavorDecSpeed: o.favor, NbWorkers: o.workers}
 	prefs.BlockSizeID = id
 	prefs.BlockIndependent = !linked
 	chunk := 4 << 20 // bench.c BMK_CHUNK_SIZE
@@ -118,7 +121,11 @@ func run(o opts, secs float64, cpuprofile, path string) error {
 			return 0, err
 		}
 		for done := 0; done < len(src); done += chunk {
-			n, err := fc.Update(frame[pos:], src[done:min(done+chunk, len(src))])
+			update := fc.Update
+			if o.workers > 0 {
+				update = fc.UpdateStable // bench.c: LZ4F_srcStableUntilFlush with nbWorkers
+			}
+			n, err := update(frame[pos:], src[done:min(done+chunk, len(src))])
 			if err != nil {
 				return 0, err
 			}

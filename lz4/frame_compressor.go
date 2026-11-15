@@ -47,6 +47,19 @@ func (f *FrameCompressor) Update(dst, src []byte) (int, error) {
 	return f.c.update(dst, src, false, compressedMode)
 }
 
+// UpdateStable is Update for input that stays unchanged until the next
+// Flush or End (C: LZ4F_compressUpdate with stableSrc =
+// LZ4F_srcStableUntilFlush): linked blocks reference it in place instead of
+// a copy, and the jobs of a frame with NbWorkers read it in place. With
+// linked blocks and no NbWorkers the frame can differ from Update's (C's
+// does too).
+func (f *FrameCompressor) UpdateStable(dst, src []byte) (int, error) {
+	if err := f.checkDst(dst, len(src)); err != nil {
+		return 0, err
+	}
+	return f.c.update(dst, src, true, compressedMode)
+}
+
 // UpdateUncompressed stores src as uncompressed blocks (C:
 // LZ4F_compressUpdate with the uncompressed option).
 func (f *FrameCompressor) UpdateUncompressed(dst, src []byte) (int, error) {

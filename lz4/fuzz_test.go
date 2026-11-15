@@ -137,3 +137,64 @@ func FuzzCompress(f *testing.F) {
 		}
 	})
 }
+
+// FuzzFrameMT compresses arbitrary input into frames cut into small jobs
+// (a test job size of 1 to 4 blocks of 64 KB, so that small inputs make
+// several jobs) through the Writer with writes, uncompressed writes and
+// flushes chosen by plan: NbWorkers 2 and 7 must produce NbWorkers 1's
+// frame, which must decode to the input.
+func FuzzFrameMT(f *testing.F) {
+	m := creftest.LZ4Inputs(f)
+	f.Add(uint8(1), uint16(0x1234), m["text128KiB"])
+	f.Add(uint8(0x42), uint16(0xfff0), m["period3-200K"])
+	f.Add(uint8(0x83), uint16(7), append(append([]byte(nil), m["random-70K"]...), m["text128KiB"]...))
+	f.Fuzz(func(t *testing.T, sel uint8, plan uint16, src []byte) {
+		if len(src) > 1<<19 {
+			return
+		}
+		saved := mtJobSizeMax
+		mtJobSizeMax = 64 * kb * (1 + int(sel>>6))
+		defer func() { mtJobSizeMax = saved }()
+		p := Preferences{CompressionLevel: []int{1, -2, 2, 3, 9, 10}[int(sel)%6], AutoFlush: sel&8 != 0}
+		p.BlockIndependent = sel&16 != 0
+		p.BlockChecksum = sel&32 != 0
+		p.ContentChecksum = true
+		run := func(nw int) []byte {
+			p.NbWorkers = nw
+			var buf bytes.Buffer
+			w := NewWriter(&buf, WithPreferences(p))
+			pl := plan
+			for off := 0; off < len(src); {
+				n := min(len(src)-off, 1+int(pl&0xff)*601)
+				var err error
+				if pl&0x300 == 0x300 {
+					_, err = w.WriteUncompressed(src[off : off+n])
+				} else {
+					_, err = w.Write(src[off : off+n])
+				}
+				if err == nil && pl&0xc00 == 0xc00 {
+					err = w.Flush()
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				off += n
+				pl = pl>>3 | pl<<13
+			}
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return buf.Bytes()
+		}
+		want := run(1)
+		for _, nw := range []int{2, 7} {
+			if got := run(nw); !bytes.Equal(got, want) {
+				t.Fatalf("NbWorkers %d: %d bytes, NbWorkers 1 %d", nw, len(got), len(want))
+			}
+		}
+		dec, err := AppendDecompressFrame(nil, want, nil)
+		if err != nil || !bytes.Equal(dec, src) {
+			t.Fatalf("decoding: %v", err)
+		}
+	})
+}

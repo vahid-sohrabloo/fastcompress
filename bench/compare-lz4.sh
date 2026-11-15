@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compare lz4bench (this port) against `lz4 -b<level>` from C lz4 v1.11.1.
 #
-#   bench/compare-lz4.sh [-mode c|d] [-l "1 2 9 12"] [-f "FILE..."] [-B BLOCK] [-D] [-S] [-dict] [-favor] [-i SECS] [-g SECS] [-n RUNS] -label NAME
+#   bench/compare-lz4.sh [-mode c|d] [-l "1 2 9 12"] [-f "FILE..."] [-B BLOCK] [-D] [-S] [-dict] [-favor] [-T N] [-i SECS] [-g SECS] [-n RUNS] -label NAME
 #
 # Writes bench/results/<date>-lz4-<label>.md. Each row: taskset -c $CPU, RUNS
 # (default 3) interleaved C/Go runs, median speed reported. C runs
@@ -18,7 +18,9 @@
 # (-T1 runs C's job mode with one worker thread: the same frames, a little
 # slower). -dict compresses each file with a dictionary (lz4 -D, lz4bench
 # -dict): 64 KiB from the middle of the file itself. -favor sets
-# favorDecSpeed (lz4 --favor-decSpeed, lz4bench -favor).
+# favorDecSpeed (lz4 --favor-decSpeed, lz4bench -favor). -T N runs C's
+# multi-threaded mode with N workers (lz4 -TN; with -D: linked frames cut
+# into jobs) and lz4bench -T N; pin to N cores with CPU=LIST.
 # PREBUILT=DIR in the environment uses DIR/lz4bench instead of go build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -36,6 +38,7 @@ CTHREAD=-T1
 CPU=${CPU:-2}
 DICT=""
 FAVOR=""
+GTHREAD=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -l) LEVELS=$2; shift 2 ;;
@@ -45,6 +48,7 @@ while [ $# -gt 0 ]; do
     -S) CTHREAD=--single-thread; shift ;;
     -dict) DICT=1; shift ;;
     -favor) FAVOR=1; shift ;;
+    -T) CTHREAD=-T$2; GTHREAD="-T $2"; shift 2 ;;
     -i) CSECS=$2; shift 2 ;;
     -g) GSECS=$2; shift 2 ;;
     -n) RUNS=$2; shift 2 ;;
@@ -96,7 +100,7 @@ c_bench() { # level file -> "MBps ratio"
     | awk -v m="$MODE" '{print (m == "d" ? $2 : $1), $3}'
 }
 go_bench() { # level file -> "MBps ratio"
-  taskset -c "$CPU" "$BIN/lz4bench" -mode "$MODE" -level "$1" -block "$GBLOCK" ${LINKED:+-linked} ${FAVOR:+-favor} ${DICT:+-dict "$(dict_of "$2")"} -secs "$GSECS" "$2"
+  taskset -c "$CPU" "$BIN/lz4bench" -mode "$MODE" -level "$1" -block "$GBLOCK" ${LINKED:+-linked} ${FAVOR:+-favor} $GTHREAD ${DICT:+-dict "$(dict_of "$2")"} -secs "$GSECS" "$2"
 }
 median() { sort -g | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
 
@@ -106,7 +110,7 @@ mkdir -p bench/results
   echo "# lz4 $LABEL"
   echo
   echo "- date: $(date -Is); host: $(uname -n); pinned to CPU $CPU"
-  echo "- C: $($LZ4 -V 2>&1 | head -1 | sed 's/^\*\** *//; s/ *\**$//'); \`lz4 -b<L> $CTHREAD ${LINKED:+-BD }${FAVOR:+--favor-decSpeed }${DICT:+-D DICT }-B$BLOCK -i$CSECS\`; Go: \`lz4bench -mode $MODE -block $GBLOCK ${LINKED:+-linked }${FAVOR:+-favor }${DICT:+-dict DICT }-secs $GSECS\`${DICT:+ (DICT: 64 KiB from the middle of the file)}"
+  echo "- C: $($LZ4 -V 2>&1 | head -1 | sed 's/^\*\** *//; s/ *\**$//'); \`lz4 -b<L> $CTHREAD ${LINKED:+-BD }${FAVOR:+--favor-decSpeed }${DICT:+-D DICT }-B$BLOCK -i$CSECS\`; Go: \`lz4bench -mode $MODE -block $GBLOCK ${GTHREAD:+$GTHREAD }${LINKED:+-linked }${FAVOR:+-favor }${DICT:+-dict DICT }-secs $GSECS\`${DICT:+ (DICT: 64 KiB from the middle of the file)}"
   echo "- median of $RUNS interleaved runs per cell; MB/s = 1e6 bytes/s of input ($([ "$MODE" = d ] && echo decompression || echo compression))"
   echo
   echo "| file | level | C MB/s | Go MB/s | % of C | C ratio | Go ratio |"

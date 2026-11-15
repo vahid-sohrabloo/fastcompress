@@ -39,12 +39,15 @@
  *   right before dst, else in its own buffer). Output: the decoded bytes.
  * frame [level=L] [bsid=4..7] [linked=0|1] [cchk=0|1] [bchk=0|1] [csize=0|1]
  *       [dictid=N] [favor=0|1] [dict=FILE] [cdict=0|1] [autoflush=0|1]
- *       [plan=oneshot|STEP,...]
+ *       [workers=N] [plan=oneshot|STEP,...]
  *   plan=oneshot (default): LZ4F_compressFrame (or LZ4F_compressFrame_usingCDict
  *   with a dictionary and cdict=1; a dictionary with cdict=0 uses
  *   LZ4F_compressBegin_usingDict + one update + end). Otherwise steps:
  *   wN writes the next N bytes of stdin from a fresh allocation (unstable src),
  *   uN writes N bytes as uncompressed blocks, f flushes, e ends (implied).
+ *   workers=N sets nbWorkers: linked frames are cut into jobs (C's
+ *   multi-threaded output, here computed by the calling thread; independent
+ *   blocks are unchanged).
  *   Output: the frame.
  * framedec [dict=FILE]
  *   LZ4F_decompress_usingDict over all of stdin (concatenated frames, skippable
@@ -330,6 +333,7 @@ static void prefsFromArgs(LZ4F_preferences_t* p)
     p->frameInfo.dictID = (unsigned)argi("dictid", 0);
     p->favorDecSpeed = (unsigned)argi("favor", 0);
     p->autoFlush = (unsigned)argi("autoflush", 0);
+    p->nbWorkers = (unsigned)argi("workers", 0);
 }
 
 #define CHECKF(r) do { if (LZ4F_isError(r)) { fprintf(stderr, "lz4ref: %s\n", LZ4F_getErrorName(r)); exit(1); } } while (0)
