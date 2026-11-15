@@ -11,6 +11,8 @@ env:
   ZSTD_TAG: v1.5.7
   # Must match LDTAG in ref/fetch.sh (the cache key of ref/libdeflate).
   LIBDEFLATE_TAG: v1.26
+  # Must match LZ4TAG in ref/fetch.sh (the cache key of ref/lz4).
+  LZ4_TAG: v1.11.1
 
 jobs:
   test:
@@ -48,6 +50,11 @@ jobs:
         with:
           path: ref/libdeflate
           key: libdeflate-${{ env.LIBDEFLATE_TAG }}
+      - name: Cache C reference (lz4 source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/lz4
+          key: lz4-${{ env.LZ4_TAG }}-${{ runner.os }}-${{ runner.arch }}
       # The flate, gzip, zlib and zstd differential tests read Silesia
       # (bench/corpus/silesia and silesia.tar) and fail when it is missing.
       - name: Cache Silesia corpus
@@ -66,6 +73,9 @@ jobs:
       # ldref runs natively).
       - name: Build ldref
         run: make -C ref/ldref
+      # lz4ref: the lz4 v1.11.1 driver of the lz4 differential tests.
+      - name: Build lz4ref
+        run: make -C ref/lz4ref
       # The group's selection: the packages, or ./internal/deflate with the
       # partition's -run regex (other: -skip of the other partitions). The
       # noasm pass also runs every Fuzz target's seed corpus with the
@@ -129,12 +139,20 @@ jobs:
         with:
           path: ref/libdeflate
           key: libdeflate-${{ env.LIBDEFLATE_TAG }}
+      - name: Cache C reference (lz4 source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/lz4
+          key: lz4-${{ env.LZ4_TAG }}-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch C zstd and libdeflate, build the zstd CLI (no corpus)
         run: ref/fetch.sh --no-corpus
       - name: Build cref
         run: make -C ref/cref
       - name: Build ldref
         run: make -C ref/ldref
+      # lz4ref: the lz4 v1.11.1 driver of the lz4 differential tests.
+      - name: Build lz4ref
+        run: make -C ref/lz4ref
       - name: Fuzz (20s per target)
         run: scripts/fuzz.sh -t 20s
       - name: Collect failing inputs
