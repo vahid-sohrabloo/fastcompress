@@ -10,8 +10,13 @@ const MaxSymbolTooSmall = ^uint32(0)
 // CountSimple counts bytes with a single table. It zeroes count[0..*maxSymbol],
 // sets *maxSymbol to the largest symbol present and returns the largest count.
 // src must not contain symbols above *maxSymbol.
-// C: hist.c:HIST_count_simple
+// C: hist.c:HIST_count_simple. From 1500 bytes on (CountFast's threshold)
+// it counts as countParallel does, with the same results: Huffman's
+// incompressibility probe counts 4 KiB samples with it.
 func CountSimple(count *[256]uint32, maxSymbol *uint32, src []byte) uint32 {
+	if len(src) >= 1500 {
+		return countParallel(count, maxSymbol, src, false)
+	}
 	maxSymbolValue := *maxSymbol
 	clear(count[:maxSymbolValue+1])
 	if len(src) == 0 {
@@ -34,9 +39,9 @@ func CountSimple(count *[256]uint32, maxSymbol *uint32, src []byte) uint32 {
 	return largest
 }
 
-// countParallel counts into 4 tables, recombined at the end.
-// C: hist.c:HIST_count_parallel_wksp. The workspace is a local array (4 KiB,
-// stack-allocated) instead of a caller-provided buffer.
+// countParallel counts into histTables tables (C: 4), recombined at the
+// end. C: hist.c:HIST_count_parallel_wksp. The workspace is a local array
+// (4 or 8 KiB, stack-allocated) instead of a caller-provided buffer.
 func countParallel(count *[256]uint32, maxSymbol *uint32, src []byte, check bool) uint32 {
 	n := len(src)
 	countSize := int(*maxSymbol) + 1
@@ -49,11 +54,10 @@ func countParallel(count *[256]uint32, maxSymbol *uint32, src []byte, check bool
 	// REP STOSQ, which is much slower on a 4-byte-aligned address.
 	var w struct {
 		_  [0]uint64
-		ws [4 * 256]uint32
+		ws [histTables * 256]uint32
 	}
 	ws := &w.ws
-	countStripes(ws, src)
-	maxCount := countMerge(ws, n)
+	maxCount := countTables(ws, src)
 	c1 := (*[256]uint32)(ws[0:256])
 
 	maxSymbolValue := uint32(255)

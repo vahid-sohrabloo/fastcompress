@@ -1,6 +1,7 @@
-//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
+//go:build arm64 && !appengine && !noasm && !purego && gc
 
-// The Go side of the counting loop's assembly, shared by amd64 and arm64.
+// The Go side of the arm64 counting loop's assembly (amd64 has its own
+// 8-table loop, see hist_amd64.go).
 
 package hist
 

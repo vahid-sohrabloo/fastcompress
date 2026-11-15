@@ -2,68 +2,90 @@
 
 #include "textflag.h"
 
-// COUNT4(off, w, wh): count the 4 bytes at off(SI) into tables 0-3, byte i
-// into table i. The word is loaded with a 32-bit load, as C's
-// HIST_count_parallel_wksp does, so the four words of an iteration are
-// independent loads; the second byte is read from the high-byte register
-// (wh = AH or BH). Clobbers w, CX, DX.
-#define COUNT4(off, w, wh) \
-	MOVL    off(SI), w; \
+// COUNT8(off, w, wh): count the 8 bytes at off(SI) into tables 0-7, byte i
+// into table i (ws holds 8 tables of 256 counts). The two bytes in the low
+// 16 bits of w are counted, then w is shifted right by 16. Clobbers w, CX,
+// DX.
+#define COUNT8(off, w, wh) \
+	MOVQ    off(SI), w; \
 	MOVBLZX w, CX; \
 	MOVBLZX wh, DX; \
 	INCL    (DI)(CX*4); \
 	INCL    1024(DI)(DX*4); \
-	MOVL    w, CX; \
-	SHRL    $24, w; \
-	SHRL    $16, CX; \
-	MOVBLZX CL, CX; \
+	SHRQ    $16, w; \
+	MOVBLZX w, CX; \
+	MOVBLZX wh, DX; \
 	INCL    2048(DI)(CX*4); \
-	INCL    3072(DI)(w*4)
+	INCL    3072(DI)(DX*4); \
+	SHRQ    $16, w; \
+	MOVBLZX w, CX; \
+	MOVBLZX wh, DX; \
+	INCL    4096(DI)(CX*4); \
+	INCL    5120(DI)(DX*4); \
+	SHRQ    $16, w; \
+	MOVBLZX w, CX; \
+	MOVBLZX wh, DX; \
+	INCL    6144(DI)(CX*4); \
+	INCL    7168(DI)(DX*4)
 
-// func countStripesAsm(ws *[1024]uint32, src *byte, n int)
-TEXT ·countStripesAsm(SB), NOSPLIT, $0-24
+// func countStripes8Asm(ws *[8 * 256]uint32, src *byte, n int)
+TEXT ·countStripes8Asm(SB), NOSPLIT, $0-24
 	MOVQ ws+0(FP), DI
 	MOVQ src+8(FP), SI
 	MOVQ n+16(FP), R8
 	LEAQ (SI)(R8*1), R8      // end
 
-loop16:
-	LEAQ 16(SI), AX
+loop32:
+	LEAQ 32(SI), AX
 	CMPQ AX, R8
-	JHI  tail
-	COUNT4(0, AX, AH)
-	COUNT4(4, BX, BH)
-	COUNT4(8, AX, AH)
-	COUNT4(12, BX, BH)
-	ADDQ $16, SI
-	JMP  loop16
+	JHI  loop8
+	COUNT8(0, AX, AH)
+	COUNT8(8, BX, BH)
+	COUNT8(16, AX, AH)
+	COUNT8(24, BX, BH)
+	ADDQ $32, SI
+	JMP  loop32
 
-tail:
+loop8:
+	LEAQ 8(SI), AX
+	CMPQ AX, R8
+	JHI  tail8
+	COUNT8(0, AX, AH)
+	ADDQ $8, SI
+	JMP  loop8
+
+tail8:
 	CMPQ    SI, R8
-	JAE     done
+	JAE     done8
 	MOVBLZX (SI), CX
 	INCL    (DI)(CX*4)
 	INCQ    SI
-	JMP     tail
+	JMP     tail8
 
-done:
+done8:
 	RET
 
-// func countMergeAsm(ws *[1024]uint32) uint32
+// func countMerge8Asm(ws *[8 * 256]uint32) uint32
 //
-// Adds tables 1-3 of ws into table 0 and returns the largest sum, 4 lanes
-// at a time (SSE2; C's loop as gcc vectorizes it). The counts are below
-// 2^31 (countMerge's precondition), so the signed compare orders them.
-TEXT ·countMergeAsm(SB), NOSPLIT, $0-12
+// countMergeAsm for the 8 tables of countStripes8Asm.
+TEXT ·countMerge8Asm(SB), NOSPLIT, $0-12
 	MOVQ ws+0(FP), DI
 	PXOR X4, X4              // running max per lane
 	XORL AX, AX
 
-merge:
+merge8:
 	MOVOU (DI)(AX*1), X0
 	MOVOU 1024(DI)(AX*1), X1
 	MOVOU 2048(DI)(AX*1), X2
 	MOVOU 3072(DI)(AX*1), X3
+	PADDL X1, X0
+	PADDL X3, X2
+	MOVOU 4096(DI)(AX*1), X1
+	MOVOU 5120(DI)(AX*1), X3
+	PADDL X1, X0
+	PADDL X3, X2
+	MOVOU 6144(DI)(AX*1), X1
+	MOVOU 7168(DI)(AX*1), X3
 	PADDL X1, X0
 	PADDL X3, X2
 	PADDL X2, X0
@@ -76,7 +98,7 @@ merge:
 	MOVO  X5, X4
 	ADDQ  $16, AX
 	CMPQ  AX, $1024
-	JNE   merge
+	JNE   merge8
 
 	// horizontal max of the 4 lanes
 	PSHUFD $0x4e, X4, X0
