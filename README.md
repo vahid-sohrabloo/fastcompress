@@ -269,13 +269,10 @@ four inputs (xml, dickens, ooffice and `silesia.tar` in 1 MiB blocks):
 
 | level | compression | decompression |
 |---|---|---|
-| 13 | 82-100% | 99-105% |
-| 16 | 106-116% | 101-103% |
-| 19 | 72-94% | 96-103% |
-| 22 | 71-80% | 102-105% |
-
-Levels 19 and 22 are our slowest: their parser (btultra2) runs in Go, while
-the faster levels' parser also has assembly.
+| 13 | 95-100% | 100-105% |
+| 16 | 103-112% | 101-104% |
+| 19 | 87-114% | 101-105% |
+| 22 | 97-132% | 102-105% |
 
 Expect other CPUs to give different numbers. The charts are drawn from the
 `bench/compare.sh` output by `bench/plot.py`.
