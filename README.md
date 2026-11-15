@@ -361,12 +361,18 @@ decoder's fast loop (C's `LZ4_FAST_DEC_LOOP` part, without external
 dictionary), the fast compressor's main loop (one-shot with byU16 and
 byU32 tables, and the streaming prefix and external-dictionary modes with
 C's resume-in-prefix split; limited or unlimited output), the LZ4MID main
-loop of level 2 (no dictionary), and
-the candidate loop of the hash chain search with the table insertion
-(levels 3 to 12, including `chainSwap` and `favorDecSpeed`). Each falls back
-to Go where C's code takes a path the assembly does not cover (attached
-dictionaries, `destSize`, the pattern analysis), and each has a fuzz target comparing it
-with the Go code. Baseline instructions only (no BMI2 or AVX2 needed).
+loop of level 2 (no dictionary), and the whole parsers of levels 3 to 12
+for a block without external or attached dictionary:
+`LZ4HC_compress_hashChain` (levels 3 to 9) and
+`LZ4HC_compress_optimal` (10 to 12), with the match search (table
+insertion, candidate loop, pattern analysis, `chainSwap`) and the price
+updates in the same routine. With `favorDecSpeed`, `destSize` or a
+dictionary the Go parsers run, with the search's candidate loop still in
+assembly. Each falls back to Go where C's code takes a path the assembly
+does not cover, and each has a fuzz target comparing it with the Go code.
+Baseline instructions only (SSE2; no BMI2 or AVX2 needed): 16-byte match
+compares measured slower than 8-byte ones on the short matches that
+dominate, except in LZ4MID's count past the first 8 bytes.
 arm64 and the other architectures run the Go code, tested in CI's way
 (`GOARCH=arm64 go vet`, `-tags noasm` test runs); arm64 speed is not
 measured.
@@ -375,30 +381,41 @@ measured.
 
 Single-threaded frame speed against C `lz4` v1.11.1 (`lz4 -b<L> -T1 -B4M`:
 one frame per file, 4 MiB independent blocks, no checksums) on three Silesia
-files, measured with `bench/compare-lz4.sh` (median of three interleaved
-runs, each the best mean of ~1 s windows over 3 s). The output is
-byte-identical (equal ratios on every row). Treat a few percent as noise;
-other CPUs give other numbers.
+files, and on `silesia.tar` in 64 KiB blocks (`-B64K`), measured with
+`bench/compare-lz4.sh` (median of three interleaved runs, each the best
+mean of ~1 s windows over 3 s, pinned to one core). The output is
+byte-identical (equal ratios on every row). Treat a few percent as noise
+(the closest rows, level 1 on xml and the decoder on dickens, are within
+it); other CPUs give other numbers.
 
-| level | xml | dickens | ooffice | geomean |
-|---|---|---|---|---|
-| 1 (fast) compression | 97.5% | 99.3% | 98.8% | 98.5% |
-| 2 (LZ4MID) compression | 95.3% | 93.0% | 92.9% | 93.7% |
-| 4 (hash chain) compression | 72.6% | 70.9% | 59.3% | 67.3% |
-| 9 (hash chain) compression | 87.0% | 87.7% | 68.0% | 80.4% |
-| 12 (optimal) compression | 77.6% | 82.1% | 71.9% | 77.1% |
-| 1 decompression | 99.1% | 96.7% | 99.3% | 98.4% |
-| 9 decompression | 97.4% | 96.0% | 98.2% | 97.2% |
+| level | xml | dickens | ooffice | geomean | silesia.tar, 64 KiB |
+|---|---|---|---|---|---|
+| 1 (fast) compression | 101.0% | 102.4% | 106.0% | 103.1% | 106.8% |
+| 2 (LZ4MID) compression | 101.8% | 102.2% | 103.8% | 102.6% | 103.1% |
+| 3 (hash chain) compression | 107.7% | 111.3% | 109.9% | 109.6% | 111.5% |
+| 4 compression | 109.3% | 115.5% | 112.2% | 112.3% | 112.7% |
+| 5 compression | 108.9% | 115.9% | 112.2% | 112.3% | 112.5% |
+| 6 compression | 107.9% | 112.7% | 111.5% | 110.7% | 111.2% |
+| 7 compression | 105.9% | 110.4% | 110.5% | 108.9% | 110.0% |
+| 8 compression | 104.8% | 108.6% | 109.9% | 107.7% | 108.8% |
+| 9 (hash chain) compression | 104.2% | 107.5% | 107.7% | 106.5% | 107.7% |
+| 10 (optimal) compression | 104.7% | 104.0% | 108.1% | 105.6% | 108.5% |
+| 11 compression | 104.6% | 103.6% | 108.6% | 105.6% | 108.6% |
+| 12 (optimal) compression | 106.2% | 104.2% | 109.7% | 106.7% | 110.2% |
+| 1 decompression | 104.4% | 101.9% | 103.4% | 103.2% | 102.4% |
+| 9 decompression | 102.3% | 101.4% | 103.0% | 102.2% | 101.7% |
+| 12 decompression | 102.5% | 101.1% | 102.0% | 101.9% | 102.1% |
 
-Where the HC levels fall short: the assembly covers the candidate loop of
-the hash chain search, but the parsers around it (`LZ4HC_compress_hashChain`,
-the optimal parser's price updates) run in Go, and on short chains (ooffice,
-level 4) the per-search overhead shows. With linked blocks (`-BD`, compared
-with C's `--single-thread`) the fast level measured 99% (4 MiB blocks) and
-88 to 99% (64 KiB blocks, xml to dickens). C's `-T1` runs its job mode with
-one worker thread, which costs C about 2% against `--single-thread`.
-The pure-Go build (`-tags noasm`) is slower (measured before the assembly:
-40 to 55% of C at level 1, 15 to 25% for decoding); arm64 is not measured.
+The HC levels gain most from running the whole parser in one routine: C
+inlines `LZ4HC_InsertAndGetWiderMatch` into each parser, and so does the
+assembly. With linked blocks (`-BD`, compared with C's `--single-thread`)
+the fast level measured 100 to 103% (4 MiB blocks) and 100 to 102% (64 KiB
+blocks), xml to ooffice. C's `-T1` runs its job mode with one worker
+thread, which costs C about 2% against `--single-thread`. With
+`favorDecSpeed`, `destSize` or a dictionary the HC levels run the Go
+parsers (not measured here). The pure-Go build (`-tags noasm`) is slower
+(measured before the assembly: 40 to 55% of C at level 1, 15 to 25% for
+decoding); arm64 is not measured.
 
 ### Tests
 
