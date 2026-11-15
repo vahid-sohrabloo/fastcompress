@@ -2,7 +2,11 @@
 // Copyright (c) Yann Collet, BSD 2-Clause) for noDict, notLimited or
 // limitedOutput, without suspension, included by lz4_compress_amd64.s for the
 // byU32 and byU16 tables. The includer defines TABLE_LOAD(h, dst),
-// TABLE_STORE(val, h) and HASH(ptr, dst) (R12 is HASH's scratch register).
+// TABLE_STORE(val, h) and HASH(ptr, dst) (R12 is HASH's scratch register),
+// and LZ4_NODICT for noDict callers (a candidate at or above lowIdx =
+// startIndex is within src, so the search loop compares its 4 bytes before
+// checking the distance, as C's noDict) and LZ4_U16 for the byU16 table
+// (indexes below 64 KB: no distance checks, as C).
 //
 // Frame locals (hardware SP): 0 matchlimit (iend-5), 8 olimit (dst+olimit,
 // or the largest address when not limited), 16 dstEnd, 24 acceleration<<6,
@@ -79,12 +83,23 @@ searchLoop:
 	HASH(R14, DX)                // forwardH = hash(forwardIp)
 	CMPL AX, R13
 	JLO  searchLoop              // dictSmall: matchIndex < prefixIdxLimit (no-op for lowIdx 0)
+#ifdef LZ4_NODICT
+	MOVL (R9)(AX*1), R12
+	CMPL R12, (SI)
+	JNE  searchLoop
+#ifndef LZ4_U16
+	LEAL 65535(AX), R12
+	CMPL R12, R15
+	JLO  searchLoop              // matchIndex + LZ4_DISTANCE_MAX < current: too far
+#endif
+#else
 	LEAL 65535(AX), R12
 	CMPL R12, R15
 	JLO  searchLoop              // matchIndex + LZ4_DISTANCE_MAX < current: too far
 	MOVL (R9)(AX*1), R12
 	CMPL R12, (SI)
 	JNE  searchLoop
+#endif
 	LEAQ (R9)(AX*1), R15         // match
 
 	// Catch up
@@ -304,9 +319,11 @@ fillTable:
 	INCL BX                      // ctxIndex
 	CMPL BX, R13
 	JLO  useHash                 // dictSmall: ctxIndex < prefixIdxLimit
+#ifndef LZ4_U16
 	LEAL 65535(BX), AX
 	CMPL AX, R15
 	JLO  useHash                 // ctxIndex + LZ4_DISTANCE_MAX < current
+#endif
 	MOVQ (R9)(BX*1), AX
 	CMPQ AX, (SI)
 	JNE  useHash                 // LZ4_match8(base + ctxIndex, ip)
@@ -320,9 +337,11 @@ haveIndex:
 	TABLE_STORE(R15, DX)         // table[h] = current
 	CMPL AX, R13
 	JLO  nextPos                 // dictSmall: matchIndex < prefixIdxLimit
+#ifndef LZ4_U16
 	LEAL 65535(AX), CX
 	CMPL CX, R15
 	JLO  nextPos                 // too far
+#endif
 	LEAQ (R9)(AX*1), R15         // match
 	MOVL (R15), CX
 	CMPL CX, (SI)

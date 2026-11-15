@@ -5,7 +5,9 @@
 
 #include "textflag.h"
 
-// byU32: 4096 entries, LZ4_hash5 of the 8 bytes at ptr (64-bit C)
+// byU32: 4096 entries, LZ4_hash5 of the 8 bytes at ptr (64-bit C):
+// ((v << 24) * 889523592379) >> 52, with the shift folded into the
+// multiplier (equal mod 2^64), as gcc compiles it
 #define TABLE_LOAD(h, dst) \
 	MOVL (R10)(h*4), dst
 
@@ -14,8 +16,7 @@
 
 #define HASH(ptr, dst) \
 	MOVQ  (ptr), dst; \
-	SHLQ  $24, dst; \
-	MOVQ  $889523592379, R12; \
+	MOVQ  $0xcf1bbcdcbb000000, R12; \
 	IMULQ R12, dst; \
 	SHRQ  $52, dst
 
@@ -68,6 +69,18 @@
 //     the same: the checks cannot fail (status 2).
 TEXT ·compressFast32Asm(SB), NOSPLIT, $48-160
 #include "lz4_compress_amd64.h"
+
+// func compressFast32NoDictAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
+//
+// compressFast32Asm for noDict only (prefixLen 0, lowIdx = startIndex, no
+// resume), which compares a candidate's 4 bytes before its distance.
+//
+// BOUNDS: as compressFast32Asm's; a candidate is read when matchIndex >=
+// lowIdx = startIndex (checked first), so at or above src, and below ip.
+#define LZ4_NODICT
+TEXT ·compressFast32NoDictAsm(SB), NOSPLIT, $48-160
+#include "lz4_compress_amd64.h"
+#undef LZ4_NODICT
 
 // func compressFastExtAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx int, dict []byte, seqLimit int) (anchor, op, status int)
 //
@@ -122,7 +135,11 @@ TEXT ·compressFastExtAsm(SB), NOSPLIT, $96-144
 // LZ4_64Klimit, and startIndex + len(src) < 0xFFFF as LZ4_prepareTable
 // ensures).
 //
-// BOUNDS: as compressFast32Asm's; the hash is 13 bits (8192 entries of 2
-// bytes, the table's 16 KB).
+// BOUNDS: as compressFast32NoDictAsm's; the hash is 13 bits (8192 entries
+// of 2 bytes, the table's 16 KB).
+#define LZ4_NODICT
+#define LZ4_U16
 TEXT ·compressFast16Asm(SB), NOSPLIT, $48-160
 #include "lz4_compress_amd64.h"
+#undef LZ4_U16
+#undef LZ4_NODICT

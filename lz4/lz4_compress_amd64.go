@@ -16,6 +16,9 @@ func init() {
 func compressFast32Asm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
 
 //go:noescape
+func compressFast32NoDictAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
+
+//go:noescape
 func compressFast16Asm(src, dst []byte, table *uint16, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
 
 // compressNoDictAsm is compressGenericValidated for noDict, notLimited or
@@ -43,7 +46,7 @@ func (c *streamInternal) compressNoDictAsm(src, dst []byte, maxOutputSize int, o
 		var st int
 		si := int(startIndex)
 		if tt == byU32 {
-			anchor, op, st = compressFast32Asm(src, dst, &c.hashTable[0], si, acceleration, olimit, si, si, 0, 1, 0, 0, 0)
+			anchor, op, st = compressFast32NoDictAsm(src, dst, &c.hashTable[0], si, acceleration, olimit, si, si, 0, 1, 0, 0, 0)
 		} else {
 			anchor, op, st = compressFast16Asm(src, dst, &c.u16()[0], si, acceleration, olimit, si, si, 0, 1, 0, 0, 0)
 		}
