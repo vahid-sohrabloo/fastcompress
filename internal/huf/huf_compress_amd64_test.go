@@ -96,3 +96,65 @@ func TestCompress1XAsmVariants(t *testing.T) {
 		}
 	}
 }
+
+// FuzzCompress1XAsmVariants compares the amd64 stream writers with
+// compress1XBodyGeneric on arbitrary input, with the table built for it at
+// a table log taken from the first byte and a dst capacity from the second
+// (around the tight bound).
+func FuzzCompress1XAsmVariants(f *testing.F) {
+	f.Add(uint8(11), uint8(0), []byte("abracadabra, abracadabra; the quick brown fox"))
+	f.Add(uint8(6), uint8(3), bytes.Repeat([]byte{1, 2, 3, 1, 1, 0}, 100))
+	wksp := make([]byte, WorkspaceSize)
+	f.Fuzz(func(t *testing.T, logSel, capSel uint8, src []byte) {
+		if len(src) < 2 || len(src) > 1<<17 {
+			return
+		}
+		var count [256]uint32
+		maxSym := uint32(0)
+		for _, b := range src {
+			count[b]++
+			maxSym = max(maxSym, uint32(b))
+		}
+		nz := 0
+		for _, c := range count[:maxSym+1] {
+			if c > 0 {
+				nz++
+			}
+		}
+		if nz < 2 {
+			return
+		}
+		tableLog := uint(5 + logSel%8)
+		for 1<<(tableLog-1) < nz && tableLog < TableLogMax {
+			tableLog++
+		}
+		ct := make(CTable, CTableSize(255))
+		if _, err := BuildCTable(ct, &count, uint(maxSym), tableLog, wksp); err != nil {
+			return
+		}
+		tl := int(ReadCTableHeader(ct).TableLog)
+		bound := len(src)*tl>>3 + 8
+		c := max(bound+int(capSel%16)-8, 9)
+		ref := make([]byte, c)
+		wn := compress1XBodyGeneric(ref, src, ct)
+		elts := (*[SymbolValueMax + 1]CElt)(ct[1:])
+		check := func(name string, fn func(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int) {
+			dst := make([]byte, c)
+			gn := fn(&dst[0], c, &src[0], len(src), &elts[0])
+			if gn != wn || !bytes.Equal(dst[:gn], ref[:wn]) {
+				t.Fatalf("%s: n=%d tableLog=%d cap=%d: got %d bytes, want %d", name, len(src), tl, c, gn, wn)
+			}
+		}
+		check("base", compress1XAsm)
+		if !cpu.X86.HasBMI2 {
+			return
+		}
+		check("bmi2", compress1XAsmBMI2)
+		if tl <= 11 {
+			check("bmi2x5", compress1XAsmBMI2x5)
+			if c >= bound {
+				check("bmi2x10", compress1XAsmBMI2x10)
+			}
+		}
+	})
+}

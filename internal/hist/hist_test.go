@@ -122,3 +122,31 @@ func BenchmarkCount(b *testing.B) {
 		Count(&c, &m, src)
 	}
 }
+
+// FuzzCount compares Count, CountFast and CountSimple with a naive count;
+// the first byte drops up to 32 leading bytes, so every stripe tail and
+// alignment is reached.
+func FuzzCount(f *testing.F) {
+	f.Add(uint8(0), []byte("hello, world"))
+	f.Add(uint8(7), make([]byte, 5000))
+	f.Fuzz(func(t *testing.T, cut uint8, src []byte) {
+		if len(src) > 1<<18 {
+			return
+		}
+		if c := int(cut % 33); c < len(src) {
+			src = src[c:]
+		}
+		wc, wm, wl := naive(src)
+		for _, fn := range []struct {
+			n string
+			f func(*[256]uint32, *uint32, []byte) uint32
+		}{{"Count", Count}, {"CountFast", CountFast}, {"CountSimple", CountSimple}} {
+			var c [256]uint32
+			m := uint32(255)
+			l := fn.f(&c, &m, src)
+			if l != wl || m != wm || c != wc {
+				t.Fatalf("%s: n=%d: largest %d/%d max %d/%d", fn.n, len(src), l, wl, m, wm)
+			}
+		}
+	})
+}
