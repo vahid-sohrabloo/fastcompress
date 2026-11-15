@@ -3,7 +3,9 @@
 // two can be compared by bench/compare-lz4.sh.
 //
 // bench.c compresses each file into one frame with the CLI's preferences:
-// independent blocks (linked with -BD, lz4bench -linked), no checksums, and with a custom block size (-B4M) the
+// independent blocks (linked with -BD, lz4bench -linked), no checksums, a
+// dictionary with -D (lz4bench -dict), favorDecSpeed with --favor-decSpeed
+// (lz4bench -favor), and with a custom block size the
 // block size ID that holds it, autoFlush, and one LZ4F_compressUpdate per
 // block-sized chunk (unstable input), on one reused LZ4F_cctx; a file smaller
 // than the block is compressed with LZ4F_compressFrame. Decompression decodes
@@ -35,12 +37,15 @@ func main() {
 	secs := flag.Float64("secs", 3, "seconds of timed passes")
 	cpuprofile := flag.String("cpuprofile", "", "write a CPU profile of the timed passes to this file")
 	linked := flag.Bool("linked", false, "linked blocks (lz4 -BD)")
+	dictFile := flag.String("dict", "", "dictionary file (lz4 -D: its last 64 KiB, digested once into a CDict)")
+	favor := flag.Bool("favor", false, "favorDecSpeed (lz4 --favor-decSpeed)")
 	flag.Parse()
 	if flag.NArg() != 1 || (*mode != "c" && *mode != "d") {
-		fmt.Fprintln(os.Stderr, "usage: lz4bench [-mode c|d] [-level N] [-block N] [-linked] [-secs S] [-cpuprofile F] FILE")
+		fmt.Fprintln(os.Stderr, "usage: lz4bench [-mode c|d] [-level N] [-block N] [-linked] [-dict F] [-favor] [-secs S] [-cpuprofile F] FILE")
 		os.Exit(2)
 	}
-	if err := run(*mode == "d", *level, *block, *linked, *secs, *cpuprofile, flag.Arg(0)); err != nil {
+	o := opts{decode: *mode == "d", level: *level, block: *block, linked: *linked, favor: *favor, dictFile: *dictFile}
+	if err := run(o, *secs, *cpuprofile, flag.Arg(0)); err != nil {
 		fmt.Fprintln(os.Stderr, "lz4bench:", err)
 		os.Exit(1)
 	}
@@ -61,10 +66,28 @@ func blockSizeID(blockSize int) (lz4.BlockSizeID, bool) {
 	return lz4.BlockSizeID(id - 3), blockSize != std
 }
 
-func run(decode bool, level, block int, linked bool, secs float64, cpuprofile, path string) error {
+type opts struct {
+	decode, linked, favor bool
+	level, block          int
+	dictFile              string
+}
+
+func run(o opts, secs float64, cpuprofile, path string) error {
+	decode, level, block, linked := o.decode, o.level, o.block, o.linked
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return err
+	}
+	var dict []byte
+	var cdict *lz4.CDict
+	if o.dictFile != "" {
+		if dict, err = os.ReadFile(o.dictFile); err != nil {
+			return err
+		}
+		if len(dict) > 64<<10 {
+			dict = dict[len(dict)-64<<10:]
+		}
+		cdict = lz4.NewCDict(dict)
 	}
 	if block < 32 {
 		block = 32
@@ -73,7 +96,7 @@ func run(decode bool, level, block int, linked bool, secs float64, cpuprofile, p
 		block = 4 << 20
 	}
 	id, custom := blockSizeID(block)
-	prefs := lz4.Preferences{CompressionLevel: level, AutoFlush: custom}
+	prefs := lz4.Preferences{CompressionLevel: level, AutoFlush: custom, FavorDecSpeed: o.favor}
 	prefs.BlockSizeID = id
 	prefs.BlockIndependent = !linked
 	chunk := 4 << 20 // bench.c BMK_CHUNK_SIZE
@@ -85,9 +108,12 @@ func run(decode bool, level, block int, linked bool, secs float64, cpuprofile, p
 	frame := make([]byte, lz4.CompressFrameBound(len(src), &prefs)+len(src)/block*8+lz4.CompressBoundFrame(chunk, &prefs)+64)
 	compress := func() (int, error) {
 		if len(src) < block {
+			if cdict != nil {
+				return lz4.CompressFrameUsingCDict(frame, src, cdict, &prefs)
+			}
 			return fc.CompressFrame(frame, src, &prefs)
 		}
-		pos, err := fc.Begin(frame, &prefs)
+		pos, err := fc.BeginUsingCDict(frame, cdict, &prefs)
 		if err != nil {
 			return 0, err
 		}
@@ -106,7 +132,7 @@ func run(decode bool, level, block int, linked bool, secs float64, cpuprofile, p
 		return err
 	}
 	out := make([]byte, 0, len(src))
-	got, err := lz4.AppendDecompressFrame(out, frame[:csize], nil)
+	got, err := lz4.AppendDecompressFrame(out, frame[:csize], dict)
 	if err != nil {
 		return err
 	}
@@ -115,7 +141,7 @@ func run(decode bool, level, block int, linked bool, secs float64, cpuprofile, p
 	}
 	pass := func() { compress() }
 	if decode {
-		pass = func() { lz4.AppendDecompressFrame(out[:0], frame[:csize], nil) }
+		pass = func() { lz4.AppendDecompressFrame(out[:0], frame[:csize], dict) }
 	}
 	if cpuprofile != "" {
 		f, err := os.Create(cpuprofile)
