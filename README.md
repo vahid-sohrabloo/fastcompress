@@ -2,7 +2,8 @@
 
 Pure-Go compression, ported from C. `zstd` is a port of libzstd v1.5.7 that
 exposes the public API of `klauspost/compress/zstd`; `flate`, `gzip` and
-`zlib` are a port of libdeflate v1.26. No cgo and no dependencies.
+`zlib` are a port of libdeflate v1.26; `lz4` is a port of lz4 v1.11.1. No
+cgo and no dependencies.
 
 Status: work in progress.
 
@@ -277,6 +278,141 @@ four inputs (xml, dickens, ooffice and `silesia.tar` in 1 MiB blocks):
 Expect other CPUs to give different numbers. The charts are drawn from the
 `bench/compare.sh` output by `bench/plot.py`.
 
+## LZ4
+
+Package `lz4` is a port of [lz4](https://github.com/lz4/lz4) v1.11.1
+(`lz4.c`, `lz4hc.c`, `lz4frame.c`): the block format, the fast compressor,
+the high compression levels 2 to 12 and the frame format. Every compressor
+produces C's bytes for the same calls in the same order; the decoders accept
+and reject what C accepts and rejects, with C's error class.
+
+**Blocks** (C's API, with `dst` as a buffer whose length is the capacity):
+
+- `CompressFast(dst, src, acceleration)` / `CompressDefault` /
+  `CompressDestSize` (`LZ4_compress_fast`, `_default`, `_destSize`), and
+  `CompressHC(dst, src, level)` / `CompressHCDestSize` (`LZ4_compress_HC`,
+  levels 2 to 12: LZ4MID at 2, hash chains at 3 to 9, the optimal parser at
+  10 to 12). `CompressBound(n)` bytes are always enough; otherwise 0 means
+  the block did not fit.
+- `Stream` (`LZ4_stream_t`) and `StreamHC` (`LZ4_streamHC_t`): independent
+  blocks that reuse the tables (`CompressFast`, `Compress`), streaming with
+  `CompressFastContinue` / `CompressContinue` (prefix and external
+  dictionary modes), `LoadDict`, `LoadDictSlow`, `AttachDictionary`,
+  `SaveDict`, `FavorDecompressionSpeed`.
+- `DecompressSafe`, `DecompressSafePartial` and the `UsingDict` variants
+  return `ErrCorrupt`, `ErrDstTooSmall` or `ErrOffset` (C's -1, -2, -3).
+
+C chooses between its prefix and external-dictionary modes by comparing
+pointers. Here an input continues the history only when both are parts of
+one slice (the history's capacity reaches the input); two separate
+allocations that happen to be adjacent are compressed as an external
+dictionary, where C would use the prefix. Both are valid; only the bytes
+differ from C's in that case.
+
+**Frames** (`lz4frame.c`, single-threaded):
+
+- `CompressFrame` / `AppendFrame` / `CompressFrameUsingCDict`
+  (`LZ4F_compressFrame`), `FrameCompressor` (`LZ4F_compressBegin`, `Update`,
+  `Flush`, `End`) and `Writer` (an `io.WriteCloser`: each `Write` is one
+  `LZ4F_compressUpdate`, so the frame is C's for the same sequence of writes
+  and flushes). `Preferences` has C's fields: level, block size ID, linked or
+  independent blocks, block and content checksums, content size, dictionary
+  ID, `AutoFlush`, `FavorDecSpeed`; `NewCDict`, `WithDict`, `WithCDict` for
+  dictionaries, `WriteUncompressed` for uncompressed blocks.
+- `AppendDecompressFrame(dst, src, dict)` and `Reader` (`io.Reader`,
+  `io.WriterTo`) decode concatenated frames and skip skippable frames, with
+  C's header checks, checksums and error classes (`ErrFrameType`,
+  `ErrHeaderChecksum`, `ErrBlockChecksum`, `ErrContentChecksum`,
+  `ErrFrameSize`, `ErrDecompressionFailed`, `io.ErrUnexpectedEOF` for a
+  truncated frame, ...).
+
+Usage:
+
+    dst := make([]byte, lz4.CompressBound(len(src)))
+    n := lz4.CompressFast(dst, src, 1)
+    out := make([]byte, len(src))
+    m, err := lz4.DecompressSafe(out, dst[:n])
+
+    w := lz4.NewWriter(f, lz4.WithLevel(9))
+    io.Copy(w, r)
+    w.Close()
+
+    content, err := lz4.AppendDecompressFrame(nil, frame, nil)
+
+Not ported: C's multi-threaded frame compression (`nbWorkers`; for
+independent blocks C produces the same frames, for linked blocks other
+ones), `LZ4_decompress_fast` (unsafe by design), the streaming block decoder
+(`LZ4_decompress_safe_continue`; the frame decoders cover streams), the
+legacy frame format of the `lz4` command, and the `lz4file.h` API.
+
+### Safety
+
+The decoder files (`lz4_decompress*.go`, `lz4frame_decompress*.go`) import
+no `unsafe` and call no `recover` (`scripts/decodercheck.sh`); malformed
+input returns an error, never a panic or an out-of-bounds access. The
+decoder's assembly has a `// BOUNDS:` proof and a fuzz target comparing it
+with the Go loop. `FuzzDecompress` and `FuzzDecompressFrame` compare every
+result with C's decoders.
+
+### Assembly
+
+On amd64 (unless built with `-tags noasm` or `purego`) assembly runs the
+decoder's fast loop (C's `LZ4_FAST_DEC_LOOP` part, without external
+dictionary), the fast compressor's main loop (one-shot with byU16 and
+byU32 tables, and the streaming prefix and external-dictionary modes with
+C's resume-in-prefix split; limited or unlimited output), the LZ4MID main
+loop of level 2 (no dictionary), and
+the candidate loop of the hash chain search with the table insertion
+(levels 3 to 12, including `chainSwap` and `favorDecSpeed`). Each falls back
+to Go where C's code takes a path the assembly does not cover (attached
+dictionaries, `destSize`, the pattern analysis), and each has a fuzz target comparing it
+with the Go code. Baseline instructions only (no BMI2 or AVX2 needed).
+arm64 and the other architectures run the Go code, tested in CI's way
+(`GOARCH=arm64 go vet`, `-tags noasm` test runs); arm64 speed is not
+measured.
+
+### Speed
+
+Single-threaded frame speed against C `lz4` v1.11.1 (`lz4 -b<L> -T1 -B4M`:
+one frame per file, 4 MiB independent blocks, no checksums) on three Silesia
+files, measured with `bench/compare-lz4.sh` (median of three interleaved
+runs, each the best mean of ~1 s windows over 3 s). The output is
+byte-identical (equal ratios on every row). Treat a few percent as noise;
+other CPUs give other numbers.
+
+| level | xml | dickens | ooffice | geomean |
+|---|---|---|---|---|
+| 1 (fast) compression | 97.5% | 99.3% | 98.8% | 98.5% |
+| 2 (LZ4MID) compression | 95.3% | 93.0% | 92.9% | 93.7% |
+| 4 (hash chain) compression | 72.6% | 70.9% | 59.3% | 67.3% |
+| 9 (hash chain) compression | 87.0% | 87.7% | 68.0% | 80.4% |
+| 12 (optimal) compression | 77.6% | 82.1% | 71.9% | 77.1% |
+| 1 decompression | 99.1% | 96.7% | 99.3% | 98.4% |
+| 9 decompression | 97.4% | 96.0% | 98.2% | 97.2% |
+
+Where the HC levels fall short: the assembly covers the candidate loop of
+the hash chain search, but the parsers around it (`LZ4HC_compress_hashChain`,
+the optimal parser's price updates) run in Go, and on short chains (ooffice,
+level 4) the per-search overhead shows. With linked blocks (`-BD`, compared
+with C's `--single-thread`) the fast level measured 99% (4 MiB blocks) and
+88 to 99% (64 KiB blocks, xml to dickens). C's `-T1` runs its job mode with
+one worker thread, which costs C about 2% against `--single-thread`.
+The pure-Go build (`-tags noasm`) is slower (measured before the assembly:
+40 to 55% of C at level 1, 15 to 25% for decoding); arm64 is not measured.
+
+### Tests
+
+The tests compare against lz4 v1.11.1 run as a C subprocess
+(`ref/fetch.sh`, then `make -C ref/lz4ref`): every encoder on the creftest
+inputs and the Silesia corpus (the fast compressor at several accelerations
+and with reused tables, every HC level 0 to 13 with and without
+`favorDecSpeed`, streaming in prefix, external-dictionary and saved-history
+layouts with loaded, slow-loaded and attached dictionaries, limited
+capacities and `destSize`), frames for 64 preference sets and plans of
+writes, flushes and uncompressed writes with raw and digested dictionaries,
+and the decoders on valid, truncated and mutated blocks and frames. `go test
+-short ./lz4` runs a subset; the full run takes about 40 minutes.
+
 ## Credits
 
 - `zstd` is a port of [zstd](https://github.com/facebook/zstd) v1.5.7, by
@@ -286,6 +422,9 @@ Expect other CPUs to give different numbers. The charts are drawn from the
   [libdeflate](https://github.com/ebiggers/libdeflate) v1.26, by Eric
   Biggers and the libdeflate contributors (MIT, see
   [internal/deflate/NOTICE](internal/deflate/NOTICE)).
+- `lz4` is a port of [lz4](https://github.com/lz4/lz4) v1.11.1 (`lz4.c`,
+  `lz4hc.c`, `lz4frame.c`), by Yann Collet and the lz4 contributors (BSD
+  2-Clause, see [lz4/NOTICE](lz4/NOTICE)); no code from pierrec/lz4 is used.
 - The `zstd` API follows
   [klauspost/compress/zstd](https://github.com/klauspost/compress) so that it
   can replace it; no code from that project is used.

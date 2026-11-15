@@ -9,5 +9,10 @@ pure-Go port of libdeflate v1.26 (https://github.com/ebiggers/libdeflate),
 which is Copyright 2016 Eric Biggers and Copyright 2024 Google LLC, under the
 MIT license (see internal/deflate/NOTICE).
 
+Package lz4 (and internal/xxhash's XXH32) is a pure-Go port of the LZ4
+library v1.11.1 (https://github.com/lz4/lz4), lz4.c, lz4hc.c and lz4frame.c,
+which are Copyright (c) Yann Collet, under the BSD 2-Clause license (see
+lz4/NOTICE). No code from github.com/pierrec/lz4 is used.
+
 The zstd public API follows that of github.com/klauspost/compress/zstd so that it
 can replace it. No code from that project is used.

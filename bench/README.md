@@ -59,3 +59,22 @@ Go reuses one block-sized output buffer for every block, while C decodes block *
 The assembly routines have arm64 ports (NEON for the row match finder's tag compare), tested for byte-identical output under qemu. There is no arm64 hardware here, so arm64 speed against C is unverified until arm64 hardware is available; qemu timings say nothing about it.
 
 The same holds for the decoder: the Huffman fast loops, the sequence decode-and-execute loop and the sequence-table builder have arm64 ports, tested for state-identical results against the Go loops under qemu, but arm64 decode speed is unverified. None of them has been benchmarked on arm64.
+
+# Benchmarks against C lz4 v1.11.1
+
+Setup: `ref/fetch.sh` builds `ref/lz4/programs/lz4` and fetches the Silesia corpus.
+
+## compare-lz4.sh
+
+    bench/compare-lz4.sh [-mode c|d] [-l "1 2 9 12"] [-f "FILE..."] [-B BLOCK] [-D] [-S] [-i SECS] [-g SECS] [-n RUNS] -label NAME
+
+Writes `bench/results/<date>-lz4-<label>.md` with columns
+`file | level | C MB/s | Go MB/s | % of C | C ratio | Go ratio`, plus the geometric mean of "% of C" per level. Every cell is the median of `-n` (default 3) runs, C and Go interleaved, each pinned with `taskset -c $CPU` (default 2). Keep the machine idle, in particular `$CPU`'s SMT sibling. A row whose ratios differ is flagged `MISMATCH` (the output must be byte-identical).
+
+C side: `lz4 -b<L> -T1 -B<BLOCK> -i<SECS> FILE` (default `-B4M`). bench.c compresses each file into one frame with the CLI's preferences (independent blocks, no checksums) in 4 MiB `LZ4F_compressUpdate` chunks for a standard block size (64K, 256K, 1M, 4M), or one block per update with autoFlush for a custom size; a file smaller than the block goes through `LZ4F_compressFrame`. `-T1` runs C's multi-threaded job mode with one worker thread, whose frames are the single-threaded ones for independent blocks; `-S` runs `--single-thread` instead (about 2% faster here). `-D` (linked blocks, `-BD`) always uses `--single-thread`: C's job mode cuts linked frames into 1 MiB jobs, which changes the output and is not ported. Decompression decodes the frame with `LZ4F_decompress`. The statistic is the best mean time per pass over runs of about 1 s. The script takes the last progress line, `(RATIO), C MB/s, D MB/s`.
+
+## lz4bench
+
+    go run ./bench/cmd/lz4bench [-mode c|d] [-level N] [-block N] [-linked] [-secs S] [-cpuprofile F] FILE
+
+Mirrors bench.c: one `lz4.FrameCompressor` reused across passes (`Begin`, one `Update` per 4 MiB chunk or per custom-size block with autoFlush, `End`; `CompressFrame` for a file smaller than the block), `lz4.AppendDecompressFrame` into a buffer of the file's size for `-mode d`, the same timing statistic. `-linked` uses linked blocks (`lz4 -BD`). Prints `MB/s ratio`; it checks that the decoded output equals the input.
