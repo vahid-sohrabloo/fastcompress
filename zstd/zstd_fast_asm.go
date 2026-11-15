@@ -117,8 +117,15 @@ func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, 
 // output of mozilla; L1 and L3). Measured on silesia: the branchless loop
 // alone made whole files 1-4% slower at L1 and up to 4% at L3; these
 // choices are at or below the branchy loop on every file.
+// The double-fast finder also runs the Stale loop when its long table has
+// at least 1/2^staleWindowLog as many entries as the window has positions:
+// entries then often outlive the window (level 4 on large inputs, a 2^18
+// table for a 2^21 window: mozilla +6.8%, samba +3.4%, silesia.tar in 4 MiB
+// blocks +2.4% on an i9-13900H), while at level 3 (2^17) the branchy loop
+// stays faster (x-ray and ooffice -3% with the branchless one).
 const (
 	staleTables     = 4
 	staleLitsFast   = 16
 	staleLitsDouble = 8
+	staleWindowLog  = 3
 )
