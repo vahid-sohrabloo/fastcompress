@@ -147,15 +147,31 @@ func testInput(t testing.TB, name string) []byte {
 	return creftest.LZ4Inputs(t)[name]
 }
 
-// FuzzHCChainAsmEquiv compresses arbitrary input at the hash chain levels
-// (2 to 12, favorDecSpeed too) with the assembly on and off, one-shot and streaming
-// with a dictionary (external dictionary candidates); blocks must be equal.
+// FuzzHCChainAsmEquiv compresses arbitrary input at the HC levels (2 to
+// 12, favorDecSpeed too) with the assembly on and off: one-shot with the
+// bound and with tight capacities (limitedOutput, possibly failing),
+// independent blocks on one reused stream (stale table entries), and
+// streaming with a dictionary (external dictionary candidates) and in
+// prefix mode; blocks must be equal.
 func FuzzHCChainAsmEquiv(f *testing.F) {
 	i := 0
-	for _, in := range []string{"text-65547", "text128KiB", "random-70K", "period3-200K", "zeros-1M"} {
+	for _, in := range []string{"text-65547", "text128KiB", "random-70K", "period3-200K", "period7-100K", "zeros-1M"} {
 		b := testInput(f, in)
-		f.Add(uint8(i), b[:min(len(b), 200000)])
+		for lv := 0; lv < 11; lv++ {
+			f.Add(uint8(i*11+lv), b[:min(len(b), 200000)])
+		}
 		i++
+	}
+	// repeats of 1 to 4 bytes inside text: the pattern analysis (level 9+)
+	pa := append([]byte(nil), testInput(f, "text-65547")[:30000]...)
+	for k, r := range []string{"a", "ab", "abc", "abcd", "\x00", "xyxyxyxyz"} {
+		at := 1000 + k*4000
+		for j := 0; j < 1500; j++ {
+			pa[at+j] = r[j%len(r)]
+		}
+	}
+	for lv := 0; lv < 11; lv++ {
+		f.Add(uint8(lv), pa)
 	}
 	dict := testInput(f, "text-65547")[:20000]
 	f.Fuzz(func(t *testing.T, sel uint8, src []byte) {
@@ -166,6 +182,22 @@ func FuzzHCChainAsmEquiv(f *testing.F) {
 		run := func() [][]byte {
 			dst := make([]byte, CompressBound(len(src)))
 			out := [][]byte{append([]byte(nil), dst[:CompressHC(dst, src, level)]...)}
+			for _, capa := range []int{len(src) - len(src)/8, len(src) / 2, len(src) / 3} {
+				d := make([]byte, max(capa, 1))
+				out = append(out, d[:CompressHC(d, src, level)])
+			}
+			rs := NewStreamHC(level)
+			for k := 0; k < 3; k++ {
+				p := src[k*len(src)/3 : (k+1)*len(src)/3]
+				d := make([]byte, CompressBound(len(p)))
+				out = append(out, d[:rs.Compress(d, p, level)])
+			}
+			ps := NewStreamHC(level)
+			for k := 0; k < 3; k++ {
+				p := src[k*len(src)/3 : (k+1)*len(src)/3]
+				d := make([]byte, CompressBound(len(p)))
+				out = append(out, d[:ps.CompressContinue(d, p)])
+			}
 			fs := NewStreamHC(level)
 			fs.FavorDecompressionSpeed(true)
 			out = append(out, append([]byte(nil), dst[:fs.Compress(dst, src, level)]...))

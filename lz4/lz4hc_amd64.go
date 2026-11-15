@@ -25,3 +25,18 @@ func init() {
 
 //go:noescape
 func midCompressAsm(win []byte, ip, iend, prefixIdx int, t *uint32, dst []byte, olimit int) (nip, anchor, op, status int)
+
+// useHCParseAsm selects the assembly parsers of the hash chain levels (3
+// to 9) and the optimal levels (10 to 12) for a prefix without external or
+// attached dictionary.
+var useHCParseAsm bool
+
+func init() {
+	cpu.RegisterAsm("hcParse", &useHCParseAsm, func() bool { return true })
+}
+
+//go:noescape
+func hcHashChainAsm(a *hcParseArgs) int
+
+//go:noescape
+func hcOptimalAsm(a *hcParseArgs) int

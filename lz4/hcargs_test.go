@@ -34,3 +34,34 @@ func TestHCChainArgsLayout(t *testing.T) {
 		}
 	}
 }
+
+// TestHCParseArgsLayout pins the hcParseArgs offsets lz4hc_parse_amd64.s
+// uses.
+func TestHCParseArgsLayout(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		t.Skip("64-bit layout only")
+	}
+	var a hcParseArgs
+	for _, w := range []struct {
+		name     string
+		off, got uintptr
+	}{
+		{"win", 0, unsafe.Offsetof(a.win)}, {"hashTable", 8, unsafe.Offsetof(a.hashTable)},
+		{"chain", 16, unsafe.Offsetof(a.chain)}, {"prefixIdx", 24, unsafe.Offsetof(a.prefixIdx)},
+		{"ip", 32, unsafe.Offsetof(a.ip)}, {"anchor", 40, unsafe.Offsetof(a.anchor)},
+		{"op", 48, unsafe.Offsetof(a.op)}, {"iend", 56, unsafe.Offsetof(a.iend)},
+		{"dst", 64, unsafe.Offsetof(a.dst)}, {"dstLen", 72, unsafe.Offsetof(a.dstLen)},
+		{"olimit", 80, unsafe.Offsetof(a.olimit)}, {"next", 88, unsafe.Offsetof(a.next)},
+		{"attempts", 96, unsafe.Offsetof(a.attempts)}, {"pa", 104, unsafe.Offsetof(a.pa)},
+		{"stop", 112, unsafe.Offsetof(a.stop)}, {"suff", 120, unsafe.Offsetof(a.suff)},
+		{"opt", 128, unsafe.Offsetof(a.opt)},
+	} {
+		if w.got != w.off {
+			t.Errorf("%s at %d, assembly expects %d", w.name, w.got, w.off)
+		}
+	}
+	var o hcOptimal
+	if unsafe.Sizeof(o) != 16 || unsafe.Offsetof(o.off) != 4 || unsafe.Offsetof(o.mlen) != 8 || unsafe.Offsetof(o.litlen) != 12 {
+		t.Errorf("hcOptimal layout differs from the assembly's (price, off, mlen, litlen; 16 bytes)")
+	}
+}

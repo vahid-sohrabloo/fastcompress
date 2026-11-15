@@ -1,5 +1,7 @@
 package lz4
 
+import "unsafe"
+
 // The optimal parser of lz4hc.c (levels 10 to 12): LZ4HC_compress_optimal.
 
 type hcOptimal struct {
@@ -113,7 +115,22 @@ func (c *hcCtx) compressOptimal(win []byte, srcStart int, srcSizePtr *int, dst [
 	sufficientLen := min(targetLength, optNum-1)
 
 	*srcSizePtr = 0
-	if inputSize >= minLength {
+	if !favorDecSpeed && c.parseAsmOK(win, srcStart, inputSize, dst, dstCapacity, limit, usingDictCtx) {
+		a := c.newParseArgs(win, srcStart, dst, dstCapacity, limit)
+		a.attempts = nbSearches
+		a.suff = sufficientLen
+		a.opt = uintptr(unsafe.Pointer(&opt[0]))
+		st := 2
+		for st == 2 {
+			a.stop = a.ip + hcAsmChunk
+			st = hcOptimalAsm(&a)
+		}
+		c.nextToUpdate = uint32(a.next)
+		if st != 0 {
+			return 0
+		}
+		e.ip, e.anchor, e.op = a.ip, a.anchor, a.op
+	} else if inputSize >= minLength {
 		mflimit := iend - mfLimit
 		matchlimit := iend - lastLiterals
 	mainLoop:

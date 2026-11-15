@@ -108,6 +108,56 @@ type hcChainArgs struct {
 	chainPos   uint64 // matchChainPos (in and out)
 }
 
+// hcParseArgs is the state of the assembly parsers hcHashChainAsm and
+// hcOptimalAsm (offsets in lz4hc_parse_amd64.s); like hcChainArgs it holds
+// uintptrs to memory kept reachable by the caller.
+type hcParseArgs struct {
+	win       uintptr
+	hashTable uintptr
+	chain     uintptr
+	prefixIdx uint64
+	ip        int // in and out (win indexes)
+	anchor    int
+	op        int // in and out (dst index)
+	iend      int
+	dst       uintptr
+	dstLen    int
+	olimit    int    // maxOutputSize, or -1 for notLimited
+	next      uint64 // nextToUpdate (in and out)
+	attempts  int
+	pa        int
+	stop      int // return (2) at the top of the main loop once ip > stop
+	suff      int // optimal parser: sufficientLen
+	opt       uintptr
+}
+
+// hcAsmChunk is the input the assembly parsers cover per call, so a block
+// does not hold off the scheduler for its whole length.
+const hcAsmChunk = 256 * kb
+
+// parseAsmOK reports whether the assembly parsers can compress
+// win[srcStart:] (the end of win) into dst: a prefix without external or
+// attached dictionary, notLimited or limitedOutput, dst holding the bound
+// (notLimited) or maxOutputSize.
+func (c *hcCtx) parseAsmOK(win []byte, srcStart, inputSize int, dst []byte, maxOutputSize int, limit outputDirective, usingDictCtx bool) bool {
+	return useHCParseAsm && !usingDictCtx && inputSize >= minLength && c.lowLimit == c.dictLimit && limit != fillOutput &&
+		srcStart+inputSize == len(win) && c.nextToUpdate >= c.dictLimit && len(dst) >= maxOutputSize && maxOutputSize >= 1 &&
+		(limit != notLimited || len(dst) >= CompressBound(inputSize))
+}
+
+// newParseArgs fills the arguments of an assembly parser from the
+// context; the caller sets the parser's own fields.
+func (c *hcCtx) newParseArgs(win []byte, srcStart int, dst []byte, maxOutputSize int, limit outputDirective) hcParseArgs {
+	olimit := maxOutputSize
+	if limit == notLimited {
+		olimit = -1
+	}
+	return hcParseArgs{win: uintptr(unsafe.Pointer(&win[0])), hashTable: uintptr(unsafe.Pointer(&c.hashTable[0])),
+		chain: uintptr(unsafe.Pointer(&c.chainTable[0])), prefixIdx: uint64(c.dictLimit),
+		ip: srcStart, anchor: srcStart, iend: len(win), dst: uintptr(unsafe.Pointer(&dst[0])), dstLen: len(dst),
+		olimit: olimit, next: uint64(c.nextToUpdate)}
+}
+
 type hcMatch struct {
 	off, len, back int
 }
@@ -914,6 +964,22 @@ func (c *hcCtx) compressHashChain(win []byte, srcStart int, srcSizePtr *int, dst
 
 	*srcSizePtr = 0
 	if inputSize < minLength {
+		goto lastLiterals
+	}
+	if c.parseAsmOK(win, srcStart, inputSize, dst, maxOutputSize, limit, usingDictCtx) {
+		a := c.newParseArgs(win, srcStart, dst, maxOutputSize, limit)
+		a.attempts = maxNbAttempts
+		a.pa = b2i(patternAnalysis)
+		st := 2
+		for st == 2 {
+			a.stop = a.ip + hcAsmChunk
+			st = hcHashChainAsm(&a)
+		}
+		c.nextToUpdate = uint32(a.next)
+		if st != 0 {
+			return 0
+		}
+		e.ip, e.anchor, e.op = a.ip, a.anchor, a.op
 		goto lastLiterals
 	}
 	{
