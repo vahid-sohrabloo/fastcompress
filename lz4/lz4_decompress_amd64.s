@@ -27,7 +27,7 @@ GLOBL lz4dist<>(SB), RODATA|NOPTR, $64
 // func decodeFastAsm(src, out []byte, ip, op, oend, lowPrefix int) (nip, nop, offset, ml, status int)
 //
 // Registers: AX ip, BX op (pointers), CX token, DX literal / match length,
-// R8 offset, R9 match, R10 lowPrefix, R11 iend-17, R12 oend-64,
+// R8 offset, R9 match, R10 lowPrefix, R11 iend-18, R12 oend-64,
 // R13 iend-15 (RUN_MASK), R14 iend-6, R15 iend-64; SI, DI, X0-X3 scratch.
 //
 // Preconditions (checked by decompressGeneric): 0 <= ip < len(src);
@@ -73,7 +73,7 @@ TEXT ·decodeFastAsm(SB), NOSPLIT, $0-120
 	LEAQ -64(DI)(R12*1), R12     // oend-64
 	MOVQ lowPrefix+72(FP), R10
 	ADDQ DI, R10
-	LEAQ -17(R8), R11
+	LEAQ -18(R8), R11
 	LEAQ -15(R8), R13
 	LEAQ -6(R8), R14
 	LEAQ -64(R8), R15
@@ -81,17 +81,17 @@ TEXT ·decodeFastAsm(SB), NOSPLIT, $0-120
 	PCALIGN $32
 
 loop:
+	// AX is the token's position here
 	MOVBQZX (AX), CX             // token
-	INCQ    AX
 	CMPQ    AX, R11
-	JHI     backToken            // too close to input end: the safe loop restarts this sequence
+	JHI     leave                // ip+1 > iend-17, too close to input end: the safe loop restarts this sequence
 	MOVQ    CX, DX
 	SHRQ    $4, DX               // literal length
 	CMPQ    DX, $15
 	JEQ     longLit
-	MOVOU   (AX), X0
+	MOVOU   1(AX), X0
 	MOVOU   X0, (BX)
-	ADDQ    DX, AX
+	LEAQ    1(AX)(DX*1), AX
 	ADDQ    DX, BX
 
 offset:
@@ -250,7 +250,8 @@ zeros:
 	JMP  loop
 
 longLit:
-	LEAQ -1(AX), DI              // token position
+	MOVQ AX, DI                  // token position
+	INCQ AX
 	CMPQ AX, R13
 	JHS  corrupt
 	MOVBQZX (AX), SI
@@ -314,9 +315,6 @@ longML:
 restart:
 	MOVQ DI, AX
 	JMP  leave
-
-backToken:
-	DECQ AX
 
 leave:
 	MOVQ $0, status+112(FP)
