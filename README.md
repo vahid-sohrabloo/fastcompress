@@ -309,7 +309,7 @@ allocations that happen to be adjacent are compressed as an external
 dictionary, where C would use the prefix. Both are valid; only the bytes
 differ from C's in that case.
 
-**Frames** (`lz4frame.c`, single-threaded):
+**Frames** (`lz4frame.c`):
 
 - `CompressFrame` / `AppendFrame` / `CompressFrameUsingCDict`
   (`LZ4F_compressFrame`), `FrameCompressor` (`LZ4F_compressBegin`, `Update`,
@@ -317,8 +317,21 @@ differ from C's in that case.
   `LZ4F_compressUpdate`, so the frame is C's for the same sequence of writes
   and flushes). `Preferences` has C's fields: level, block size ID, linked or
   independent blocks, block and content checksums, content size, dictionary
-  ID, `AutoFlush`, `FavorDecSpeed`; `NewCDict`, `WithDict`, `WithCDict` for
-  dictionaries, `WriteUncompressed` for uncompressed blocks.
+  ID, `AutoFlush`, `FavorDecSpeed`, `NbWorkers`; `NewCDict`, `WithDict`,
+  `WithCDict` for dictionaries, `WriteUncompressed` for uncompressed blocks,
+  `UpdateStable` for input that stays until the next flush.
+- Multi-threaded frames (C's `nbWorkers`, `lz4 -T#`): with
+  `Preferences.NbWorkers` (or `WithConcurrency(n)` on a `Writer`) the
+  content is cut into jobs at fixed positions (1 MB, or one block when
+  larger, restarting at each flush), compressed by up to `NbWorkers`
+  goroutines and emitted in order. The frame depends only on the content
+  and the flush points, never on the number of workers or the scheduling:
+  with independent blocks it is the single-threaded frame, with linked
+  blocks it is C's multi-threaded frame (each job restarts with the
+  previous 64 KB as dictionary). Output lags behind input: `Flush` and
+  `Close`/`End` emit the jobs in flight; with `FrameCompressor`,
+  `CompressBoundFrame` counts them (C emits them over several calls
+  instead).
 - `AppendDecompressFrame(dst, src, dict)` and `Reader` (`io.Reader`,
   `io.WriterTo`) decode concatenated frames and skip skippable frames, with
   C's header checks, checksums and error classes (`ErrFrameType`,
@@ -339,9 +352,7 @@ Usage:
 
     content, err := lz4.AppendDecompressFrame(nil, frame, nil)
 
-Not ported: C's multi-threaded frame compression (`nbWorkers`; for
-independent blocks C produces the same frames, for linked blocks other
-ones), `LZ4_decompress_fast` (unsafe by design), the streaming block decoder
+Not ported: `LZ4_decompress_fast` (unsafe by design), the streaming block decoder
 (`LZ4_decompress_safe_continue`; the frame decoders cover streams), the
 legacy frame format of the `lz4` command, and the `lz4file.h` API.
 
@@ -358,18 +369,25 @@ result with C's decoders.
 
 On amd64 (unless built with `-tags noasm` or `purego`) assembly runs the
 decoder's fast loop (C's `LZ4_FAST_DEC_LOOP` part, without external
-dictionary), the fast compressor's main loop (one-shot with byU16 and
-byU32 tables, and the streaming prefix and external-dictionary modes with
-C's resume-in-prefix split; limited or unlimited output), the LZ4MID main
-loop of level 2 (no dictionary), and the whole parsers of levels 3 to 12
-for a block without external or attached dictionary:
+dictionary; linked frames decode with the history in the output, in
+prefix mode), the fast compressor's main loop (one-shot with byU16 and
+byU32 tables, the streaming prefix and external-dictionary modes with C's
+resume-in-prefix split, the attached dictionary (`dictCtx`) of small
+blocks, and `destSize`; limited or unlimited output), the LZ4MID main loop
+of level 2, and the whole parsers of levels 3 to 12:
 `LZ4HC_compress_hashChain` (levels 3 to 9) and
 `LZ4HC_compress_optimal` (10 to 12), with the match search (table
 insertion, candidate loop, pattern analysis, `chainSwap`) and the price
-updates in the same routine. With `favorDecSpeed`, `destSize` or a
-dictionary the Go parsers run, with the search's candidate loop still in
-assembly. Each falls back to Go where C's code takes a path the assembly
-does not cover, and each has a fuzz target comparing it with the Go code.
+updates in the same routine. The LZ4MID loop and the parsers cover every
+mode of C's: a prefix alone, an external dictionary (linked blocks, and
+CDict frames, whose dictionary state C copies into the stream), an
+attached dictionary (`dictCtx`: blocks below `dictCopyMin`, and LZ4MID
+with any CDict), `favorDecSpeed`, and `destSize` (the assembly stops at
+the sequence that does not fit, which Go encodes as C does). Each mode is
+a separate routine assembled from one source (`#ifdef` variants), so the
+prefix-only loops keep their instruction stream. Each falls back to Go
+where C's code takes a path the assembly does not cover, and each has a
+fuzz target comparing it with the Go code.
 Baseline instructions only (SSE2; no BMI2 or AVX2 needed): 16-byte match
 compares measured slower than 8-byte ones on the short matches that
 dominate, except in LZ4MID's count past the first 8 bytes.
@@ -408,14 +426,59 @@ it); other CPUs give other numbers.
 
 The HC levels gain most from running the whole parser in one routine: C
 inlines `LZ4HC_InsertAndGetWiderMatch` into each parser, and so does the
-assembly. With linked blocks (`-BD`, compared with C's `--single-thread`)
-the fast level measured 100 to 103% (4 MiB blocks) and 100 to 102% (64 KiB
-blocks), xml to ooffice. C's `-T1` runs its job mode with one worker
-thread, which costs C about 2% against `--single-thread`. With
-`favorDecSpeed`, `destSize` or a dictionary the HC levels run the Go
-parsers (not measured here). The pure-Go build (`-tags noasm`) is slower
-(measured before the assembly: 40 to 55% of C at level 1, 15 to 25% for
-decoding); arm64 is not measured.
+assembly. C's `-T1` runs its job mode with one worker thread, which costs C
+about 2% against `--single-thread`. The pure-Go build (`-tags noasm`) is
+slower (measured before the assembly: 40 to 55% of C at level 1, 15 to 25%
+for decoding); arm64 is not measured.
+
+The other frame modes, against C with `--single-thread` (the same method;
+xml, dickens and ooffice; equal ratios on every row): linked blocks
+(`-BD`), a dictionary (`-D`: 64 KiB from the middle of the file, digested
+once into a CDict; with 4 MiB blocks C copies the dictionary state into the
+stream at every level but 2, which searches the attached dictionary for
+the whole block), and `--favor-decSpeed`. The lowest rows, level 1 with a
+dictionary on xml in 4 MiB blocks (98.5%, four runs between 97.8 and
+98.7%) and `favorDecSpeed` at level 10 on xml (98.9 to 99.3%), are below C
+by about 1%; cells within 2% of 100% are noise-level.
+
+| mode, level | 4 MiB: xml | dickens | ooffice | 64 KiB: xml | dickens | ooffice |
+|---|---|---|---|---|---|---|
+| linked, 1 | 101.5% | 101.7% | 102.0% | 101.2% | 102.2% | 100.6% |
+| linked, 2 | 100.4% | 100.6% | 103.3% | 100.1% | 100.3% | 102.8% |
+| linked, 4 | 107.2% | 112.1% | 108.9% | 106.8% | 107.5% | 109.2% |
+| linked, 9 | 103.8% | 106.7% | 107.4% | 103.9% | 106.4% | 106.3% |
+| linked, 12 | 104.4% | 103.0% | 107.7% | 104.1% | 103.0% | 108.2% |
+| dictionary, 1 | 98.5% | 100.2% | 101.5% | 104.5% | 100.3% | 103.1% |
+| dictionary, 2 | 101.0% | 100.9% | 106.0% | 103.2% | 102.4% | 105.3% |
+| dictionary, 4 | 104.8% | 112.1% | 109.2% | 103.9% | 110.6% | 108.5% |
+| dictionary, 9 | 103.5% | 106.6% | 105.4% | 103.7% | 105.8% | 104.4% |
+| dictionary, 12 | 103.8% | 103.1% | 107.3% | 103.8% | 100.7% | 105.7% |
+| favorDecSpeed, 10 | 99.3% | 100.6% | 103.8% | 98.9% | 100.4% | 103.9% |
+| favorDecSpeed, 11 | 100.3% | 100.0% | 104.3% | 99.5% | 100.0% | 104.3% |
+| favorDecSpeed, 12 | 102.3% | 100.0% | 104.4% | 102.1% | 100.0% | 105.2% |
+| linked, 1 decompression | 103.6% | 101.1% | 103.2% | 101.4% | 100.5% | 98.8% |
+| linked, 9 decompression | 103.4% | 101.8% | 104.0% | 100.8% | 101.0% | 101.0% |
+
+Before this assembly the same rows measured 58 to 64% (level 2 with a
+dictionary), 57 to 87% (HC levels with a dictionary), 62 to 81%
+(`favorDecSpeed`) and 70 to 98% (HC levels, linked 64 KiB blocks).
+
+Multi-threaded frames (`NbWorkers`, against C's `lz4 -T<n>`, which reads
+its stable input in place as `UpdateStable` does) on `silesia.tar`, 64 KiB
+blocks, both pinned to the same 8 cores (one thread each, no SMT
+siblings), median of three interleaved runs (MB/s, Go then C, and Go's %
+of C); the ratios are equal, linked frames included (C's job output):
+
+| threads | independent, level 1 | independent, level 9 | linked, level 1 | linked, level 9 |
+|---|---|---|---|---|
+| 1 | 398 / 383 (103.8%) | 21.5 / 19.4 (110.8%) | 379 / 366 (103.7%) | 21.0 / 19.2 (109.4%) |
+| 2 | 807 / 680 (118.7%) | 41.7 / 38.4 (108.6%) | 749 / 723 (103.6%) | 42.2 / 37.7 (111.9%) |
+| 4 | 1534 / 1483 (103.4%) | 79.0 / 74.8 (105.6%) | 1492 / 1413 (105.6%) | 80.9 / 75.1 (107.7%) |
+| 8 | 2543 / 2576 (98.7%) | 147 / 145 (101.2%) | 2485 / 2409 (103.1%) | 147 / 145 (101.0%) |
+
+Level 9 scales 6.8 times from 1 to 8 threads (C 7.5 times, from a slower
+start); level 1 at 8 threads (2.5 GB/s) is within noise of C. The 2-thread
+independent row's C value was low in each of its runs.
 
 ### Tests
 
@@ -427,8 +490,14 @@ and with reused tables, every HC level 0 to 13 with and without
 layouts with loaded, slow-loaded and attached dictionaries, limited
 capacities and `destSize`), frames for 64 preference sets and plans of
 writes, flushes and uncompressed writes with raw and digested dictionaries,
-and the decoders on valid, truncated and mutated blocks and frames. `go test
--short ./lz4` runs a subset; the full run takes about 40 minutes.
+multi-threaded frames (1, 3 and 8 workers, one-shot, `Writer` and
+`UpdateStable`, against C's frames with `nbWorkers`), and the decoders on
+valid, truncated and mutated blocks and frames. Fuzz targets compare the
+assembly with the Go code in every compression mode (`FuzzHCDictAsmEquiv`,
+`FuzzFastDictAsmEquiv` and the others), the multi-threaded frames across
+worker counts (`FuzzFrameMT`), and the decoders and encoders with C's;
+the concurrent paths run under the race detector. `go test -short ./lz4`
+runs a subset; the full run takes about 40 minutes.
 
 ## Credits
 
