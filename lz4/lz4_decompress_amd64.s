@@ -57,8 +57,9 @@ GLOBL lz4dist<>(SB), RODATA|NOPTR, $64
 //     (else status 3) and below its own write position (offset >= 1;
 //     offset 0 writes zeros without reading), and writes below cpy+64 <=
 //     oend: the 18-byte copy below op+18 <= oend-32; the 64-, 32- and 8-byte
-//     chunk loops stop at the first chunk ending at or beyond cpy, so they
-//     write below cpy+64, cpy+32 and cpy+8.
+//     chunk loops (and the 8-byte pattern stores of offsets 1, 2 and 4,
+//     which read only the offset's bytes at match) stop at the first chunk
+//     ending at or beyond cpy, so they write below cpy+64, cpy+32 and cpy+8.
 TEXT ·decodeFastAsm(SB), NOSPLIT, $0-120
 	MOVQ src_base+0(FP), SI
 	MOVQ src_len+8(FP), R8
@@ -76,6 +77,8 @@ TEXT ·decodeFastAsm(SB), NOSPLIT, $0-120
 	LEAQ -15(R8), R13
 	LEAQ -6(R8), R14
 	LEAQ -64(R8), R15
+
+	PCALIGN $32
 
 loop:
 	MOVBQZX (AX), CX             // token
@@ -100,20 +103,14 @@ offset:
 	ANDQ    $15, DX
 	CMPQ    DX, $15
 	JEQ     longML
-
-mlDone:
-	ADDQ $4, DX                  // ml
-	MOVQ R12, SI
-	SUBQ BX, SI
-	CMPQ DX, SI
-	JGE  pending                 // op+ml >= oend-64: safe_match_copy
-	ANDQ $15, CX
-	CMPQ CX, $15
-	JEQ  general
-	CMPQ R8, $8
-	JLO  general
-	CMPQ R9, R10
-	JLO  general
+	ADDQ    $4, DX               // ml
+	LEAQ    (BX)(DX*1), CX       // cpy
+	CMPQ    CX, R12
+	JHS     pending              // op+ml >= oend-64: safe_match_copy
+	CMPQ    R8, $8
+	JLO     general
+	CMPQ    R9, R10
+	JLO     general
 
 	// match length from the token, offset >= 8, within prefix: 18 bytes
 	MOVQ (R9), SI
@@ -122,13 +119,13 @@ mlDone:
 	MOVQ SI, 8(BX)
 	MOVW 16(R9), SI
 	MOVW SI, 16(BX)
-	ADDQ DX, BX
+	MOVQ CX, BX
 	JMP  loop
 
 general:
+	// CX = cpy
 	CMPQ R9, R10
 	JLO  offsetError             // checkOffset: match + 0 < lowPrefix
-	LEAQ (BX)(DX*1), CX          // cpy
 	CMPQ R8, $16
 	JLO  small
 	CMPQ R8, $64
@@ -167,6 +164,12 @@ small:
 	JEQ   zeros
 	CMPQ  R8, $8
 	JHS   small8
+	CMPQ  R8, $1
+	JEQ   fill1
+	CMPQ  R8, $2
+	JEQ   fill2
+	CMPQ  R8, $4
+	JEQ   fill4
 	MOVB  (R9), SI
 	MOVB  SI, (BX)
 	MOVB  1(R9), SI
@@ -206,6 +209,34 @@ chunkLoop:
 	JLO  chunkLoop
 
 smallDone:
+	MOVQ CX, BX
+	JMP  loop
+
+	// offsets 1, 2 and 4 (C: LZ4_memcpy_using_offset): the 8-byte pattern
+	// of the repeated bytes, stored up to cpy
+fill1:
+	MOVBQZX (R9), SI
+	MOVQ  $0x0101010101010101, DI
+	IMULQ DI, SI
+	JMP   fill
+
+fill2:
+	MOVWQZX (R9), SI
+	MOVQ  $0x0001000100010001, DI
+	IMULQ DI, SI
+	JMP   fill
+
+fill4:
+	MOVL  (R9), SI
+	MOVQ  SI, DI
+	SHLQ  $32, DI
+	ORQ   DI, SI
+
+fill:
+	MOVQ SI, (BX)
+	ADDQ $8, BX
+	CMPQ BX, CX
+	JLO  fill
 	MOVQ CX, BX
 	JMP  loop
 
@@ -274,7 +305,11 @@ longML:
 	ADDQ SI, DX
 	CMPQ SI, $255
 	JEQ  longML
-	JMP  mlDone
+	ADDQ $4, DX                  // ml
+	LEAQ (BX)(DX*1), CX          // cpy
+	CMPQ CX, R12
+	JHS  pending                 // op+ml >= oend-64: safe_match_copy
+	JMP  general
 
 restart:
 	MOVQ DI, AX
