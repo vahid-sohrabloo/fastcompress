@@ -151,7 +151,11 @@ func decompressGeneric(src, out []byte, op0, outputSize int, partial bool, dd di
 
 	if useDecAsm && dd == noDict && oend <= len(out) && lowPrefix >= 0 && lowPrefix <= op {
 		var st int
-		ip, op, offset, ml, st = decodeFastAsm(src, out, ip, op, oend, lowPrefix)
+		if op-lowPrefix >= distanceMax {
+			ip, op, offset, ml, st = decodeFastPrefix64kAsm(src, out, ip, op, oend, lowPrefix)
+		} else {
+			ip, op, offset, ml, st = decodeFastAsm(src, out, ip, op, oend, lowPrefix)
+		}
 		switch st {
 		case 1:
 			match = op - offset

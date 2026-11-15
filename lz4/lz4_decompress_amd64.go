@@ -18,3 +18,9 @@ func init() {
 //
 //go:noescape
 func decodeFastAsm(src, out []byte, ip, op, oend, lowPrefix int) (nip, nop, offset, ml, status int)
+
+// decodeFastPrefix64kAsm is decodeFastAsm with op - lowPrefix >= 65535 (C:
+// withPrefix64k): every match lies in the history, unchecked.
+//
+//go:noescape
+func decodeFastPrefix64kAsm(src, out []byte, ip, op, oend, lowPrefix int) (nip, nop, offset, ml, status int)

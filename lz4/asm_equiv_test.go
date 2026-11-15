@@ -27,15 +27,20 @@ func withAsm(t testing.TB, on bool, fn func()) {
 }
 
 // FuzzDecodeFastAsmEquiv decodes arbitrary input with the assembly fast loop
-// on and off, whole, into any capacity and after a prefix: the results and
-// the decoded bytes must be equal.
+// on and off, whole, into any capacity and after a prefix (short, or of 64
+// KB and more, where the offset checks are dropped as C's withPrefix64k
+// does): the results and the decoded bytes must be equal.
 func FuzzDecodeFastAsmEquiv(f *testing.F) {
 	for i, b := range fuzzBlocks(f) {
 		f.Add(uint32(i*7919), uint16(i*31), b)
+		f.Add(uint32(i*7919), uint16(0x8000+i*31), b)
 	}
 	f.Fuzz(func(t *testing.T, capa uint32, prefix uint16, src []byte) {
 		c := int(capa % (1 << 20))
 		p := int(prefix % 2048)
+		if prefix&0x8000 != 0 {
+			p = distanceMax + int(prefix%2048) // 64 KB of history: decodeFastPrefix64kAsm
+		}
 		run := func() ([]byte, error) {
 			out := make([]byte, p+c)
 			for i := 0; i < p; i++ {
