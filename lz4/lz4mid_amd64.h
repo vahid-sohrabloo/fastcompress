@@ -127,7 +127,7 @@ dictSearch:
 	MOVL R14, AX
 	SUBL F_LOWLIM(SP), AX
 	CMPL AX, $(65535-8)
-	JHS  skip                    // ipIndex - gDictEndIndex >= LZ4_DISTANCE_MAX - 8
+	JHS  dictGone                // ipIndex - gDictEndIndex >= LZ4_DISTANCE_MAX - 8
 	CMPQ F_DMID(SP), $0
 	JNE  dictMid
 	MOVL (SI), AX
@@ -187,6 +187,10 @@ dsNext:
 dsDone:
 	CMPQ 24(SP), $4
 	JHS  encode
+	JMP  skip
+
+dictGone:
+	MOVQ $0, F_DHASH(SP)         // out of reach for good: ipIndex only grows
 	JMP  skip
 
 	// LZ4MID_searchExtDict: the dictionary's hash8 then hash4 entry
