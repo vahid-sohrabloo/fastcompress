@@ -7,11 +7,11 @@
 
 #include "textflag.h"
 
-// LZ4MID_hash8Ptr: ((le64 << 8) * 58295818150454627) >> (64-14); R15 scratch
+// LZ4MID_hash8Ptr: ((le64 << 8) * 58295818150454627) >> (64-14), with the
+// shift folded into the multiplier (equal mod 2^64); R15 scratch
 #define HASH8(ptr, dst) \
 	MOVQ  (ptr), dst; \
-	SHLQ  $8, dst; \
-	MOVQ  $58295818150454627, R15; \
+	MOVQ  $0xcf1bbcdcbfa56300, R15; \
 	IMULQ R15, dst; \
 	SHRQ  $50, dst
 
@@ -23,9 +23,10 @@
 
 // COUNTMATCH(ipreg, ipIndexReg, posReg, out): LZ4MID_countMatch without
 // external dictionary: 0 if ipIndex - pos > LZ4_DISTANCE_MAX or pos <
-// prefixIdx, else LZ4_count(ip, win + pos - prefixIdx, matchlimit).
-// Clobbers AX, BX, CX, DX.
-#define COUNTMATCH(ipreg, ipIndexReg, posReg, out, done) \
+// prefixIdx, else LZ4_count(ip, win + pos - prefixIdx, matchlimit). The
+// first 8 bytes are compared here (most candidates differ within them),
+// the rest by midCount. Clobbers AX, BX, CX, DX.
+#define COUNTMATCH(ipreg, ipIndexReg, posReg, out, slow, done) \
 	XORL  out, out; \
 	MOVL  ipIndexReg, AX; \
 	SUBL  posReg, AX; \
@@ -36,6 +37,16 @@
 	MOVL  posReg, BX; \
 	SUBL  R13, BX; \
 	ADDQ  R9, BX; \
+	LEAQ  -7(R12), AX; \
+	CMPQ  ipreg, AX; \
+	JHS   slow; \
+	MOVQ  (ipreg), AX; \
+	XORQ  (BX), AX; \
+	JEQ   slow; \
+	BSFQ  AX, out; \
+	SHRQ  $3, out; \
+	JMP   done; \
+slow: \
 	MOVQ  ipreg, AX; \
 	CALL  midCount<>(SB); \
 	MOVQ  CX, out; \
@@ -53,7 +64,7 @@ done:
 // R12 matchlimit, R13 prefixIdx, R14 ipIndex, R15 hash scratch; AX, BX, CX,
 // DX scratch; locals 0 olimit, 8 dstEnd, 16 ilimitIdx, 24 matchLength,
 // 32 matchDistance, 40 hash8 table, 48 dst, 56 and 64 the hash and the
-// candidate at ip+1.
+// candidate at ip+1, 72 and 80 the hash4 and its entry.
 //
 // Preconditions (checked by midCompress): iend - ip >= LZ4_minLength,
 // iend <= len(win), and the input is the end of win (iend = len(win));
@@ -67,8 +78,10 @@ done:
 //     i.e. ip-2 < iend-8, so these reads end below iend; ip-5 is read only
 //     when ip > 5 (C's check), ip-3 > anchor >= 0 after a match of at least
 //     4 bytes. Candidates are read only at positions >= prefixIdx (index
-//     >= 0) and below ip (table entries are earlier positions), by
-//     midCount, which reads below matchlimit = iend-5 on the ip side and at
+//     >= 0) and below ip (table entries are earlier positions): 8 bytes at
+//     ip and at the candidate when ip < matchlimit - 7 (so below matchlimit
+//     = iend-5, and the candidate below ip + 8), else and past a full 8-byte
+//     match by midCount, which reads below matchlimit on the ip side and at
 //     the same distance behind on the match side. The catch back reads
 //     ip[-1] (ip > anchor >= 0) and ip[-dist-1] with ip > dist.
 // (2) dst writes: before a sequence, op + litLen/255 + litLen + 8 <= olimit
@@ -77,7 +90,7 @@ done:
 //     within these limits): the literal run bytes, the offset, the match run
 //     below op + mlCode/255 + 2; the literals are copied in 8-byte chunks
 //     when op+litLen+8 <= dstEnd, else byte by byte.
-TEXT ·midCompressAsm(SB), NOSPLIT, $72-120
+TEXT ·midCompressAsm(SB), NOSPLIT, $88-120
 	MOVQ win_base+0(FP), R9
 	MOVQ ip+24(FP), SI
 	ADDQ R9, SI
@@ -118,13 +131,19 @@ loop:
 	SUBQ R9, R14
 	ADDL R13, R14                // ipIndex
 
+	// the short match's entry, loaded early (another table)
+	HASH4(SI, DX)
+	MOVQ DX, 72(SP)
+	MOVL (R10)(DX*4), CX
+	MOVQ CX, 80(SP)
+
 	// search long match
 	HASH8(SI, DX)
 	MOVQ 40(SP), BX
 	MOVL (BX)(DX*4), CX          // pos8
 	MOVL R14, (BX)(DX*4)
 	MOVQ CX, 32(SP)
-	COUNTMATCH(SI, R14, 32(SP), DX, cm8)
+	COUNTMATCH(SI, R14, CX, DX, cm8slow, cm8)
 	MOVQ DX, 24(SP)
 	MOVL R14, AX
 	SUBL 32(SP), AX
@@ -133,11 +152,11 @@ loop:
 	JHS  found
 
 	// search short match
-	HASH4(SI, DX)
-	MOVL (R10)(DX*4), CX         // pos4
+	MOVQ 72(SP), DX
+	MOVQ 80(SP), CX              // pos4
 	MOVL R14, (R10)(DX*4)
 	MOVQ CX, 32(SP)
-	COUNTMATCH(SI, R14, 32(SP), DX, cm4)
+	COUNTMATCH(SI, R14, CX, DX, cm4slow, cm4)
 	MOVQ DX, 24(SP)
 	MOVL R14, AX
 	SUBL 32(SP), AX
@@ -178,6 +197,17 @@ found:
 	MOVL AX, BX
 	SUBL R13, BX
 	ADDQ R9, BX
+	LEAQ -7(R12), AX
+	CMPQ DX, AX
+	JHS  ml2slow
+	MOVQ (DX), AX
+	XORQ (BX), AX
+	JEQ  ml2slow
+	BSFQ AX, CX
+	SHRQ $3, CX
+	JMP  ml2done
+
+ml2slow:
 	MOVQ DX, AX
 	CALL midCount<>(SB)
 
@@ -409,10 +439,31 @@ fail2:
 // midCount: CX = LZ4_count(AX, BX, R12): the common prefix of the bytes at
 // AX (below matchlimit R12) and at BX. Clobbers AX, BX, DX.
 //
-// BOUNDS: 8-byte loads at AX while AX < R12-7, then 4, 2 and 1 bytes while
-// they fit below R12; BX advances with AX and lies behind it.
+// BOUNDS: 16-byte loads at AX while AX < R12-15, 8-byte loads while AX <
+// R12-7, then 4, 2 and 1 bytes while they fit below R12; BX advances with
+// AX and lies behind it.
 TEXT midCount<>(SB), NOSPLIT, $0
 	MOVQ AX, CX
+
+mc16:
+	LEAQ -15(R12), DX
+	CMPQ CX, DX
+	JHS  mc8
+	MOVOU (CX), X0
+	MOVOU (BX), X1
+	PCMPEQB X1, X0
+	PMOVMSKB X0, DX
+	XORL $0xFFFF, DX
+	JNE  mc16Diff
+	ADDQ $16, CX
+	ADDQ $16, BX
+	JMP  mc16
+
+mc16Diff:
+	BSFL DX, DX
+	ADDQ DX, CX
+	SUBQ AX, CX
+	RET
 
 mc8:
 	LEAQ -7(R12), DX
