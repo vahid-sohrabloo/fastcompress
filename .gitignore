@@ -8,6 +8,8 @@ ref/cref/build/
 ref/libdeflate/
 ref/ldref/ldref
 ref/ldref/ldbench
+ref/lz4/
+ref/lz4ref/lz4ref
 bench/gzip/gzbench
 bench/gzip/gzip
 
