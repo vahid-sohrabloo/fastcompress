@@ -6,7 +6,7 @@
 // which is ((le64 << mlsShift) * prime) >> hShift mod 2^64 with CX = hShift.
 #define HASHF(pos, dst) \
 	MOVQ  (SI)(pos*1), dst; \
-	IMULQ 32(SP), dst; \
+	IMULQ BP, dst; \
 	SHRQ  CX, dst
 
 // HASH(pos, dst) is HASHF loading CX = hShift first.
@@ -44,7 +44,7 @@ done:
 // in the loop, so the GC never sees it), CX hShift, AX/DX scratch. BX, R15
 // and CX are reloaded at start. rep2, anchor, nSeq and nLits live in their
 // argument and result slots; the frame holds current0 at 0(SP), ilimit at
-// 8(SP), step at 16(SP), nextStep at 24(SP) and prime << mlsShift at 32(SP).
+// 8(SP), step at 16(SP) and nextStep at 24(SP); BP holds prime << mlsShift.
 // After a match: R8 ip0, DX match0, AX mLength, R12 offBase.
 // CANDIDATE(hit, miss): compare the 4 bytes at matchIdx (R13) with ip0's,
 // going to hit if they match; a miss falls through to the label miss,

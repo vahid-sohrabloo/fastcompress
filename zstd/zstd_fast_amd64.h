@@ -34,7 +34,7 @@
 	MOVQ prime+104(FP), AX
 	MOVQ mlsShift+88(FP), CX
 	SHLQ CX, AX
-	MOVQ AX, 32(SP)
+	MOVQ AX, BP             // prime << mlsShift (the helpers called do not touch BP)
 
 start:
 	MOVQ stepSize+80(FP), AX
