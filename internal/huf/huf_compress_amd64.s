@@ -274,3 +274,110 @@ x5nopad:
 x5overflow:
 	MOVQ $0, ret+40(FP)
 	RET
+
+// FLUSHF: FLUSHX without the clamp (C: HUF_flushBits with kFast), for a
+// dst that holds the tight bound (see compress1XAsmBMI2x10). Clobbers AX,
+// CX.
+#define FLUSHF \
+	MOVL    R9, CX; \
+	NEGL    CX; \
+	SHRXQ   CX, R8, AX; \
+	MOVQ    AX, (R10); \
+	MOVBQZX R9, CX; \
+	SHRQ    $3, CX; \
+	ADDQ    CX, R10; \
+	ANDQ    $7, R9
+
+// MERGE: add the group built by GROUP5 to the container.
+#define MERGE \
+	SHRXQ R13, R8, R8; \
+	ORQ   R12, R8; \
+	ADDQ  R13, R9
+
+// func compress1XAsmBMI2x10(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
+//
+// compress1XAsmBMI2x5 with 10 codes per loop iteration and no clamp on the
+// flushes (C: HUF_compress1X_usingCTable_internal_body_loop with kUnroll 5
+// and kFastFlush, which it uses when dstLen >= HUF_tightCompressBound).
+// Preconditions: tableLog <= 11 and dstLen >= srcLen*tableLog/8 + 8, so no
+// flush before the end mark writes past dst + dstLen - 8 (the end mark's
+// flush is clamped and checked as in compress1XAsm).
+TEXT ·compress1XAsmBMI2x10(SB), NOSPLIT, $0-48
+	MOVQ dst+0(FP), R10
+	MOVQ dstLen+8(FP), R11
+	LEAQ -8(R10)(R11*1), R11
+	MOVQ src+16(FP), SI
+	MOVQ srcLen+24(FP), DX
+	MOVQ ct+32(FP), DI
+	XORL R8, R8
+	XORL R9, R9
+	// first srcLen % 5 symbols, from the end (at most 4 codes)
+	MOVQ DX, AX
+	MOVQ $0xCCCCCCCCCCCCCCCD, CX
+	MULQ CX                 // DX:AX = srcLen * ceil(2^66 / 5)
+	SHRQ $2, DX             // srcLen / 5
+	MOVQ DX, R14
+	LEAQ (DX)(DX*4), CX
+	MOVQ srcLen+24(FP), DX
+	SUBQ DX, CX
+	NEGQ CX                 // srcLen % 5
+
+x10rem:
+	TESTQ CX, CX
+	JEQ   x10odd
+	DECQ  CX
+	DECQ  DX
+	MOVBLZX (SI)(DX*1), BX
+	MOVQ    (DI)(BX*8), AX
+	SHRXQ   AX, R8, R8
+	ORQ     AX, R8
+	ADDQ    AX, R9
+	JMP   x10rem
+
+x10odd:
+	FLUSHF
+	// an odd number of 5-code groups: one group first
+	TESTQ $1, R14
+	JEQ   x10check
+	SUBQ  $5, DX
+	GROUP5(0)
+	MERGE
+	FLUSHF
+
+x10check:
+	TESTQ DX, DX
+	JEQ   x10close
+	PCALIGN $16
+
+x10loop:
+	SUBQ $10, DX
+	GROUP5(5)
+	MERGE
+	FLUSHF
+	GROUP5(0)
+	MERGE
+	FLUSHF
+	TESTQ DX, DX
+	JNE   x10loop
+
+x10close:
+	SHRQ $1, R8
+	MOVQ $0x8000000000000000, AX
+	ORQ  AX, R8
+	INCQ R9
+	FLUSHX
+	CMPQ R10, R11
+	JAE  x10overflow
+	MOVQ R9, CX
+	SUBQ dst+0(FP), R10
+	TESTQ CX, CX
+	JEQ  x10nopad
+	INCQ R10
+
+x10nopad:
+	MOVQ R10, ret+40(FP)
+	RET
+
+x10overflow:
+	MOVQ $0, ret+40(FP)
+	RET

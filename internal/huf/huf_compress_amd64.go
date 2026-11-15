@@ -39,11 +39,22 @@ func compress1XAsmBMI2(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) i
 //go:noescape
 func compress1XAsmBMI2x5(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
 
-// compress1XAsmVariant runs compress1XAsmBMI2x5 or compress1XAsmBMI2 (by
-// tableLog) when BMI2 is on, else compress1XAsm.
+// compress1XAsmBMI2x10 is compress1XAsmBMI2x5 with 10 codes per loop
+// iteration and unclamped flushes, for tableLog <= 11 and dstLen >=
+// srcLen*tableLog/8 + 8 (C: HUF_tightCompressBound, below which C clamps).
+//
+//go:noescape
+func compress1XAsmBMI2x10(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
+
+// compress1XAsmVariant runs compress1XAsmBMI2x10, compress1XAsmBMI2x5 or
+// compress1XAsmBMI2 (by tableLog and dstLen) when BMI2 is on, else
+// compress1XAsm.
 func compress1XAsmVariant(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt, tableLog uint32) int {
 	if useHufBMI2 {
 		if tableLog <= 11 {
+			if dstLen >= srcLen*int(tableLog)>>3+8 {
+				return compress1XAsmBMI2x10(dst, dstLen, src, srcLen, ct)
+			}
 			return compress1XAsmBMI2x5(dst, dstLen, src, srcLen, ct)
 		}
 		return compress1XAsmBMI2(dst, dstLen, src, srcLen, ct)
