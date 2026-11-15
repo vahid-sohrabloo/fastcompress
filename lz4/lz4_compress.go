@@ -593,8 +593,14 @@ func (c *streamInternal) compressGeneric(win []byte, srcStart, srcSize int, inpu
 	}
 	if dd == usingExtDict && di == noDictIssue {
 		var state resumeState
-		result := c.compressGenericValidated(win, srcStart, srcSize, inputConsumed, dst, dstCapacity, od,
-			tt, usingExtDict, noDictIssue, acceleration, &state, nil)
+		result, ok := 0, false
+		if srcStart == 0 && len(win) == srcSize {
+			result, ok = c.compressExtDictAsm(win, dst, dstCapacity, od, noDictIssue, acceleration, &state)
+		}
+		if !ok {
+			result = c.compressGenericValidated(win, srcStart, srcSize, inputConsumed, dst, dstCapacity, od,
+				tt, usingExtDict, noDictIssue, acceleration, &state, nil)
+		}
 		if !state.set {
 			return result
 		}
@@ -602,8 +608,28 @@ func (c *streamInternal) compressGeneric(win []byte, srcStart, srcSize int, inpu
 		if od == notLimited {
 			capa = CompressBound(srcSize)
 		}
+		if srcStart == 0 && len(win) == srcSize {
+			if n, ok := c.compressResumeAsm(win, dst, capa, &state, acceleration); ok {
+				return n
+			}
+		}
 		return c.compressGenericValidated(win, srcStart, srcSize, nil, dst, capa, limitedOutput,
 			byU32, withPrefix64k, noDictIssue, acceleration, nil, &state)
+	}
+	if dd == noDict && od != fillOutput && srcStart == 0 && len(win) == srcSize {
+		if n, ok := c.compressNoDictAsm(win, dst, dstCapacity, od, tt, di, acceleration); ok {
+			return n
+		}
+	}
+	if dd == usingExtDict && tt == byU32 && srcStart == 0 && len(win) == srcSize {
+		if n, ok := c.compressExtDictAsm(win, dst, dstCapacity, od, di, acceleration, nil); ok {
+			return n
+		}
+	}
+	if dd == withPrefix64k && tt == byU32 && od != fillOutput && len(win) == srcStart+srcSize {
+		if n, ok := c.compressPrefixAsm(win, srcStart, dst, dstCapacity, od, di, acceleration); ok {
+			return n
+		}
 	}
 	return c.compressGenericValidated(win, srcStart, srcSize, inputConsumed, dst, dstCapacity, od,
 		tt, dd, di, acceleration, nil, nil)

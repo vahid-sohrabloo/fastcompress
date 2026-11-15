@@ -3,6 +3,7 @@ package lz4
 import (
 	"math/bits"
 	"sync"
+	"unsafe"
 )
 
 // The high compression levels of lz4hc.c (lz4 v1.11.1, Copyright (c) Yann
@@ -76,6 +77,37 @@ func hcGetCLevelParams(level int) hcParams {
 	return clTable[min(LevelHCMax, level)]
 }
 
+// hcChainArgs is the state shared with hcChainAsm (offsets in
+// lz4hc_amd64.s).
+//
+// The pointers are uintptrs, so filling the struct (in the context, on the
+// heap) needs no write barrier; the memory stays reachable through the
+// context and win.
+type hcChainArgs struct {
+	win        uintptr
+	chain      uintptr
+	ip         int
+	iLowLimit  int
+	iHighLimit int
+	prefixIdx  uint64
+	lowest     uint64
+	ipIndex    uint64
+	pattern    uint64
+	maxLength  int
+	pa         int
+	matchIndex uint64
+	nbAttempts int
+	longest    int
+	offset     int
+	sBack      int
+	hashTable  uintptr
+	next       uint64 // nextToUpdate (in and out)
+	insert     int    // 1: run LZ4HC_Insert and the first lookup first
+	chainSwap  int
+	favor      int
+	chainPos   uint64 // matchChainPos (in and out)
+}
+
 type hcMatch struct {
 	off, len, back int
 }
@@ -94,6 +126,7 @@ type hcCtx struct {
 	favorDecSpeed    bool
 	dictCtx          *hcCtx
 	opt              []hcOptimal // workspace of levels 10 to 12
+	args             hcChainArgs // hcChainAsm's state
 }
 
 func hcHashPtr(b []byte, p int) uint32 { return (le32(b[p:]) * 2654435761) >> (minMatch*8 - hcHashLog) }
@@ -419,7 +452,18 @@ func (c *hcCtx) midCompress(win []byte, srcStart int, srcSizePtr *int, dst []byt
 	}
 	refEnd := e.ip
 
-	if *srcSizePtr >= minLength {
+	if *srcSizePtr >= minLength && useMidAsm && searchIntoDict == nil && dictIdx == prefixIdx && limit != fillOutput &&
+		iend == len(win) && len(dst) >= maxOutputSize && (limit != notLimited || len(dst) >= CompressBound(*srcSizePtr)) {
+		olimit := maxOutputSize
+		if limit == notLimited {
+			olimit = -1
+		}
+		nip, anchor, op, st := midCompressAsm(win, e.ip, iend, int(prefixIdx), &c.hashTable[0], dst, olimit)
+		if st != 0 {
+			return 0
+		}
+		e.ip, e.anchor, e.op = nip, anchor, op
+	} else if *srcSizePtr >= minLength {
 		mflimit := iend - mfLimit
 		matchlimit := iend - lastLiterals
 		ilimit := iend - midHashSize
@@ -675,11 +719,43 @@ func (c *hcCtx) insertAndGetWiderMatch(win []byte, ip, iLowLimit, iHighLimit, lo
 	srcPatternLength := 0
 	offset, sBack := 0, 0
 
-	c.insert(win, ip)
-	matchIndex := hashTable[hcHashPtr(win, ip)]
+	useAsm := useHCAsm && longest > lookBackLength && iHighLimit <= len(win) && c.nextToUpdate >= prefixIdx
+	var matchIndex uint32
+	a := &c.args
+	if useAsm {
+		*a = hcChainArgs{win: uintptr(unsafe.Pointer(&win[0])), chain: uintptr(unsafe.Pointer(&chainTable[0])),
+			ip: ip, iLowLimit: iLowLimit, iHighLimit: iHighLimit,
+			prefixIdx: uint64(prefixIdx), lowest: uint64(lowestMatchIndex), ipIndex: uint64(ipIndex),
+			pattern: uint64(pattern), maxLength: maxLength, pa: b2i(patternAnalysis),
+			nbAttempts: nbAttempts, longest: longest, hashTable: uintptr(unsafe.Pointer(&hashTable[0])),
+			next: uint64(c.nextToUpdate), insert: 1, chainSwap: b2i(chainSwap), favor: b2i(favorDecSpeed)}
+	} else {
+		c.insert(win, ip)
+		matchIndex = hashTable[hcHashPtr(win, ip)]
+	}
 
-	for matchIndex >= lowestMatchIndex && nbAttempts > 0 && longest < maxLength {
+	for useAsm || (matchIndex >= lowestMatchIndex && nbAttempts > 0 && longest < maxLength) {
 		matchLength := 0
+		if useAsm {
+			if a.insert == 0 {
+				a.matchIndex, a.nbAttempts, a.longest, a.offset, a.sBack = uint64(matchIndex), nbAttempts, longest, offset, sBack
+				a.chainPos = uint64(matchChainPos)
+			}
+			r := hcChainAsm(a)
+			if a.insert != 0 {
+				a.insert = 0
+				c.nextToUpdate = uint32(a.next)
+			}
+			matchIndex, nbAttempts, longest, offset, sBack = uint32(a.matchIndex), a.nbAttempts, a.longest, a.offset, a.sBack
+			matchChainPos = uint32(a.chainPos)
+			if r == 0 {
+				break
+			}
+			if r == 2 {
+				// candidate done: on to the pattern analysis
+				goto patternAnalysisStep
+			}
+		}
 		nbAttempts--
 		if favorDecSpeed && ipIndex-matchIndex < 8 {
 			// favorDecSpeed skips matches with offset < 8
@@ -735,6 +811,7 @@ func (c *hcCtx) insertAndGetWiderMatch(win []byte, ip, iLowLimit, iHighLimit, lo
 			}
 		}
 
+	patternAnalysisStep:
 		{
 			distNextMatch := uint32(chainTable[uint16(matchIndex)])
 			if patternAnalysis && distNextMatch == 1 && matchChainPos == 0 {

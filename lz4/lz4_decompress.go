@@ -149,6 +149,21 @@ func decompressGeneric(src, out []byte, op0, outputSize int, partial bool, dd di
 	// C also leaves the fast loop when an external dictionary lies just
 	// ahead of the output (a ring buffer): dict must not overlap out here.
 
+	if useDecAsm && dd == noDict && oend <= len(out) && lowPrefix >= 0 && lowPrefix <= op {
+		var st int
+		ip, op, offset, ml, st = decodeFastAsm(src, out, ip, op, oend, lowPrefix)
+		switch st {
+		case 1:
+			match = op - offset
+			pendingMatch = true
+		case 2:
+			return 0, ErrCorrupt
+		case 3:
+			return 0, ErrOffset
+		}
+		goto safeDecode
+	}
+
 	// Fast loop
 	for {
 		token = int(src[ip])
