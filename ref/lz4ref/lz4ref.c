@@ -49,6 +49,8 @@
  * framedec [dict=FILE]
  *   LZ4F_decompress_usingDict over all of stdin (concatenated frames, skippable
  *   frames included). Output: the decoded bytes; error: exit 2, name on stderr.
+ * xxh32 [seed=N]
+ *   Output: XXH32 of stdin as 8 hex digits.
  * version
  */
 #define LZ4_STATIC_LINKING_ONLY
@@ -57,6 +59,7 @@
 #include "lz4.h"
 #include "lz4hc.h"
 #include "lz4frame.h"
+#include "xxhash.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -401,7 +404,7 @@ static int modeFrameDec(const unsigned char* src, size_t n)
     unsigned char* dict = dp ? readFile(dp, &dictSize) : NULL;
     size_t outCap = 1 << 20;
     unsigned char* out = malloc(outCap);
-    size_t ret = 1;
+    size_t ret = n ? 1 : 0;   /* no input : no frame */
     CHECKF(LZ4F_createDecompressionContext(&d, LZ4F_VERSION));
     while (sp < n) {
         size_t dsz = outCap, ssz = n - sp;
@@ -434,6 +437,7 @@ int main(int argc, char** argv)
     mode = argv[1];
     if (!strcmp(mode, "version")) { printf("%s\n", LZ4_versionString()); return 0; }
     src = readAll(stdin, &n);
+    if (!strcmp(mode, "xxh32")) { printf("%08x\n", XXH32(src, n, (unsigned)argi("seed", 0))); return 0; }
     if (!strcmp(mode, "fast")) return modeFast(src, n);
     if (!strcmp(mode, "hc")) return modeHC(src, n);
     if (!strcmp(mode, "fastreset")) return modeReset(src, n, 0);

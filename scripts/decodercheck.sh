@@ -11,8 +11,9 @@
 #      zstd/decoder*.go, zstd/header.go, zstd/snappy.go,
 #      internal/huf/huf_decompress*.go, and (gzip/DEFLATE port, decision D5)
 #      internal/deflate/{decode_table*.go,static_codes.go,*decompress*.go},
-#      plus internal/adler32/*.go (called by the zlib decoder).
-#   2. a *_decompress*_{amd64,arm64}.s file under zstd/ or internal/ (and
+#      plus internal/adler32/*.go (called by the zlib decoder), and (lz4
+#      port) lz4/lz4_decompress*.go and lz4/lz4frame_decompress*.go.
+#   2. a *_decompress*_{amd64,arm64}.s file under zstd/, internal/ or lz4/ (and
 #      any internal/deflate/*decompress*_{amd64,arm64}.s) has a
 #      TEXT symbol whose comment block (the contiguous // lines directly
 #      above the TEXT line) has no "// BOUNDS:" line.
@@ -39,7 +40,8 @@ ndecoder=0
 for f in zstd/zstd_decompress*.go zstd/zstd_ddict.go zstd/decoder*.go zstd/header.go zstd/snappy.go \
   internal/huf/huf_decompress*.go \
   internal/deflate/decode_table*.go internal/deflate/static_codes.go internal/deflate/*decompress*.go \
-  internal/adler32/*.go; do
+  internal/adler32/*.go \
+  lz4/lz4_decompress*.go lz4/lz4frame_decompress*.go; do
   if [[ -f $f && $f != *_test.go ]]; then
     decoder+=("$f")
     ndecoder=$((ndecoder + 1))
@@ -99,7 +101,7 @@ while IFS= read -r -d '' s; do
   for sym in $out; do
     err "$s: TEXT $sym has no // BOUNDS: block in the comment above it"
   done
-done < <(find zstd internal -type f \( -name '*_decompress*_amd64.s' -o -name '*_decompress*_arm64.s' \
+done < <(find zstd internal lz4 -type f \( -name '*_decompress*_amd64.s' -o -name '*_decompress*_arm64.s' \
   -o -path 'internal/deflate/*decompress*_amd64.s' -o -path 'internal/deflate/*decompress*_arm64.s' \) -print0)
 
 # 3. Every decoder-side asm routine has a FuzzXxxAsmEquiv target.
