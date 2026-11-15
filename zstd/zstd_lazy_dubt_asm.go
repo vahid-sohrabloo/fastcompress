@@ -162,7 +162,8 @@ func btGetAllMatchesFast(matches *[optSize]optMatch, ms *matchState, ip, iLimit 
 // nothing, when ms.btAsm is not set up for this block (btAsmSetup: the
 // assembly is on, mls 4 to 6, the tables' sizes) or a precondition fails:
 // 0 < ip, anchor <= ip, ilimit + 8 <= iend == the block's end (every
-// searched position has 8 bytes to hash), room in ss for every literal and
+// searched position has 8 bytes to hash), room in ss for every literal (and
+// 16 bytes of slack for the 16-byte literal copy) and
 // a sequence per 4 input bytes (every match is >= 4), baseIdx <=
 // ms.nextToUpdate, and the window's lowLimit <= ip's index: then every
 // search the loop makes (at increasing positions up to ilimit) meets
@@ -174,7 +175,7 @@ func lazyBtRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLow
 	if !bp.ok || ip <= 0 || anchor > ip || ilimit+8 > iend || iend != bp.iLimit ||
 		ms.nextToUpdate < bp.baseIdx || bp.lowestValid > uint32(ip)+bp.baseIdx ||
 		prefixLowest < 0 || depth < 0 || depth > 2 ||
-		cap(ss.literals)-nLits < iend-anchor || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
+		cap(ss.literals)-nLits < iend-anchor+16 || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
 		return ip, anchor, offset1, offset2, false
 	}
 	p := &ms.rowAsm

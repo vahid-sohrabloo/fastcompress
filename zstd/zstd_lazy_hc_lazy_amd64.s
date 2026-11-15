@@ -540,9 +540,22 @@ storeseq:
 	MOVQ  lits+16(FP), R10
 	ADDQ  nLits+104(FP), R10
 	MOVQ  anchorOut+88(FP), R11
+	ADDQ  R9, nLits+104(FP)
+	// up to 16 literals: one 16-byte copy (C: ZSTD_storeSeq's ZSTD_copy16).
+	// The literal buffer has 16 bytes of slack (the Run functions check),
+	// and the source must hold the 16 bytes (else fastCopyLits).
+	CMPQ  R9, $16
+	JA    litcall
+	LEAQ  16(R11), CX
+	CMPQ  CX, iend+40(FP)
+	JA    litcall
+	MOVOU (SI)(R11*1), X0
+	MOVOU X0, (R10)
+	JMP   seq
+
+litcall:
 	ADDQ  SI, R11
 	CALL  ·fastCopyLits(SB)
-	ADDQ  R9, nLits+104(FP)
 
 seq:
 	MOVQ seqs+8(FP), R10
@@ -1072,9 +1085,22 @@ storeseq:
 	MOVQ  lits+16(FP), R10
 	ADDQ  nLits+104(FP), R10
 	MOVQ  anchorOut+88(FP), R11
+	ADDQ  R9, nLits+104(FP)
+	// up to 16 literals: one 16-byte copy (C: ZSTD_storeSeq's ZSTD_copy16).
+	// The literal buffer has 16 bytes of slack (the Run functions check),
+	// and the source must hold the 16 bytes (else fastCopyLits).
+	CMPQ  R9, $16
+	JA    litcall
+	LEAQ  16(R11), CX
+	CMPQ  CX, iend+40(FP)
+	JA    litcall
+	MOVOU (SI)(R11*1), X0
+	MOVOU X0, (R10)
+	JMP   seq
+
+litcall:
 	ADDQ  SI, R11
 	CALL  ·fastCopyLits(SB)
-	ADDQ  R9, nLits+104(FP)
 
 seq:
 	MOVQ seqs+8(FP), R10
@@ -1604,9 +1630,22 @@ storeseq:
 	MOVQ  lits+16(FP), R10
 	ADDQ  nLits+104(FP), R10
 	MOVQ  anchorOut+88(FP), R11
+	ADDQ  R9, nLits+104(FP)
+	// up to 16 literals: one 16-byte copy (C: ZSTD_storeSeq's ZSTD_copy16).
+	// The literal buffer has 16 bytes of slack (the Run functions check),
+	// and the source must hold the 16 bytes (else fastCopyLits).
+	CMPQ  R9, $16
+	JA    litcall
+	LEAQ  16(R11), CX
+	CMPQ  CX, iend+40(FP)
+	JA    litcall
+	MOVOU (SI)(R11*1), X0
+	MOVOU X0, (R10)
+	JMP   seq
+
+litcall:
 	ADDQ  SI, R11
 	CALL  ·fastCopyLits(SB)
-	ADDQ  R9, nLits+104(FP)
 
 seq:
 	MOVQ seqs+8(FP), R10

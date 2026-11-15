@@ -64,7 +64,9 @@ func rowAsmSetup(ms *matchState, mls, rowLog uint32, iend int) {
 // assembly is off or a precondition fails: ms.rowAsm set up for this block
 // (tables hold every row, searched positions + 16 within the input),
 // mls and rowLog in 4..6, 0 < ip, ilimit + 16 <= iend, and room in ss for
-// every literal and a sequence per 4 input bytes (every match is >= 4),
+// every literal (with 16 bytes of slack: the parser copies up to 16
+// literals with one 16-byte store) and a sequence per 4 input bytes (every
+// match is >= 4),
 // baseIdx <= ms.nextToUpdate <= ip's index (the row update starts there
 // and reads b at nextToUpdate - baseIdx), and the
 // window's lowLimit <= ip's index (so lowLimit <= curr at every searched
@@ -76,7 +78,7 @@ func lazyRowRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLo
 	if !p.ok || mls < 4 || mls > 6 || rowLog < 4 || rowLog > 6 || ip <= 0 || anchor > ip || ilimit+16 > iend ||
 		ms.nextToUpdate > uint32(ip)+p.baseIdx || ms.nextToUpdate < p.baseIdx || p.lowestValid > uint32(ip)+p.baseIdx ||
 		iend > p.bLen || prefixLowest < 0 || depth < 0 || depth > 2 ||
-		cap(ss.literals)-nLits < iend-anchor || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
+		cap(ss.literals)-nLits < iend-anchor+16 || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
 		return ip, anchor, offset1, offset2, false
 	}
 	seqs := ss.sequences[nSeqs:cap(ss.sequences)]

@@ -54,7 +54,7 @@ func lazyHcRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLow
 	if !p.ok || p.chainTable == nil || mls < 4 || mls > 6 || ip <= 0 || anchor > ip || ilimit+8 > iend ||
 		ms.nextToUpdate > uint32(ip)+p.baseIdx || ms.nextToUpdate < p.baseIdx || p.lowestValid > uint32(ip)+p.baseIdx ||
 		iend > p.bLen || prefixLowest < 0 || depth < 0 || depth > 2 ||
-		cap(ss.literals)-nLits < iend-anchor || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
+		cap(ss.literals)-nLits < iend-anchor+16 || cap(ss.sequences)-nSeqs < (iend-anchor)/4 {
 		return ip, anchor, offset1, offset2, false
 	}
 	seqs := ss.sequences[nSeqs:cap(ss.sequences)]
