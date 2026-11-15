@@ -16,7 +16,7 @@ func init() {
 func hcChainAsm(a *hcChainArgs) int
 
 // useMidAsm selects the assembly main loop of LZ4MID (level 2) for blocks
-// without external or attached dictionary.
+// without attached dictionary.
 var useMidAsm bool
 
 func init() {
@@ -24,11 +24,14 @@ func init() {
 }
 
 //go:noescape
-func midCompressAsm(win []byte, ip, iend, prefixIdx int, t *uint32, dst []byte, olimit int) (nip, anchor, op, status int)
+func midCompressAsm(win []byte, ip, iend, prefixIdx int, t *uint32, dst []byte, olimit int, dict *byte, lowLimit int, d *midDictCtx) (nip, anchor, op, status, ml, md int)
+
+//go:noescape
+func midCompressDictAsm(win []byte, ip, iend, prefixIdx int, t *uint32, dst []byte, olimit int, dict *byte, lowLimit int, d *midDictCtx) (nip, anchor, op, status, ml, md int)
 
 // useHCParseAsm selects the assembly parsers of the hash chain levels (3
-// to 9) and the optimal levels (10 to 12) for a prefix without external or
-// attached dictionary.
+// to 9) and the optimal levels (10 to 12) for a prefix with or without an
+// external dictionary (no attached one).
 var useHCParseAsm bool
 
 func init() {
@@ -40,3 +43,6 @@ func hcHashChainAsm(a *hcParseArgs) int
 
 //go:noescape
 func hcOptimalAsm(a *hcParseArgs) int
+
+//go:noescape
+func hcOptimalFavAsm(a *hcParseArgs) int

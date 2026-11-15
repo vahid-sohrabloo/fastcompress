@@ -115,21 +115,30 @@ func (c *hcCtx) compressOptimal(win []byte, srcStart int, srcSizePtr *int, dst [
 	sufficientLen := min(targetLength, optNum-1)
 
 	*srcSizePtr = 0
-	if !favorDecSpeed && c.parseAsmOK(win, srcStart, inputSize, dst, dstCapacity, limit, usingDictCtx) {
-		a := c.newParseArgs(win, srcStart, dst, dstCapacity, limit)
+	if c.parseAsmOK(win, srcStart, inputSize, dst, dstCapacity, limit, usingDictCtx) {
+		a := c.newParseArgs(win, srcStart, dst, oend, limit, usingDictCtx)
 		a.attempts = nbSearches
+		a.nbSeq = nbSearchesSeq
+		a.pa |= b2i(favorDecSpeed) * paFavor
 		a.suff = sufficientLen
 		a.opt = uintptr(unsafe.Pointer(&opt[0]))
+		parse := hcOptimalAsm
+		if favorDecSpeed {
+			parse = hcOptimalFavAsm
+		}
 		st := 2
 		for st == 2 {
 			a.stop = a.ip + hcAsmChunk
-			st = hcOptimalAsm(&a)
+			st = parse(&a)
 		}
 		c.nextToUpdate = uint32(a.next)
-		if st != 0 {
+		if st != 0 && (st != 1 || limit != fillOutput) {
 			return 0
 		}
 		e.ip, e.anchor, e.op = a.ip, a.anchor, a.op
+		if st == 1 {
+			e.encodeLastSequenceFillOutput(a.mlen, a.moff, oend)
+		}
 	} else if inputSize >= minLength {
 		mflimit := iend - mfLimit
 		matchlimit := iend - lastLiterals

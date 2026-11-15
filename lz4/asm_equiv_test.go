@@ -174,6 +174,7 @@ func FuzzHCChainAsmEquiv(f *testing.F) {
 		f.Add(uint8(lv), pa)
 	}
 	dict := testInput(f, "text-65547")[:20000]
+	cdict := NewCDict(dict)
 	f.Fuzz(func(t *testing.T, sel uint8, src []byte) {
 		if len(src) > 1<<18 {
 			return
@@ -201,12 +202,72 @@ func FuzzHCChainAsmEquiv(f *testing.F) {
 			fs := NewStreamHC(level)
 			fs.FavorDecompressionSpeed(true)
 			out = append(out, append([]byte(nil), dst[:fs.Compress(dst, src, level)]...))
-			s := NewStreamHC(level)
-			s.LoadDict(dict)
 			half := len(src) / 2
-			for _, p := range [][]byte{append([]byte(nil), src[:half]...), append([]byte(nil), src[half:]...)} {
+			for _, favor := range []bool{false, true} {
+				s := NewStreamHC(level)
+				s.FavorDecompressionSpeed(favor)
+				s.LoadDict(dict)
+				for _, p := range [][]byte{append([]byte(nil), src[:half]...), append([]byte(nil), src[half:]...)} {
+					d := make([]byte, CompressBound(len(p)))
+					out = append(out, d[:s.CompressContinue(d, p)])
+					d = make([]byte, max(len(p)/3, 1))
+					out = append(out, d[:s.CompressContinue(d, p)]) // limitedOutput, possibly failing
+				}
+			}
+			// a repeated pattern across the dictionary's end and the input's
+			// start (the pattern analysis on both sides of the boundary)
+			for k, r := range []string{"a", "ab", "abc", "abcd"} {
+				run := bytes.Repeat([]byte(r), 300+int(sel)%7)
+				d2 := append(append([]byte(nil), dict[:5000+k*1000]...), run[:len(run)-k]...)
+				p := append(append([]byte(nil), run[k:]...), src...)
+				s := NewStreamHC(level)
+				s.FavorDecompressionSpeed(k == 3)
+				s.LoadDict(d2)
 				d := make([]byte, CompressBound(len(p)))
 				out = append(out, d[:s.CompressContinue(d, p)])
+			}
+			// an attached dictionary (dictCtx) in HC and LZ4MID format, on
+			// blocks below and above dictCopyMin
+			for _, dl := range []int{2, 9} {
+				ds := NewStreamHC(dl)
+				ds.LoadDict(dict)
+				for _, piece := range []int{900, 3000, len(src) + 1} {
+					for off := 0; off < len(src); off += piece {
+						p := src[off:min(off+piece, len(src))]
+						s := NewStreamHC(level)
+						s.AttachDictionary(ds)
+						d := make([]byte, CompressBound(len(p)))
+						out = append(out, d[:s.CompressContinue(d, p)])
+					}
+				}
+			}
+			// destSize (fillOutput), one-shot and after a dictionary
+			for _, capa := range []int{len(src) / 2, len(src) / 5, 40, 17} {
+				d := make([]byte, max(capa, 1))
+				n, consumed := CompressHCDestSize(d, src, level)
+				out = append(out, d[:n], []byte{byte(consumed), byte(consumed >> 8), byte(consumed >> 16)})
+				s := NewStreamHC(level)
+				s.LoadDict(dict)
+				n, consumed = s.CompressContinueDestSize(d, append([]byte(nil), src...))
+				out = append(out, d[:n], []byte{byte(consumed), byte(consumed >> 8), byte(consumed >> 16)})
+			}
+			// linked frame blocks (external dictionary after each block),
+			// with a CDict on independent blocks
+			for _, bs := range []BlockSizeID{Block64KB, Block256KB} {
+				pr := &Preferences{CompressionLevel: level, FavorDecSpeed: sel&1 != 0}
+				pr.BlockSizeID = bs
+				fr, err := AppendFrame(nil, src, pr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out = append(out, fr)
+				pr.BlockIndependent = true
+				d := make([]byte, CompressFrameBound(len(src), pr))
+				n, err := CompressFrameUsingCDict(d, src, cdict, pr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out = append(out, d[:n])
 			}
 			return out
 		}
@@ -217,6 +278,133 @@ func FuzzHCChainAsmEquiv(f *testing.F) {
 			if !bytes.Equal(on[i], off[i]) {
 				t.Fatalf("level %d block %d: assembly %d bytes, Go %d bytes", level, i, len(on[i]), len(off[i]))
 			}
+		}
+	})
+}
+
+// FuzzHCDictAsmEquiv compresses arbitrary input at the HC levels with the
+// assembly on and off in the dictionary modes, one per input: an external
+// dictionary (a separate allocation after LoadDict), an attached one in HC
+// or LZ4MID format (dictCtx, small blocks), favorDecSpeed, destSize and
+// tight capacities. The dictionary is the head of the input, so matches
+// and repeated patterns cross its end; blocks must be equal.
+func FuzzHCDictAsmEquiv(f *testing.F) {
+	text := testInput(f, "text-65547")
+	for i, in := range []string{"text-65547", "period3-200K", "period7-100K", "zeros-1M", "random-70K"} {
+		b := testInput(f, in)
+		f.Add(uint8(i*37), uint16(1000+i*3001), b[:min(len(b), 30000)])
+	}
+	runs := append(append([]byte(nil), text[:9000]...), bytes.Repeat([]byte("ab"), 700)...)
+	runs = append(append(runs, bytes.Repeat([]byte("q"), 500)...), text[9000:16000]...)
+	for k := 0; k < 8; k++ {
+		f.Add(uint8(k*29), uint16(8900+k*300), runs)
+	}
+	f.Fuzz(func(t *testing.T, sel uint8, cut uint16, data []byte) {
+		if len(data) > 1<<16 {
+			return
+		}
+		level := 2 + int(sel)%11
+		c := int(cut) % (len(data) + 1)
+		dict, src := data[:c], append([]byte(nil), data[c:]...)
+		mode := (sel >> 4) % 6
+		run := func() []byte {
+			var out []byte
+			s := NewStreamHC(level)
+			s.FavorDecompressionSpeed(sel&8 != 0)
+			capa := CompressBound(len(src))
+			switch mode {
+			case 1:
+				capa = len(src) / 2
+			case 2:
+				capa = 1 + len(src)/3
+			}
+			d := make([]byte, max(capa, 1))
+			switch mode {
+			case 0, 1, 2, 3:
+				s.LoadDict(dict)
+				if mode == 3 {
+					n, consumed := s.CompressContinueDestSize(d[:max(1, len(src)/4)], src)
+					return append(d[:n], byte(consumed), byte(consumed>>8))
+				}
+				out = d[:s.CompressContinue(d, src)]
+			case 4, 5:
+				ds := NewStreamHC(2 + 7*int(mode-4))
+				ds.LoadDict(dict)
+				for off := 0; off < len(src); off += 700 {
+					p := src[off:min(off+700, len(src))]
+					s.Reset(level)
+					s.FavorDecompressionSpeed(sel&8 != 0)
+					s.AttachDictionary(ds)
+					d := make([]byte, CompressBound(len(p)))
+					out = append(out, d[:s.CompressContinue(d, p)]...)
+				}
+			}
+			return out
+		}
+		var on, off []byte
+		withAsm(t, true, func() { on = run() })
+		withAsm(t, false, func() { off = run() })
+		if !bytes.Equal(on, off) {
+			t.Fatalf("level %d mode %d: assembly %d bytes, Go %d bytes", level, mode, len(on), len(off))
+		}
+	})
+}
+
+// FuzzFastDictAsmEquiv compresses arbitrary input with the fast compressor
+// with the assembly on and off after a dictionary (the head of the input):
+// loaded (external dictionary) or slow-loaded and attached (dictCtx, on
+// pieces below and above 4 KB), at several accelerations and capacities,
+// and the whole input with destSize.
+func FuzzFastDictAsmEquiv(f *testing.F) {
+	for i, in := range []string{"text-65547", "period3-200K", "period7-100K", "zeros-1M", "random-70K", "text128KiB"} {
+		b := testInput(f, in)
+		f.Add(uint8(i*37), uint16(1000+i*3001), b[:min(len(b), 40000)])
+	}
+	f.Fuzz(func(t *testing.T, sel uint8, cut uint16, data []byte) {
+		if len(data) > 1<<17 {
+			return
+		}
+		c := int(cut) % (len(data) + 1)
+		dict, src := data[:c], data[c:]
+		accel := 1 + int(sel%4)*3
+		piece := []int{300, 4096, 5000, 1 << 20}[(sel>>2)%4]
+		run := func() []byte {
+			var out []byte
+			var ds Stream
+			if sel&0x40 != 0 {
+				ds.LoadDictSlow(dict)
+			} else {
+				ds.LoadDict(dict)
+			}
+			for off := 0; off < len(src); off += piece {
+				p := append([]byte(nil), src[off:min(off+piece, len(src))]...)
+				var s Stream
+				if sel&0x80 != 0 {
+					s.ResetFast()
+					s.AttachDictionary(&ds)
+				} else {
+					s.LoadDict(dict)
+				}
+				capa := CompressBound(len(p))
+				if sel&0x20 != 0 {
+					capa = len(p) / 2
+				}
+				d := make([]byte, max(capa, 1))
+				out = append(out, d[:s.CompressFastContinue(d, p, accel)]...)
+			}
+			// destSize (fillOutput, byU16 below 64 KB and byU32 beyond)
+			for _, capa := range []int{len(data) / 2, len(data) / 7, 33, 1} {
+				d := make([]byte, max(capa, 1))
+				n, consumed := CompressDestSize(d, data)
+				out = append(append(out, d[:n]...), byte(consumed), byte(consumed>>8), byte(consumed>>16))
+			}
+			return out
+		}
+		var on, off []byte
+		withAsm(t, true, func() { on = run() })
+		withAsm(t, false, func() { off = run() })
+		if !bytes.Equal(on, off) {
+			t.Fatalf("sel %#x: assembly %d bytes, Go %d bytes", sel, len(on), len(off))
 		}
 	})
 }

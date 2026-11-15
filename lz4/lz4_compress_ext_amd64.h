@@ -2,16 +2,41 @@
 // byU32 table (lz4 v1.11.1 lib/lz4.c, Copyright (c) Yann Collet, BSD
 // 2-Clause): lz4_compress_amd64.h's loop with candidates in an external
 // dictionary, matches running from it into the input, and the suspension at
-// seqLimit for LZ4_compress_resumeWithPrefix. Included once by
-// lz4_compress_amd64.s.
+// seqLimit for LZ4_compress_resumeWithPrefix. Included by
+// lz4_compress_amd64.s for usingExtDict, and with LZ4_DICTCTX for
+// usingDictCtx: a table entry below startIndex is replaced by the attached
+// dictionary's (96(SP)) plus dictDelta (104(SP)), which indexes the
+// dictionary as an external one (dictBase = dictEnd - startIndex). The
+// results are at R_ANCHOR, R_OP and R_STATUS.
 //
 // Frame locals (hardware SP): 0 matchlimit, 8 olimit, 16 dstEnd,
 // 24 acceleration<<6, 32 source, 40 dictBase (dictEnd - startIndex),
 // 48 dictionary, 56 dictEnd, 64 seqLimit, 72 offset, 80 match in the
-// dictionary, 88 startIndex.
+// dictionary, 88 startIndex (LZ4_DICTCTX: 96 the attached table, 104
+// dictDelta).
 //
 // Registers: as lz4_compress_amd64.h (R9 base = src - startIndex for
 // candidates >= startIndex, 40(SP) for those below).
+
+#ifdef LZ4_DICTCTX
+// CTX_LOAD(h, dst): an entry below startIndex is the attached
+// dictionary's, plus dictDelta (R12 scratch)
+#define CTX_LOAD(h, dst, skip) \
+	CMPL dst, 88(SP); \
+	JHS  skip; \
+	MOVQ 96(SP), R12; \
+	MOVL (R12)(h*4), dst; \
+	ADDL 104(SP), dst; \
+skip:
+#define R_ANCHOR anchor+136(FP)
+#define R_OP     op+144(FP)
+#define R_STATUS status+152(FP)
+#else
+#define CTX_LOAD(h, dst, skip)
+#define R_ANCHOR anchor+120(FP)
+#define R_OP     op+128(FP)
+#define R_STATUS status+136(FP)
+#endif
 
 	MOVQ src_base+0(FP), AX
 	MOVQ AX, 32(SP)
@@ -45,6 +70,12 @@
 	MOVQ accel+64(FP), BX
 	SHLQ $6, BX
 	MOVQ BX, 24(SP)
+#ifdef LZ4_DICTCTX
+	MOVQ dctx+120(FP), BX
+	MOVQ BX, 96(SP)
+	MOVQ dictDelta+128(FP), BX
+	MOVQ BX, 104(SP)
+#endif
 	MOVQ AX, R8                  // anchor = source
 	LEAQ 1(AX), SI               // ip: the first byte is in the table (Go)
 	HASH(SI, DX)                 // forwardH
@@ -56,6 +87,7 @@ search:
 
 searchLoop:
 	TABLE_LOAD(DX, AX)           // matchIndex = table[h]
+	CTX_LOAD(DX, AX, ctx1)
 	MOVQ R14, SI                 // ip = forwardIp
 	MOVQ R14, R15
 	SUBQ R9, R15                 // current
@@ -72,29 +104,27 @@ searchLoop:
 	LEAL 65535(AX), R12
 	CMPL R12, R15
 	JLO  searchLoop              // matchIndex + LZ4_DISTANCE_MAX < current: too far
-	MOVL R15, R12
-	SUBL AX, R12
-	MOVQ R12, 72(SP)             // offset = current - matchIndex
 	MOVQ R9, R12
-	MOVQ $0, 80(SP)
 	CMPL AX, 88(SP)
-	JHS  searchRead
-	MOVQ 40(SP), R12             // matchIndex < startIndex: within the dictionary
-	MOVQ $1, 80(SP)
-
-searchRead:
+	CMOVQCS 40(SP), R12          // matchIndex < startIndex: within the dictionary (no branch, as C)
 	MOVL (R12)(AX*1), R15
 	CMPL R15, (SI)
 	JNE  searchLoop
+	XORL R15, R15
+	MOVL $1, CX
+	CMPL AX, 88(SP)
+	CMOVLCS CX, R15
+	MOVQ R15, 80(SP)             // the match is in the dictionary
+	MOVQ SI, R15
+	SUBQ R9, R15
+	SUBL AX, R15
+	MOVQ R15, 72(SP)             // offset = current - matchIndex
 	LEAQ (R12)(AX*1), R15        // match
 
 	// Catch up: lowLimit is the dictionary for a match in it, else source
 	MOVQ 32(SP), R12
 	CMPQ 80(SP), $0
-	JEQ  catchStart
-	MOVQ 48(SP), R12
-
-catchStart:
+	CMOVQNE 48(SP), R12
 	CMPQ R15, R12
 	JLS  encLits
 	MOVBLZX -1(SI), AX
@@ -328,6 +358,7 @@ fillTable:
 	LEAQ -1(SI), AX
 	HASH(AX, CX)                 // hPrev
 	TABLE_LOAD(CX, BX)           // prevIndex
+	CTX_LOAD(CX, BX, ctx2)
 	LEAL -1(R15), AX
 	TABLE_STORE(AX, CX)          // table[hPrev] = current - 1
 	INCL BX                      // ctxIndex
@@ -353,6 +384,7 @@ ctxRead:
 
 useHash:
 	TABLE_LOAD(DX, AX)           // matchIndex = table[h]
+	CTX_LOAD(DX, AX, ctx3)
 
 haveIndex:
 	TABLE_STORE(R15, DX)         // table[h] = current
@@ -361,21 +393,19 @@ haveIndex:
 	LEAL 65535(AX), CX
 	CMPL CX, R15
 	JLO  nextPos                 // too far
-	MOVL R15, CX
-	SUBL AX, CX
-	MOVQ CX, 72(SP)              // offset = current - matchIndex
 	MOVQ R9, R12
-	MOVQ $0, 80(SP)
+	XORL BX, BX
+	MOVL $1, CX
 	CMPL AX, 88(SP)
-	JHS  resumeRead
-	MOVQ 40(SP), R12
-	MOVQ $1, 80(SP)
-
-resumeRead:
-	LEAQ (R12)(AX*1), R15        // match
-	MOVL (R15), CX
+	CMOVQCS 40(SP), R12
+	CMOVLCS CX, BX
+	MOVL (R12)(AX*1), CX
 	CMPL CX, (SI)
 	JNE  nextPos
+	MOVQ BX, 80(SP)
+	SUBL AX, R15
+	MOVQ R15, 72(SP)             // offset = current - matchIndex
+	LEAQ (R12)(AX*1), R15        // match
 	MOVQ DI, R14                 // token = op++; *token = 0
 	MOVB $0, (DI)
 	INCQ DI
@@ -389,27 +419,32 @@ nextPos:
 lastLits:
 	MOVQ src_base+0(FP), AX
 	SUBQ AX, R8
-	MOVQ R8, anchor+120(FP)
+	MOVQ R8, R_ANCHOR
 	MOVQ dst_base+24(FP), AX
 	SUBQ AX, DI
-	MOVQ DI, op+128(FP)
-	MOVQ $0, status+136(FP)
+	MOVQ DI, R_OP
+	MOVQ $0, R_STATUS
 	RET
 
 suspend:
 	MOVQ src_base+0(FP), AX
 	SUBQ AX, R8
-	MOVQ R8, anchor+120(FP)
+	MOVQ R8, R_ANCHOR
 	MOVQ dst_base+24(FP), AX
 	SUBQ AX, DI
-	MOVQ DI, op+128(FP)
-	MOVQ $3, status+136(FP)
+	MOVQ DI, R_OP
+	MOVQ $3, R_STATUS
 	RET
 
 fail:
-	MOVQ $1, status+136(FP)
+	MOVQ $1, R_STATUS
 	RET
 
 fail2:
-	MOVQ $2, status+136(FP)
+	MOVQ $2, R_STATUS
 	RET
+
+#undef CTX_LOAD
+#undef R_ANCHOR
+#undef R_OP
+#undef R_STATUS

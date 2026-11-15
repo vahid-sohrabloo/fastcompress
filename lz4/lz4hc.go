@@ -129,33 +129,67 @@ type hcParseArgs struct {
 	stop      int // return (2) at the top of the main loop once ip > stop
 	suff      int // optimal parser: sufficientLen
 	opt       uintptr
+	dict      uintptr // dictStart (pa&paExt)
+	lowLimit  uint64
+	mlen      int // out (status 1): the match of the sequence that did not fit
+	moff      int
+	nbSeq     int     // optimal parser with favorDecSpeed: nbSearchesSeq
+	dhash     uintptr // the attached dictionary (pa&paDictCtx): its tables,
+	dchain    uintptr
+	dbase     uintptr // prefixStart - dictLimit,
+	dend      uint64  // end index
+	dstart    uintptr // and prefixStart
 }
+
+// hcParseArgs.pa bits
+const (
+	paPattern = 1 // the pattern analysis (hash chain parser)
+	paExt     = 2 // an external dictionary
+	paFavor   = 4 // favorDecSpeed (optimal parser)
+	paDictCtx = 8 // an attached dictionary
+)
 
 // hcAsmChunk is the input the assembly parsers cover per call, so a block
 // does not hold off the scheduler for its whole length.
 const hcAsmChunk = 256 * kb
 
 // parseAsmOK reports whether the assembly parsers can compress
-// win[srcStart:] (the end of win) into dst: a prefix without external or
-// attached dictionary, notLimited or limitedOutput, dst holding the bound
+// win[srcStart:] (the end of win) into dst: a prefix with or without an
+// external dictionary (no attached one), dst holding the bound
 // (notLimited) or maxOutputSize.
 func (c *hcCtx) parseAsmOK(win []byte, srcStart, inputSize int, dst []byte, maxOutputSize int, limit outputDirective, usingDictCtx bool) bool {
-	return useHCParseAsm && !usingDictCtx && inputSize >= minLength && c.lowLimit == c.dictLimit && limit != fillOutput &&
+	return useHCParseAsm && (!usingDictCtx || c.lowLimit == c.dictLimit && len(c.dictCtx.prefix) > 0) && inputSize >= minLength && c.lowLimit <= c.dictLimit &&
+		len(c.dict) >= int(c.dictLimit-c.lowLimit) &&
 		srcStart+inputSize == len(win) && c.nextToUpdate >= c.dictLimit && len(dst) >= maxOutputSize && maxOutputSize >= 1 &&
-		(limit != notLimited || len(dst) >= CompressBound(inputSize))
+		(limit != notLimited || len(dst) >= CompressBound(inputSize)) && (limit != fillOutput || maxOutputSize > lastLiterals)
 }
 
 // newParseArgs fills the arguments of an assembly parser from the
-// context; the caller sets the parser's own fields.
-func (c *hcCtx) newParseArgs(win []byte, srcStart int, dst []byte, maxOutputSize int, limit outputDirective) hcParseArgs {
-	olimit := maxOutputSize
+// context; the caller sets the parser's own fields (and ORs its bits into
+// pa). oend is the encoder's limit (maxOutputSize, less LASTLITERALS for
+// fillOutput).
+func (c *hcCtx) newParseArgs(win []byte, srcStart int, dst []byte, oend int, limit outputDirective, usingDictCtx bool) hcParseArgs {
+	olimit := oend
 	if limit == notLimited {
 		olimit = -1
 	}
-	return hcParseArgs{win: uintptr(unsafe.Pointer(&win[0])), hashTable: uintptr(unsafe.Pointer(&c.hashTable[0])),
+	a := hcParseArgs{win: uintptr(unsafe.Pointer(&win[0])), hashTable: uintptr(unsafe.Pointer(&c.hashTable[0])),
 		chain: uintptr(unsafe.Pointer(&c.chainTable[0])), prefixIdx: uint64(c.dictLimit),
 		ip: srcStart, anchor: srcStart, iend: len(win), dst: uintptr(unsafe.Pointer(&dst[0])), dstLen: len(dst),
-		olimit: olimit, next: uint64(c.nextToUpdate)}
+		olimit: olimit, next: uint64(c.nextToUpdate), lowLimit: uint64(c.lowLimit)}
+	if c.lowLimit < c.dictLimit {
+		a.pa = paExt
+		a.dict = uintptr(unsafe.Pointer(&c.dict[0]))
+	}
+	if usingDictCtx {
+		d := c.dictCtx
+		a.pa = paDictCtx
+		a.dhash, a.dchain = uintptr(unsafe.Pointer(&d.hashTable[0])), uintptr(unsafe.Pointer(&d.chainTable[0]))
+		a.dstart = uintptr(unsafe.Pointer(&d.prefix[0]))
+		a.dbase = a.dstart - uintptr(d.dictLimit)
+		a.dend = uint64(len(d.prefix)) + uint64(d.dictLimit)
+	}
+	return a
 }
 
 type hcMatch struct {
@@ -475,6 +509,16 @@ func midCountMatch(win []byte, ip int, ipIndex, pos uint32, matchlimit int, pref
 	return 0
 }
 
+// midDictCtx is an attached dictionary for midCompressAsm (offsets in
+// lz4mid_amd64.s): its tables, prefixStart - dictLimit, end index and
+// format (1: LZ4MID). The pointers are uintptrs to memory the context
+// keeps reachable.
+type midDictCtx struct {
+	hash, chain, base uintptr
+	end               uint64
+	mid               int
+}
+
 // C: LZ4MID_compress. src is win[srcStart:srcStart+*srcSizePtr].
 func (c *hcCtx) midCompress(win []byte, srcStart int, srcSizePtr *int, dst []byte, maxOutputSize int,
 	limit outputDirective, usingDictCtx bool) int {
@@ -502,17 +546,37 @@ func (c *hcCtx) midCompress(win []byte, srcStart int, srcSizePtr *int, dst []byt
 	}
 	refEnd := e.ip
 
-	if *srcSizePtr >= minLength && useMidAsm && searchIntoDict == nil && dictIdx == prefixIdx && limit != fillOutput &&
-		iend == len(win) && len(dst) >= maxOutputSize && (limit != notLimited || len(dst) >= CompressBound(*srcSizePtr)) {
-		olimit := maxOutputSize
+	var dctx *midDictCtx
+	if searchIntoDict != nil && len(c.dictCtx.prefix) > 0 {
+		d := c.dictCtx
+		dctx = &midDictCtx{hash: uintptr(unsafe.Pointer(&d.hashTable[0])), chain: uintptr(unsafe.Pointer(&d.chainTable[0])),
+			base: uintptr(unsafe.Pointer(&d.prefix[0])) - uintptr(d.dictLimit), end: uint64(len(d.prefix)) + uint64(d.dictLimit),
+			mid: b2i(hcGetCLevelParams(int(d.compressionLevel)).strat == lz4mid)}
+	}
+	if *srcSizePtr >= minLength && useMidAsm && (searchIntoDict == nil || dctx != nil) && dictIdx <= prefixIdx && len(dict) >= int(prefixIdx-dictIdx) &&
+		iend == len(win) && len(dst) >= maxOutputSize && maxOutputSize >= 1 && (limit != fillOutput || oend > 0) &&
+		(limit != notLimited || len(dst) >= CompressBound(*srcSizePtr)) {
+		olimit := oend
 		if limit == notLimited {
 			olimit = -1
 		}
-		nip, anchor, op, st := midCompressAsm(win, e.ip, iend, int(prefixIdx), &c.hashTable[0], dst, olimit)
-		if st != 0 {
+		var dp *byte
+		if dictIdx < prefixIdx {
+			dp = &dict[0]
+		}
+		mid := midCompressAsm
+		if dp != nil || dctx != nil {
+			mid = midCompressDictAsm
+		}
+		nip, anchor, op, st, ml, md := mid(win, e.ip, iend, int(prefixIdx), &c.hashTable[0], dst, olimit, dp, int(dictIdx), dctx)
+		if st != 0 && (st != 1 || limit != fillOutput) {
 			return 0
 		}
 		e.ip, e.anchor, e.op = nip, anchor, op
+		if st == 1 {
+			refEnd = e.ip + ml
+			e.encodeLastSequenceFillOutput(ml, md, oend)
+		}
 	} else if *srcSizePtr >= minLength {
 		mflimit := iend - mfLimit
 		matchlimit := iend - lastLiterals
@@ -967,19 +1031,22 @@ func (c *hcCtx) compressHashChain(win []byte, srcStart int, srcSizePtr *int, dst
 		goto lastLiterals
 	}
 	if c.parseAsmOK(win, srcStart, inputSize, dst, maxOutputSize, limit, usingDictCtx) {
-		a := c.newParseArgs(win, srcStart, dst, maxOutputSize, limit)
+		a := c.newParseArgs(win, srcStart, dst, oend, limit, usingDictCtx)
 		a.attempts = maxNbAttempts
-		a.pa = b2i(patternAnalysis)
+		a.pa |= b2i(patternAnalysis) * paPattern
 		st := 2
 		for st == 2 {
 			a.stop = a.ip + hcAsmChunk
 			st = hcHashChainAsm(&a)
 		}
 		c.nextToUpdate = uint32(a.next)
-		if st != 0 {
+		if st != 0 && (st != 1 || limit != fillOutput) {
 			return 0
 		}
 		e.ip, e.anchor, e.op = a.ip, a.anchor, a.op
+		if st == 1 {
+			e.encodeLastSequenceFillOutput(a.mlen, a.moff, oend)
+		}
 		goto lastLiterals
 	}
 	{

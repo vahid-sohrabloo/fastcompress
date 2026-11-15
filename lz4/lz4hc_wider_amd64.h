@@ -3,8 +3,13 @@
 // (LZ4HC_sparsestChain; only with WIDER_PA, as the optimal parser uses
 // both). With WIDER_SWAP lookBack is 0 (iLowLimit == ip, as C asserts), so
 // there is no count back, and R10 holds the 2 bytes at ip + longest - 1
-// (reloaded when longest changes). Frame slots are the caller's, 8 bytes up
-// (one CALL deeper).
+// (reloaded when longest changes). WIDER_EXT adds the external dictionary
+// (lowLimit < prefixIdx: W_LOWLIM, W_DICTB = dictStart - lowLimit), and
+// WIDER_FAV favorDecSpeed (offsets below 8 skipped; with WIDER_SWAP),
+// WIDER_DCTX the attached dictionary searched after the chain (dictCtx;
+// not with WIDER_EXT: W_DHASH, W_DCHAIN, W_DBASE = its prefixStart -
+// dictLimit, W_DEND its end index, W_DSTART its prefixStart).
+// Frame slots are the caller's, 8 bytes up (one CALL deeper).
 
 	MOVQ R9, DI
 	SUBQ SI, DI
@@ -43,9 +48,14 @@ insDone:
 	SHRL $17, AX
 	MOVL (R15)(AX*4), R14        // matchIndex = hashTable[LZ4HC_hashPtr(ip)]
 
-	// lowestMatchIndex: lowLimit (= prefixIdx) within the first 64 KB
-	MOVQ R12, R13
+	// lowestMatchIndex: lowLimit within the first 64 KB
+#ifdef WIDER_EXT
+	MOVQ (8+W_LOWLIM)(SP), R13
+	LEAQ 65536(R13), AX
+#else
+	MOVQ R12, R13                // lowLimit = prefixIdx
 	LEAQ 65536(R12), AX
+#endif
 	CMPQ AX, DI
 	JHI  lowSet
 	LEAQ -65535(DI), R13
@@ -81,6 +91,16 @@ wmLoop:
 	JLO  wmDone                  // matchIndex < lowestMatchIndex
 	DECQ R15
 	JLT  wmDone                  // nbAttempts was 0
+#ifdef WIDER_FAV
+	MOVL DI, AX
+	SUBL R14, AX
+	CMPL AX, $8
+	JLO  wmNoMatch               // favorDecSpeed skips offsets below 8
+#endif
+#ifdef WIDER_EXT
+	CMPL R14, R12
+	JLO  wmDict                  // in the external dictionary
+#endif
 
 	MOVL R14, AX
 	SUBL R12, AX
@@ -298,9 +318,290 @@ wmStepSub:
 #endif
 
 wmDone:
+#ifdef WIDER_DCTX
+	// the attached dictionary, if attempts remain, longest < maxLength and
+	// ip is within 64 KB of lowLimit (= prefixIdx)
+	TESTQ R15, R15
+	JLE  wdRet
+	CMPQ BX, (8+W_MAXLEN)(SP)
+	JGE  wdRet
+	LEAQ 65536(R12), AX
+	CMPQ AX, DI
+	JLS  wdRet
+	MOVL (8+W_PAT)(SP), AX
+	IMUL3L $-1640531535, AX, AX
+	SHRL $17, AX
+	MOVQ (8+W_DHASH)(SP), CX
+	MOVL (CX)(AX*4), R14         // dictMatchIndex
+
+wdLoop:
+	MOVL R14, AX
+	ADDL (8+W_LOWEST)(SP), AX
+	SUBL (8+W_DEND)(SP), AX      // matchIndex
+	MOVL DI, CX
+	SUBL AX, CX                  // ipIndex - matchIndex
+	CMPL CX, $65535
+	JHI  wdRet
+	CMPQ BX, (8+W_MAXLEN)(SP)
+	JGE  wdRet
+	DECQ R15
+	JLT  wdRet
+	MOVQ CX, (8+W_CAND)(SP)
+	MOVL R14, AX
+	ADDQ (8+W_DBASE)(SP), AX     // matchPtr
+	MOVL (AX), CX
+	CMPL CX, (8+W_PAT)(SP)
+	JNE  wdNext
+	MOVL (8+W_DEND)(SP), CX
+	SUBL R14, CX
+	ADDQ R9, CX                  // vLimit = ip + dictEndOffset - dictMatchIndex
+	CMPQ CX, R11
+	CMOVQHI R11, CX
+	MOVQ CX, (8+W_VLIM)(SP)
+	XORL DX, DX
+#ifndef WIDER_SWAP
+	CMPQ R9, R10
+	JEQ  ybDone
+	MOVQ R10, CX
+	SUBQ R9, CX                  // iMin - ip
+	MOVQ (8+W_DSTART)(SP), R13
+	SUBQ AX, R13                 // the dictionary's prefixStart - match
+	CMPQ R13, CX
+	CMOVQGT R13, CX
+
+yb4:
+	MOVQ DX, R13
+	SUBQ CX, R13
+	CMPQ R13, $3
+	JLE  ybTail
+	MOVL -4(R9)(DX*1), R13
+	XORL -4(AX)(DX*1), R13
+	JNE  ybDiff
+	SUBQ $4, DX
+	JMP  yb4
+
+ybDiff:
+	BSRL R13, R13
+	XORL $31, R13
+	SHRL $3, R13
+	SUBQ R13, DX
+	JMP  ybDone
+
+ybTail:
+	CMPQ DX, CX
+	JLE  ybDone
+	MOVB -1(R9)(DX*1), R13
+	CMPB R13, -1(AX)(DX*1)
+	JNE  ybDone
+	DECQ DX
+	JMP  ybTail
+
+ybDone:
+#endif
+	MOVQ DX, (8+W_BACK)(SP)
+	LEAQ 4(R9), CX
+	LEAQ 4(AX), DX
+	MOVQ (8+W_VLIM)(SP), R13
+	SUBQ $7, R13
+
+yc8:
+	CMPQ CX, R13
+	JHS  ycTail
+	MOVQ (CX), AX
+	XORQ (DX), AX
+	JNE  ycDiff
+	ADDQ $8, CX
+	ADDQ $8, DX
+	JMP  yc8
+
+ycDiff:
+	BSFQ AX, AX
+	SHRQ $3, AX
+	ADDQ AX, CX
+	JMP  ycDone
+
+ycTail:
+	ADDQ $7, R13
+	LEAQ -3(R13), AX
+	CMPQ CX, AX
+	JHS  yc2
+	MOVL (CX), AX
+	CMPL AX, (DX)
+	JNE  yc2
+	ADDQ $4, CX
+	ADDQ $4, DX
+
+yc2:
+	LEAQ -1(R13), AX
+	CMPQ CX, AX
+	JHS  yc1
+	MOVWLZX (CX), AX
+	CMPW AX, (DX)
+	JNE  yc1
+	ADDQ $2, CX
+	ADDQ $2, DX
+
+yc1:
+	CMPQ CX, R13
+	JHS  ycDone
+	MOVB (CX), AX
+	CMPB AL, (DX)
+	JNE  ycDone
+	INCQ CX
+
+ycDone:
+	SUBQ R9, CX                  // MINMATCH + count
+	SUBQ (8+W_BACK)(SP), CX      // mlt
+	CMPQ CX, BX
+	JLE  wdNext
+	MOVQ CX, BX
+	MOVQ (8+W_CAND)(SP), CX
+	MOVQ CX, (8+W_OFF)(SP)
+	MOVQ (8+W_BACK)(SP), CX
+	MOVQ CX, (8+W_SBACK)(SP)
+
+wdNext:
+	MOVQ (8+W_DCHAIN)(SP), CX
+	MOVWLZX R14, AX
+	MOVWLZX (CX)(AX*2), AX
+	SUBL AX, R14                 // dictMatchIndex -= DELTANEXTU16
+	JMP  wdLoop
+
+wdRet:
+#endif
 	MOVQ (8+W_OFF)(SP), AX
 	MOVQ (8+W_SBACK)(SP), DX
 	RET
+
+#ifdef WIDER_EXT
+	// a candidate in the external dictionary (lowestMatchIndex <=
+	// matchIndex < prefixIdx): matchIndex <= prefixIdx - 4 and the 4-byte
+	// pattern, the count back down to dictStart, the count up to the end of
+	// the dictionary (vLimit) and on from prefixStart if it gets there
+wmDict:
+	LEAL 4(R14), AX
+	CMPL AX, R12
+	JHI  wmNoMatch               // matchIndex > prefixIdx - 4
+	MOVQ (8+W_DICTB)(SP), AX
+	ADDQ R14, AX                 // mp = dictStart + matchIndex - lowLimit
+	MOVL (AX), CX
+	CMPL CX, (8+W_PAT)(SP)
+	JNE  wmNoMatch
+	MOVL R12, CX
+	SUBL R14, CX
+	ADDQ R9, CX                  // vLimit = ip + prefixIdx - matchIndex
+	CMPQ CX, R11
+	CMOVQHI R11, CX              // at most iHighLimit
+	MOVQ CX, (8+W_VLIM)(SP)
+	XORL DX, DX
+#ifndef WIDER_SWAP
+	// back = LZ4HC_countBack(ip, mp, iLowLimit, dictStart), if lookBack
+	CMPQ R9, R10
+	JEQ  xbDone
+	MOVQ R10, CX
+	SUBQ R9, CX                  // iMin - ip
+	MOVQ (8+W_DICTB)(SP), R13
+	ADDQ (8+W_LOWLIM)(SP), R13
+	SUBQ AX, R13                 // dictStart - match
+	CMPQ R13, CX
+	CMOVQGT R13, CX              // min = max(...)
+
+xb4:
+	MOVQ DX, R13
+	SUBQ CX, R13
+	CMPQ R13, $3
+	JLE  xbTail
+	MOVL -4(R9)(DX*1), R13
+	XORL -4(AX)(DX*1), R13
+	JNE  xbDiff
+	SUBQ $4, DX
+	JMP  xb4
+
+xbDiff:
+	BSRL R13, R13
+	XORL $31, R13
+	SHRL $3, R13
+	SUBQ R13, DX
+	JMP  xbDone
+
+xbTail:
+	CMPQ DX, CX
+	JLE  xbDone
+	MOVB -1(R9)(DX*1), R13
+	CMPB R13, -1(AX)(DX*1)
+	JNE  xbDone
+	DECQ DX
+	JMP  xbTail
+
+xbDone:
+#endif
+	MOVQ DX, (8+W_BACK)(SP)
+
+	// MINMATCH + LZ4_count(ip+4, mp+4, vLimit)
+	LEAQ 4(R9), CX
+	LEAQ 4(AX), DX
+	MOVQ (8+W_VLIM)(SP), R13
+	SUBQ $7, R13
+
+xc8:
+	CMPQ CX, R13
+	JHS  xcTail
+	MOVQ (CX), AX
+	XORQ (DX), AX
+	JNE  xcDiff
+	ADDQ $8, CX
+	ADDQ $8, DX
+	JMP  xc8
+
+xcDiff:
+	BSFQ AX, AX
+	SHRQ $3, AX
+	ADDQ AX, CX
+	JMP  xcDone
+
+xcTail:
+	ADDQ $7, R13                 // vLimit
+	LEAQ -3(R13), AX
+	CMPQ CX, AX
+	JHS  xc2
+	MOVL (CX), AX
+	CMPL AX, (DX)
+	JNE  xc2
+	ADDQ $4, CX
+	ADDQ $4, DX
+
+xc2:
+	LEAQ -1(R13), AX
+	CMPQ CX, AX
+	JHS  xc1
+	MOVWLZX (CX), AX
+	CMPW AX, (DX)
+	JNE  xc1
+	ADDQ $2, CX
+	ADDQ $2, DX
+
+xc1:
+	CMPQ CX, R13
+	JHS  xcEnd
+	MOVB (CX), AX
+	CMPB AL, (DX)
+	JNE  xcDone
+	INCQ CX
+
+xcEnd:
+	// at vLimit below iHighLimit: + LZ4_count(ip + matchLength, prefixStart, iHighLimit)
+	CMPQ CX, R13
+	JNE  xcDone
+	CMPQ R13, R11
+	JHS  xcDone
+	MOVQ (8+W_LOWEST)(SP), R13
+	MOVQ SI, DX
+	JMP  count8
+
+xcDone:
+	MOVQ (8+W_LOWEST)(SP), R13
+	JMP  countDone
+#endif
 
 #ifdef WIDER_PA
 	// the pattern analysis: distNextMatch == 1, matchChainPos == 0
@@ -346,6 +647,10 @@ paRep:
 	JLO  paOut                   // !LZ4HC_protectDictEnd(prefixIdx, matchCandidateIdx)
 
 	// LZ4HC_patternSegment (prefix candidate)
+#ifdef WIDER_EXT
+	CMPL CX, R12
+	JLO  paDictCand
+#endif
 	MOVL CX, AX
 	SUBL R12, AX
 	ADDQ SI, AX                  // mp
@@ -383,6 +688,12 @@ paRevTail:
 paRevDone:
 	MOVQ (8+W_MP)(SP), AX
 	SUBQ CX, AX                  // back = reverseCountPattern(mp, prefixPtr)
+#ifdef WIDER_EXT
+	CMPQ CX, SI
+	JEQ  paIntoDict              // back to prefixStart: on into the dictionary
+
+paBackSet:
+#endif
 	MOVQ (8+W_CAND)(SP), CX
 	MOVQ (8+W_LOWEST)(SP), R13
 	MOVL CX, DX
@@ -464,4 +775,116 @@ paBreak:
 	MOVQ (8+W_LOWEST)(SP), R13
 	MOVQ (8+W_NB)(SP), R15
 	JMP  wmDone
+
+#ifdef WIDER_EXT
+	// a prefix candidate whose run reaches prefixStart: back +=
+	// reverseCountPattern(dictEnd, dictStart, rotatePattern(-back, pattern))
+paIntoDict:
+	MOVQ AX, (8+W_VLIM)(SP)      // back within the prefix
+	MOVL AX, CX
+	NEGL CX
+	ANDL $3, CX
+	SHLL $3, CX
+	MOVL (8+W_PAT)(SP), DX
+	ROLL CX, DX
+	MOVQ (8+W_DICTB)(SP), R13
+	MOVL R12, CX
+	ADDQ R13, CX                 // dictEnd
+	ADDQ (8+W_LOWLIM)(SP), R13   // dictStart
+	MOVQ CX, (8+W_MP)(SP)
+
+pxRev4:
+	LEAQ 4(R13), AX
+	CMPQ CX, AX
+	JLO  pxRevTail
+	CMPL -4(CX), DX
+	JNE  pxRevTail
+	SUBQ $4, CX
+	JMP  pxRev4
+
+pxRevTail:
+	CMPQ CX, R13
+	JLS  pxRevDone
+	MOVL DX, AX
+	SHRL $24, AX
+	CMPB AL, -1(CX)
+	JNE  pxRevDone
+	DECQ CX
+	SHLL $8, DX
+	JMP  pxRevTail
+
+pxRevDone:
+	MOVQ (8+W_MP)(SP), AX
+	SUBQ CX, AX
+	ADDQ (8+W_VLIM)(SP), AX
+	JMP  paBackSet
+
+	// LZ4HC_patternSegment, a candidate in the dictionary: forward up to
+	// dictEnd and on from prefixStart (rotated pattern) if it gets there,
+	// back down to dictStart
+paDictCand:
+	MOVQ (8+W_DICTB)(SP), AX
+	ADDQ CX, AX                  // mp
+	MOVL (AX), DX
+	CMPL DX, (8+W_PAT)(SP)
+	JNE  paOut
+	MOVQ AX, (8+W_MP)(SP)
+	MOVQ R11, (8+W_VLIM)(SP)
+	MOVL R12, R11
+	ADDQ (8+W_DICTB)(SP), R11    // dictEnd as the limit
+	LEAQ 4(AX), CX
+	MOVL (8+W_PAT)(SP), DX
+	CALL hcCountPatternR<>(SB)
+	CMPQ CX, R11
+	MOVQ (8+W_VLIM)(SP), R11     // iHighLimit again
+	JNE  pdFwd
+	MOVQ CX, AX
+	SUBQ (8+W_MP)(SP), AX
+	MOVQ AX, (8+W_FWD)(SP)       // forward up to dictEnd
+	MOVL AX, CX
+	ANDL $3, CX
+	SHLL $3, CX
+	MOVL (8+W_PAT)(SP), DX
+	ROLL CX, DX                  // LZ4HC_rotatePattern(forward, pattern)
+	MOVQ SI, CX
+	CALL hcCountPatternR<>(SB)
+	SUBQ SI, CX
+	ADDQ CX, (8+W_FWD)(SP)
+	JMP  pdBack
+
+pdFwd:
+	SUBQ (8+W_MP)(SP), CX
+	MOVQ CX, (8+W_FWD)(SP)
+
+pdBack:
+	MOVQ (8+W_MP)(SP), CX
+	MOVL (8+W_PAT)(SP), DX
+	MOVQ (8+W_DICTB)(SP), R13
+	ADDQ (8+W_LOWLIM)(SP), R13   // dictStart
+
+pdRev4:
+	LEAQ 4(R13), AX
+	CMPQ CX, AX
+	JLO  pdRevTail
+	CMPL -4(CX), DX
+	JNE  pdRevTail
+	SUBQ $4, CX
+	JMP  pdRev4
+
+pdRevTail:
+	CMPQ CX, R13
+	JLS  pdRevDone
+	MOVL DX, AX
+	SHRL $24, AX
+	CMPB AL, -1(CX)
+	JNE  pdRevDone
+	DECQ CX
+	SHLL $8, DX
+	JMP  pdRevTail
+
+pdRevDone:
+	MOVQ (8+W_MP)(SP), AX
+	SUBQ CX, AX
+	JMP  paBackSet
+#endif
 #endif

@@ -80,6 +80,19 @@ TEXT ·compressFast32Asm(SB), NOSPLIT, $48-160
 #define LZ4_NODICT
 TEXT ·compressFast32NoDictAsm(SB), NOSPLIT, $48-160
 #include "lz4_compress_amd64.h"
+
+// func compressFast32FillAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
+//
+// compressFast32NoDictAsm for fillOutput (olimit >= 1, the target size):
+// status 0 with anchor and op where C goes to _last_literals.
+//
+// BOUNDS: as compressFast32NoDictAsm's; a cut match clears the table at
+// the 8-byte hashes of positions from the new ip to filledIp <= mflimit,
+// within src.
+#define LZ4_FILL
+TEXT ·compressFast32FillAsm(SB), NOSPLIT, $56-160
+#include "lz4_compress_amd64.h"
+#undef LZ4_FILL
 #undef LZ4_NODICT
 
 // func compressFastExtAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx int, dict []byte, seqLimit int) (anchor, op, status int)
@@ -113,6 +126,24 @@ TEXT ·compressFast32NoDictAsm(SB), NOSPLIT, $48-160
 TEXT ·compressFastExtAsm(SB), NOSPLIT, $96-144
 #include "lz4_compress_ext_amd64.h"
 
+// func compressFastDictCtxAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx int, dict []byte, seqLimit int, dctx *uint32, dictDelta int) (anchor, op, status int)
+//
+// compressFastExtAsm for usingDictCtx (noDictIssue, no suspension:
+// seqLimit is len(src) - 11): dict is the attached dictionary's history
+// and dctx its byU32 table, whose index i is i + dictDelta here.
+//
+// Preconditions (checked by compressDictCtxAsm): those of
+// compressFastExtAsm for the attached dictionary's entries, which are its
+// own positions (the dictionary's, 4 bytes from its end) or 0 (more than
+// LZ4_DISTANCE_MAX behind every position of src).
+//
+// BOUNDS: as compressFastExtAsm's; the attached table is read at the same
+// 12-bit hashes (its 4096 entries).
+#define LZ4_DICTCTX
+TEXT ·compressFastDictCtxAsm(SB), NOSPLIT, $112-160
+#include "lz4_compress_ext_amd64.h"
+#undef LZ4_DICTCTX
+
 #undef TABLE_LOAD
 #undef TABLE_STORE
 #undef HASH
@@ -141,5 +172,19 @@ TEXT ·compressFastExtAsm(SB), NOSPLIT, $96-144
 #define LZ4_U16
 TEXT ·compressFast16Asm(SB), NOSPLIT, $48-160
 #include "lz4_compress_amd64.h"
+#undef LZ4_U16
+#undef LZ4_NODICT
+
+// func compressFast16FillAsm(src, dst []byte, table *uint16, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
+//
+// compressFast16Asm for fillOutput, as compressFast32FillAsm.
+//
+// BOUNDS: as compressFast16Asm's and compressFast32FillAsm's.
+#define LZ4_NODICT
+#define LZ4_U16
+#define LZ4_FILL
+TEXT ·compressFast16FillAsm(SB), NOSPLIT, $56-160
+#include "lz4_compress_amd64.h"
+#undef LZ4_FILL
 #undef LZ4_U16
 #undef LZ4_NODICT

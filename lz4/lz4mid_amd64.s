@@ -1,9 +1,10 @@
 //go:build amd64 && !appengine && !noasm && !purego && gc
 
 // The main loop of LZ4MID_compress (level 2; lz4 v1.11.1 lib/lz4hc.c,
-// Copyright (c) Yann Collet, BSD 2-Clause) for a prefix without external or
-// attached dictionary, notLimited or limitedOutput. It follows midCompress
-// in lz4hc.go statement for statement and returns before the last literals.
+// Copyright (c) Yann Collet, BSD 2-Clause) for a prefix with or without an
+// external dictionary (no attached one), notLimited, limitedOutput or
+// fillOutput (the last sequence is Go's). It follows midCompress in
+// lz4hc.go statement for statement and returns before the last literals.
 
 #include "textflag.h"
 
@@ -52,19 +53,103 @@ slow: \
 	MOVQ  CX, out; \
 done:
 
-// func midCompressAsm(win []byte, ip, iend, prefixIdx int, t *uint32, dst []byte, olimit int) (nip, anchor, op, status int)
+// Frame slots
+#define F_OLIMIT 0
+#define F_DSTEND 8
+#define F_LOWLIM 88  // lowLimit (= prefixIdx without dictionary)
+#define F_DICTB  96  // dictStart - lowLimit
+#define F_R12    104 // matchlimit, while midCount runs with a nearer limit
+#define F_DHASH  112 // attached dictionary (0: none): its hash table,
+#define F_DCHAIN 120 // chain table (HC format),
+#define F_DBASE  128 // prefixStart - dictLimit,
+#define F_DEND   136 // end index (dictLimit + its prefix's length)
+#define F_DMID   144 // and format (1: LZ4MID tables)
+#define F_NB     152 // dictionary search: attempts left,
+#define F_DOFF   160 // the candidate's offset,
+#define F_DMI    168 // and dictMatchIndex
+
+// midDictCtx offsets (TestMidDictCtxLayout)
+#define D_HASH  0
+#define D_CHAIN 8
+#define D_BASE  16
+#define D_END   24
+#define D_MID   32
+
+// DICTCOUNT(ipreg, posReg, out, tmp, done): LZ4MID_countMatch's external
+// dictionary branch, pos < prefixIdx: 0 if pos < lowLimit, else
+// LZ4_count(ip, dictStart + pos - lowLimit, ip + min(prefixIdx - pos,
+// matchlimit - ip)). Clobbers AX, BX, CX, DX and tmp.
+#define DICTCOUNT(ipreg, posReg, out, tmp, done) \
+	CMPL  posReg, F_LOWLIM(SP); \
+	JLO   done; \
+	MOVL  R13, tmp; \
+	SUBL  posReg, tmp; \
+	ADDQ  ipreg, tmp; \
+	CMPQ  tmp, R12; \
+	CMOVQHI R12, tmp; \
+	MOVL  posReg, BX; \
+	ADDQ  F_DICTB(SP), BX; \
+	MOVQ  R12, F_R12(SP); \
+	MOVQ  tmp, R12; \
+	MOVQ  ipreg, AX; \
+	CALL  midCount<>(SB); \
+	MOVQ  F_R12(SP), R12; \
+	MOVQ  CX, out; \
+	JMP   done
+
+// COUNTMATCHX(ipreg, ipIndexReg, posReg, out): LZ4MID_countMatch: 0 if
+// ipIndex - pos > LZ4_DISTANCE_MAX, DICTCOUNT if pos < prefixIdx, else
+// LZ4_count(ip, win + pos - prefixIdx, matchlimit). The first 8 bytes are
+// compared here (most candidates differ within them), the rest by
+// midCount. Clobbers AX, BX, CX, DX.
+#define COUNTMATCHX(ipreg, ipIndexReg, posReg, out, slow, dict, done) \
+	XORL  out, out; \
+	MOVL  ipIndexReg, AX; \
+	SUBL  posReg, AX; \
+	CMPL  AX, $65535; \
+	JHI   done; \
+	CMPL  posReg, R13; \
+	JLO   dict; \
+	MOVL  posReg, BX; \
+	SUBL  R13, BX; \
+	ADDQ  R9, BX; \
+	LEAQ  -7(R12), AX; \
+	CMPQ  ipreg, AX; \
+	JHS   slow; \
+	MOVQ  (ipreg), AX; \
+	XORQ  (BX), AX; \
+	JEQ   slow; \
+	BSFQ  AX, out; \
+	SHRQ  $3, out; \
+	JMP   done; \
+dict: \
+	DICTCOUNT(ipreg, posReg, out, AX, done); \
+slow: \
+	MOVQ  ipreg, AX; \
+	CALL  midCount<>(SB); \
+	MOVQ  CX, out; \
+done:
+
+// func midCompressAsm(win []byte, ip, iend, prefixIdx int, t *uint32, dst []byte, olimit int, dict *byte, lowLimit int, d *midDictCtx) (nip, anchor, op, status, ml, md int)
 //
 // win is the prefix (prefixPtr = &win[0], index i is position prefixIdx + i);
 // the input is win[ip:iend]; t is the LZ4MID tables (hash4 then hash8, 16384
-// entries each); olimit < 0 is notLimited. It returns ip, anchor and op at
-// the end of the main loop (status 0), or status 1 when a sequence does not
-// fit (limitedOutput: C returns 0).
+// entries each); olimit < 0 is notLimited (with fillOutput, oend). The
+// external dictionary, if lowLimit < prefixIdx, is the prefixIdx - lowLimit
+// bytes at dict; d, if not nil, is an attached dictionary (dictCtx, in HC or
+// LZ4MID format: LZ4HC_searchExtDict with 2 attempts or
+// LZ4MID_searchExtDict where no match was found, within 64 KB - 8 of the
+// dictionary's end). It returns ip, anchor and op at the end of the main loop
+// (status 0), or status 1 when a sequence does not fit (limitedOutput: C
+// returns 0; fillOutput: ip, anchor and op before the sequence, ml and md
+// its match length and distance).
 //
 // Registers: SI ip, DI op, R8 anchor, R9 win, R10 hash4 table, R11 mflimit,
 // R12 matchlimit, R13 prefixIdx, R14 ipIndex, R15 hash scratch; AX, BX, CX,
 // DX scratch; locals 0 olimit, 8 dstEnd, 16 ilimitIdx, 24 matchLength,
 // 32 matchDistance, 40 hash8 table, 48 dst, 56 and 64 the hash and the
-// candidate at ip+1, 72 and 80 the hash4 and its entry.
+// candidate at ip+1, 72 and 80 the hash4 and its entry, 88 to 104 the
+// F_ slots.
 //
 // Preconditions (checked by midCompress): iend - ip >= LZ4_minLength,
 // iend <= len(win), and the input is the end of win (iend = len(win));
@@ -82,7 +167,16 @@ done:
 //     ip and at the candidate when ip < matchlimit - 7 (so below matchlimit
 //     = iend-5, and the candidate below ip + 8), else and past a full 8-byte
 //     match by midCount, which reads below matchlimit on the ip side and at
-//     the same distance behind on the match side. The catch back reads
+//     the same distance behind on the match side. A dictionary candidate
+//     (lowLimit <= pos < prefixIdx) is counted by midCount with the limit
+//     ip + min(prefixIdx - pos, matchlimit - ip), so its side ends at or
+//     before dictEnd. An attached dictionary's candidate dmi is read only
+//     when ipIndex - (dmi + lowLimit - dEnd) <= 65535, and (HC format) its
+//     4 bytes at dBase + dmi match ip's, then counted by midCount below
+//     ip + min(dEnd - dmi, matchlimit - ip), i.e. not past the
+//     dictionary's end (LZ4MID format: from ip, the same limit); the
+//     dictionary's entries are its own positions, at or above its
+//     dictLimit, or end the search by distance (as C's). The catch back reads
 //     ip[-1] (ip > anchor >= 0) and ip[-dist-1] with ip > dist.
 // (2) dst writes: before a sequence, op + litLen/255 + litLen + 8 <= olimit
 //     (limited) is checked; with notLimited dst holds the bound. Every
@@ -90,351 +184,19 @@ done:
 //     within these limits): the literal run bytes, the offset, the match run
 //     below op + mlCode/255 + 2; the literals are copied in 8-byte chunks
 //     when op+litLen+8 <= dstEnd, else byte by byte.
-TEXT ·midCompressAsm(SB), NOSPLIT, $88-120
-	MOVQ win_base+0(FP), R9
-	MOVQ ip+24(FP), SI
-	ADDQ R9, SI
-	MOVQ SI, R8                  // anchor
-	MOVQ iend+32(FP), AX
-	ADDQ R9, AX                  // iend
-	LEAQ -12(AX), R11            // mflimit
-	LEAQ -5(AX), R12             // matchlimit
-	LEAQ -8(AX), BX              // ilimit
-	SUBQ R9, BX
-	MOVQ prefixIdx+40(FP), R13
-	ADDL R13, BX
-	MOVQ BX, 16(SP)              // ilimitIdx
-	MOVQ t+48(FP), R10
-	LEAQ 65536(R10), BX
-	MOVQ BX, 40(SP)              // hash8 table
-	MOVQ dst_base+56(FP), DI
-	MOVQ DI, 48(SP)
-	MOVQ dst_len+64(FP), BX
-	ADDQ DI, BX
-	MOVQ BX, 8(SP)               // dstEnd
-	MOVQ olimit+80(FP), BX
-	TESTQ BX, BX
-	JGE  limited
-	MOVQ $-1, BX
-	JMP  olimitSet
+TEXT ·midCompressAsm(SB), NOSPLIT, $176-160
+#include "lz4mid_amd64.h"
 
-limited:
-	ADDQ DI, BX
-
-olimitSet:
-	MOVQ BX, 0(SP)
-
-loop:
-	CMPQ SI, R11
-	JHI  done                    // ip > mflimit
-	MOVQ SI, R14
-	SUBQ R9, R14
-	ADDL R13, R14                // ipIndex
-
-	// the short match's entry, loaded early (another table)
-	HASH4(SI, DX)
-	MOVQ DX, 72(SP)
-	MOVL (R10)(DX*4), CX
-	MOVQ CX, 80(SP)
-
-	// search long match
-	HASH8(SI, DX)
-	MOVQ 40(SP), BX
-	MOVL (BX)(DX*4), CX          // pos8
-	MOVL R14, (BX)(DX*4)
-	MOVQ CX, 32(SP)
-	COUNTMATCH(SI, R14, CX, DX, cm8slow, cm8)
-	MOVQ DX, 24(SP)
-	MOVL R14, AX
-	SUBL 32(SP), AX
-	MOVQ AX, 32(SP)              // matchDistance = ipIndex - pos8
-	CMPQ DX, $4
-	JHS  found
-
-	// search short match
-	MOVQ 72(SP), DX
-	MOVQ 80(SP), CX              // pos4
-	MOVL R14, (R10)(DX*4)
-	MOVQ CX, 32(SP)
-	COUNTMATCH(SI, R14, CX, DX, cm4slow, cm4)
-	MOVQ DX, 24(SP)
-	MOVL R14, AX
-	SUBL 32(SP), AX
-	MOVQ AX, 32(SP)              // matchDistance = ipIndex - pos4
-	CMPQ DX, $4
-	JHS  found
-
-	// no match: skip faster over incompressible data
-	MOVQ SI, AX
-	SUBQ R8, AX
-	SHRQ $9, AX
-	LEAQ 1(SI)(AX*1), SI
-	JMP  loop
-
-found:
-	CMPQ 24(SP), $8
-	JHS  encode
-	CMPQ SI, R11
-	JHS  encode                  // ip < mflimit only
-	LEAQ 1(SI), AX
-	HASH8(AX, DX)
-	MOVQ 40(SP), BX
-	MOVL (BX)(DX*4), CX          // pos8 at ip+1
-	MOVQ DX, 56(SP)
-	MOVQ CX, 64(SP)
-	LEAQ 1(SI), DX
-	LEAL 1(R14), AX
-	MOVQ AX, R15
-	MOVL CX, AX
-	// ml2 = LZ4MID_countMatch(ip+1, ipIndex+1, pos8)
-	XORL CX, CX
-	MOVL R15, BX
-	SUBL AX, BX
-	CMPL BX, $65535
-	JHI  ml2done
-	CMPL AX, R13
-	JLO  ml2done
-	MOVL AX, BX
-	SUBL R13, BX
-	ADDQ R9, BX
-	LEAQ -7(R12), AX
-	CMPQ DX, AX
-	JHS  ml2slow
-	MOVQ (DX), AX
-	XORQ (BX), AX
-	JEQ  ml2slow
-	BSFQ AX, CX
-	SHRQ $3, CX
-	JMP  ml2done
-
-ml2slow:
-	MOVQ DX, AX
-	CALL midCount<>(SB)
-
-ml2done:
-	MOVQ 64(SP), AX              // pos8
-	MOVQ 56(SP), DX              // h8
-	CMPQ CX, 24(SP)
-	JLS  encode                  // ml2 <= matchLength
-	CMPL AX, R14
-	JEQ  encode                  // pos8 == ipIndex
-	MOVQ 40(SP), BX
-	LEAL 1(R14), R15
-	MOVL R15, (BX)(DX*4)
-	INCQ SI
-	MOVQ CX, 24(SP)
-	SUBL AX, R15
-	MOVQ R15, 32(SP)             // matchDistance = ipIndex + 1 - pos8
-
-encode:
-	// catch back
-	MOVQ 32(SP), CX              // matchDistance
-	MOVQ 24(SP), DX              // matchLength
-
-catchBack:
-	CMPQ SI, R8
-	JLS  catchDone
-	MOVQ SI, AX
-	SUBQ R9, AX
-	CMPQ AX, CX
-	JLS  catchDone               // (ip - prefixPtr) <= matchDistance
-	MOVQ SI, AX
-	SUBQ CX, AX
-	MOVB -1(AX), BX
-	CMPB BL, -1(SI)
-	JNE  catchDone
-	DECQ SI
-	INCQ DX
-	JMP  catchBack
-
-catchDone:
-	MOVQ DX, 24(SP)
-
-	// fill table with beginning of match
-	MOVQ SI, R14
-	SUBQ R9, R14
-	ADDL R13, R14                // startMatchIdx
-	MOVQ 40(SP), BX
-	LEAQ 1(SI), AX
-	HASH8(AX, DX)
-	LEAL 1(R14), CX
-	MOVL CX, (BX)(DX*4)
-	LEAQ 2(SI), AX
-	HASH8(AX, DX)
-	LEAL 2(R14), CX
-	MOVL CX, (BX)(DX*4)
-	LEAQ 1(SI), AX
-	HASH4(AX, DX)
-	LEAL 1(R14), CX
-	MOVL CX, (R10)(DX*4)
-
-	// LZ4HC_encodeSequence(matchLength, matchDistance)
-	MOVQ SI, CX
-	SUBQ R8, CX                  // litLen
-	MOVQ CX, AX
-	MOVL $0x80808081, DX
-	IMULQ DX, AX
-	SHRQ $39, AX                 // litLen / 255
-	LEAQ 9(DI)(CX*1), DX         // op+1 (token) + litLen + 2+1+LASTLITERALS
-	ADDQ AX, DX
-	CMPQ DX, 0(SP)
-	JHI  fail
-	MOVQ DI, R14                 // token
-	INCQ DI
-	CMPQ CX, $15
-	JHS  litRun
-	MOVQ CX, AX
-	SHLQ $4, AX
-	MOVB AL, (R14)
-	JMP  copyLits
-
-litRun:
-	MOVB $0xF0, (R14)
-	LEAQ -15(CX), AX
-	LEAQ (DI)(AX*1), DX
-	CMPQ DX, 8(SP)
-	JHS  fail2
-
-litRunLoop:
-	CMPQ AX, $255
-	JLO  litRunLast
-	MOVB $255, (DI)
-	INCQ DI
-	SUBQ $255, AX
-	JMP  litRunLoop
-
-litRunLast:
-	MOVB AL, (DI)
-	INCQ DI
-
-copyLits:
-	LEAQ (DI)(CX*1), BX          // end of the literals in dst
-	MOVQ R8, AX
-	LEAQ 8(BX), DX
-	CMPQ DX, 8(SP)
-	JHI  exactLits
-
-copyLits8:
-	MOVQ (AX), DX
-	MOVQ DX, (DI)
-	ADDQ $8, AX
-	ADDQ $8, DI
-	CMPQ DI, BX
-	JLO  copyLits8
-	MOVQ BX, DI
-	JMP  offsetOut
-
-exactLits:
-	CMPQ DI, BX
-	JHS  offsetOut
-	MOVB (AX), DX
-	MOVB DX, (DI)
-	INCQ AX
-	INCQ DI
-	JMP  exactLits
-
-offsetOut:
-	// offset
-	LEAQ 2(DI), AX
-	CMPQ AX, 8(SP)
-	JHI  fail2
-	MOVQ 32(SP), AX
-	MOVW AX, (DI)
-	ADDQ $2, DI
-
-	// match length
-	MOVQ 24(SP), CX
-	SUBQ $4, CX                  // mlCode
-	MOVQ CX, AX
-	MOVL $0x80808081, DX
-	IMULQ DX, AX
-	SHRQ $39, AX                 // mlCode / 255
-	LEAQ 6(DI)(AX*1), DX         // op + mlCode/255 + 1+LASTLITERALS
-	CMPQ DX, 0(SP)
-	JHI  fail
-	LEAQ 2(DI)(AX*1), DX
-	CMPQ DX, 8(SP)
-	JHI  fail2
-	CMPQ CX, $15
-	JHS  mlRun
-	ADDB CL, (R14)
-	JMP  mlDone
-
-mlRun:
-	ADDB $15, (R14)
-	SUBQ $15, CX
-
-mlRunLoop:
-	CMPQ CX, $255
-	JLO  mlRunLast
-	MOVB $255, (DI)
-	INCQ DI
-	SUBQ $255, CX
-	JMP  mlRunLoop
-
-mlRunLast:
-	MOVB CL, (DI)
-	INCQ DI
-
-mlDone:
-	ADDQ 24(SP), SI              // ip += matchLength
-	MOVQ SI, R8                  // anchor = ip
-
-	// fill table with end of match
-	MOVQ SI, R14
-	SUBQ R9, R14
-	ADDL R13, R14                // endMatchIdx
-	LEAL -2(R14), AX
-	CMPL AX, 16(SP)
-	JHS  loop                    // pos_m2 >= ilimitIdx
-	MOVQ 40(SP), BX
-	MOVQ SI, AX
-	SUBQ R9, AX
-	CMPQ AX, $5
-	JLE  noM5
-	LEAQ -5(SI), AX
-	HASH8(AX, DX)
-	LEAL -5(R14), CX
-	MOVL CX, (BX)(DX*4)
-
-noM5:
-	LEAQ -3(SI), AX
-	HASH8(AX, DX)
-	LEAL -3(R14), CX
-	MOVL CX, (BX)(DX*4)
-	LEAQ -2(SI), AX
-	HASH8(AX, DX)
-	LEAL -2(R14), CX
-	MOVL CX, (BX)(DX*4)
-	LEAQ -2(SI), AX
-	HASH4(AX, DX)
-	LEAL -2(R14), CX
-	MOVL CX, (R10)(DX*4)
-	LEAQ -1(SI), AX
-	HASH4(AX, DX)
-	LEAL -1(R14), CX
-	MOVL CX, (R10)(DX*4)
-	JMP  loop
-
-done:
-	MOVQ win_base+0(FP), AX
-	SUBQ AX, SI
-	MOVQ SI, nip+88(FP)
-	SUBQ AX, R8
-	MOVQ R8, anchor+96(FP)
-	MOVQ 48(SP), AX
-	SUBQ AX, DI
-	MOVQ DI, op+104(FP)
-	MOVQ $0, status+112(FP)
-	RET
-
-fail:
-	MOVQ $1, status+112(FP)
-	RET
-
-fail2:
-	MOVQ $2, status+112(FP)
-	RET
+// func midCompressDictAsm(win []byte, ip, iend, prefixIdx int, t *uint32, dst []byte, olimit int, dict *byte, lowLimit int, d *midDictCtx) (nip, anchor, op, status, ml, md int)
+//
+// midCompressAsm with the external dictionary (lowLimit < prefixIdx) or
+// the attached one (d), whose candidates the prefix-only routine skips.
+//
+// BOUNDS: as midCompressAsm's (the dictionary paths included).
+#define MID_DICT
+TEXT ·midCompressDictAsm(SB), NOSPLIT, $176-160
+#include "lz4mid_amd64.h"
+#undef MID_DICT
 
 // midCount: CX = LZ4_count(AX, BX, R12): the common prefix of the bytes at
 // AX (below matchlimit R12) and at BX. Clobbers AX, BX, DX.

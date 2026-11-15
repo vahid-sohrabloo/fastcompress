@@ -19,13 +19,23 @@ func compressFast32Asm(src, dst []byte, table *uint32, startIndex, accel, olimit
 func compressFast32NoDictAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
 
 //go:noescape
+func compressFast32FillAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
+
+//go:noescape
+func compressFast16FillAsm(src, dst []byte, table *uint16, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
+
+//go:noescape
 func compressFast16Asm(src, dst []byte, table *uint16, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
 
-// compressNoDictAsm is compressGenericValidated for noDict, notLimited or
-// limitedOutput and the byU32 or byU16 table, with the main loop in
-// assembly. ok is false when the assembly cannot run (then nothing changed).
-func (c *streamInternal) compressNoDictAsm(src, dst []byte, maxOutputSize int, od outputDirective, tt tableType, di dictIssue, acceleration int) (int, bool) {
+// compressNoDictAsm is compressGenericValidated for noDict and the byU32
+// or byU16 table, with the main loop in assembly (inputConsumed is set for
+// fillOutput). ok is false when the assembly cannot run (then nothing
+// changed).
+func (c *streamInternal) compressNoDictAsm(src, dst []byte, maxOutputSize int, inputConsumed *int, od outputDirective, tt tableType, di dictIssue, acceleration int) (int, bool) {
 	inputSize := len(src)
+	if od == fillOutput && (maxOutputSize < 1 || di != noDictIssue) {
+		return 0, false
+	}
 	// noDictIssue: a fresh table (startIndex 0), where the assembly's
 	// dictSmall checks are no-ops
 	if !useFastAsm || (di == noDictIssue && c.currentOffset != 0) || uint64(c.currentOffset)+uint64(inputSize) >= 1<<31 || len(dst) < maxOutputSize ||
@@ -45,16 +55,44 @@ func (c *streamInternal) compressNoDictAsm(src, dst []byte, maxOutputSize int, o
 		}
 		var st int
 		si := int(startIndex)
-		if tt == byU32 {
+		switch {
+		case od == fillOutput && tt == byU32:
+			anchor, op, st = compressFast32FillAsm(src, dst, &c.hashTable[0], si, acceleration, olimit, si, si, 0, 1, 0, 0, 0)
+		case od == fillOutput:
+			anchor, op, st = compressFast16FillAsm(src, dst, &c.u16()[0], si, acceleration, olimit, si, si, 0, 1, 0, 0, 0)
+		case tt == byU32:
 			anchor, op, st = compressFast32NoDictAsm(src, dst, &c.hashTable[0], si, acceleration, olimit, si, si, 0, 1, 0, 0, 0)
-		} else {
+		default:
 			anchor, op, st = compressFast16Asm(src, dst, &c.u16()[0], si, acceleration, olimit, si, si, 0, 1, 0, 0, 0)
 		}
 		if st != 0 {
 			return 0, true
 		}
 	}
+	if od == fillOutput {
+		return fillLastLiterals(src, dst, anchor, op, maxOutputSize, inputConsumed), true
+	}
 	return lastLiteralsAsm(src, dst, anchor, op, maxOutputSize, od)
+}
+
+// fillLastLiterals is _last_literals for fillOutput: as many literals as
+// fit; *inputConsumed is the input up to their end.
+func fillLastLiterals(src, dst []byte, anchor, op, olimit int, inputConsumed *int) int {
+	lastRun := len(src) - anchor
+	if op+lastRun+1+(lastRun+255-runMask)/255 > olimit {
+		lastRun = olimit - op - 1
+		lastRun -= (lastRun + 256 - runMask) / 256
+	}
+	if lastRun >= runMask {
+		dst[op] = runMask << mlBits
+		op = putRun(dst, op+1, uint(lastRun-runMask))
+	} else {
+		dst[op] = byte(lastRun << mlBits)
+		op++
+	}
+	copy(dst[op:op+lastRun], src[anchor:anchor+lastRun])
+	*inputConsumed = anchor + lastRun
+	return op + lastRun
 }
 
 // compressPrefixAsm is compressGenericValidated for withPrefix64k (the
@@ -132,6 +170,38 @@ func (c *streamInternal) compressExtDictAsm(src, dst []byte, dstCapacity int, od
 		suspend.ip, suspend.op, suspend.startIndex, suspend.set = anchor, op, startIndex, true
 	}
 	return 0, true
+}
+
+//go:noescape
+func compressFastDictCtxAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx int, dict []byte, seqLimit int, dctx *uint32, dictDelta int) (anchor, op, status int)
+
+// compressDictCtxAsm is compressGenericValidated for usingDictCtx
+// (noDictIssue), byU32 and limitedOutput with the main loop in assembly. ok
+// is false when the assembly cannot run (then nothing changed).
+func (c *streamInternal) compressDictCtxAsm(src, dst []byte, dstCapacity int, od outputDirective, di dictIssue, acceleration int) (int, bool) {
+	inputSize := len(src)
+	dictCtx := c.dictCtx
+	if !useFastAsm || dictCtx == nil || od != limitedOutput || di != noDictIssue || inputSize < minLength || len(dst) < dstCapacity ||
+		dictCtx.tableType != byU32 || uint64(c.currentOffset)+uint64(inputSize) >= 1<<31 {
+		return 0, false
+	}
+	dict := dictCtx.dictRegion()
+	if len(dict) == 0 {
+		return 0, false
+	}
+	startIndex := c.currentOffset
+	dictDelta := startIndex - dictCtx.currentOffset
+	c.dictCtx = nil
+	c.dictSize = uint32(inputSize)
+	c.currentOffset += uint32(inputSize)
+	c.tableType = byU32
+	c.putIndexOnHash(startIndex, hashPosition(src, 0, byU32), byU32)
+	anchor, op, st := compressFastDictCtxAsm(src, dst, &c.hashTable[0], int(startIndex), acceleration, dstCapacity, 0, dict,
+		inputSize-mfLimit+1, &dictCtx.hashTable[0], int(dictDelta))
+	if st != 0 {
+		return 0, true
+	}
+	return lastLiteralsAsm(src, dst, anchor, op, dstCapacity, limitedOutput)
 }
 
 // compressResumeAsm is C's LZ4_compress_resumeWithPrefix (the second part

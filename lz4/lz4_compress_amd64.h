@@ -6,7 +6,10 @@
 // and LZ4_NODICT for noDict callers (a candidate at or above lowIdx =
 // startIndex is within src, so the search loop compares its 4 bytes before
 // checking the distance, as C's noDict) and LZ4_U16 for the byU16 table
-// (indexes below 64 KB: no distance checks, as C).
+// (indexes below 64 KB: no distance checks, as C), and LZ4_FILL for
+// fillOutput (destSize; noDict): C's three output checks of fillOutput
+// replace limitedOutput's, ending at _last_literals (Go's, from anchor and
+// op) or cutting a match, with filledIp at 48(SP).
 //
 // Frame locals (hardware SP): 0 matchlimit (iend-5), 8 olimit (dst+olimit,
 // or the largest address when not limited), 16 dstEnd, 24 acceleration<<6,
@@ -103,6 +106,9 @@ searchLoop:
 	LEAQ (R9)(AX*1), R15         // match
 
 	// Catch up
+#ifdef LZ4_FILL
+	MOVQ SI, 48(SP)              // filledIp = ip
+#endif
 	MOVQ 32(SP), R12             // lowLimit
 	CMPQ R15, R12
 	JLS  encLits
@@ -130,10 +136,21 @@ encLits:
 	MOVL $0x80808081, DX
 	IMULQ DX, AX
 	SHRQ $39, AX                 // litLength / 255
+#ifdef LZ4_FILL
+	LEAQ 240(CX), AX
+	MOVL $0x80808081, DX
+	IMULQ DX, AX
+	SHRQ $39, AX                 // (litLength + 240) / 255
+	LEAQ 11(DI)(CX*1), R12
+	ADDQ AX, R12
+	CMPQ R12, 8(SP)
+	JHI  fillStop                // op + (litLength+240)/255 + litLength + 2+1 + MFLIMIT-MINMATCH > olimit
+#else
 	LEAQ 8(DI)(CX*1), R12
 	ADDQ AX, R12
 	CMPQ R12, 8(SP)
 	JHI  fail                    // limitedOutput: op + litLength + 2+1+LASTLITERALS + litLength/255 > olimit
+#endif
 	CMPQ CX, $15
 	JHS  litRun
 	MOVQ CX, AX
@@ -193,6 +210,11 @@ exactLitsLoop:
 
 encOffset:
 	// _next_match: R14 token, SI ip, R15 match
+#ifdef LZ4_FILL
+	LEAQ 11(DI), AX
+	CMPQ AX, 8(SP)
+	JHI  fillStop                // op + 2+1 + MFLIMIT-MINMATCH > olimit: op = token
+#endif
 	LEAQ 2(DI), AX
 	CMPQ AX, 16(SP)
 	JHI  fail2
@@ -262,7 +284,13 @@ countDone:
 	SHRQ $39, AX                 // (matchCode + 240) / 255
 	LEAQ 6(DI)(AX*1), AX
 	CMPQ AX, 8(SP)
+#ifdef LZ4_FILL
+	JHI  fillCut                 // op + 1+LASTLITERALS + (matchCode+240)/255 > olimit
+
+mlEncode:
+#else
 	JHI  fail                    // limitedOutput: op + 1+LASTLITERALS + (matchCode+240)/255 > olimit
+#endif
 	CMPQ CX, $15
 	JHS  mlRun
 	ADDB CL, (R14)
@@ -365,6 +393,37 @@ lastLits:
 	MOVQ DI, op+144(FP)
 	MOVQ $0, status+152(FP)
 	RET
+
+#ifdef LZ4_FILL
+fillStop:
+	MOVQ R14, DI                 // op = token
+	JMP  lastLits
+
+fillCut:
+	// the match description too long: newMatchCode = 15-1 + (olimit - op
+	// - 1 - LASTLITERALS) * 255; ip moves back by the difference, and the
+	// positions from ip to filledIp leave the table (LZ4_clearHash)
+	MOVQ 8(SP), AX
+	SUBQ DI, AX
+	SUBQ $6, AX
+	IMUL3Q $255, AX, AX
+	ADDQ $14, AX                 // newMatchCode
+	SUBQ CX, SI
+	ADDQ AX, SI                  // ip -= matchCode - newMatchCode
+	MOVQ AX, CX
+	CMPQ SI, 48(SP)
+	JHI  mlEncode
+	MOVQ SI, BX
+
+fillClear:
+	HASH(BX, DX)
+	XORL AX, AX
+	TABLE_STORE(AX, DX)
+	INCQ BX
+	CMPQ BX, 48(SP)
+	JLS  fillClear
+	JMP  mlEncode
+#endif
 
 fail:
 	MOVQ $1, status+152(FP)

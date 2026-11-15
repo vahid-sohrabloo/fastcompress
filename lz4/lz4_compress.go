@@ -616,13 +616,18 @@ func (c *streamInternal) compressGeneric(win []byte, srcStart, srcSize int, inpu
 		return c.compressGenericValidated(win, srcStart, srcSize, nil, dst, capa, limitedOutput,
 			byU32, withPrefix64k, noDictIssue, acceleration, nil, &state)
 	}
-	if dd == noDict && od != fillOutput && srcStart == 0 && len(win) == srcSize {
-		if n, ok := c.compressNoDictAsm(win, dst, dstCapacity, od, tt, di, acceleration); ok {
+	if dd == noDict && srcStart == 0 && len(win) == srcSize {
+		if n, ok := c.compressNoDictAsm(win, dst, dstCapacity, inputConsumed, od, tt, di, acceleration); ok {
 			return n
 		}
 	}
 	if dd == usingExtDict && tt == byU32 && srcStart == 0 && len(win) == srcSize {
 		if n, ok := c.compressExtDictAsm(win, dst, dstCapacity, od, di, acceleration, nil); ok {
+			return n
+		}
+	}
+	if dd == usingDictCtx && tt == byU32 && srcStart == 0 && len(win) == srcSize {
+		if n, ok := c.compressDictCtxAsm(win, dst, dstCapacity, od, di, acceleration); ok {
 			return n
 		}
 	}
