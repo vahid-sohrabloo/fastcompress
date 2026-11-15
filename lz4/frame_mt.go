@@ -92,6 +92,9 @@ type frameMT struct {
 	free      []*mtJob // jobs with their buffers, for reuse
 	workers   []*frameCCtx
 	fault     error // a failed job (frame invalid)
+	// stablePrev is the tail of the last stable input (up to mtPrefixSize
+	// bytes, its capacity unchanged), until the next input or flush point
+	stablePrev []byte
 }
 
 // begin is C's LZ4F_mt_begin for the frame c begins.
@@ -108,6 +111,7 @@ func (m *frameMT) begin(c *frameCCtx) {
 	m.filling = nil
 	m.history = m.history[:0]
 	m.fault = nil
+	m.stablePrev = nil
 	if cap(m.history) < mtPrefixSize {
 		m.history = make([]byte, 0, mtPrefixSize)
 	}
@@ -272,9 +276,8 @@ func (m *frameMT) emitDone(emit func([]byte) error, wait bool) error {
 // update is C's LZ4F_mt_update. The content is copied into jobs, or, with
 // stable input (C: LZ4F_srcStableUntilFlush; src stays unchanged until the
 // next flush point) or autoFlush, read in place when a whole job and its
-// history are in src (C also reads the history in the previous stable
-// input when contiguous; here it is copied then, as the two can be
-// separate allocations).
+// history are in src, or in the previous stable input when both are parts
+// of one slice (its capacity reaches the end of src; C compares pointers).
 func (m *frameMT) update(src []byte, stable bool, mode blockCompressMode, emit func([]byte) error) error {
 	if m.fault != nil {
 		return m.fault
@@ -283,6 +286,12 @@ func (m *frameMT) update(src []byte, stable bool, mode blockCompressMode, emit f
 		m.submit() // mode switch
 	}
 	inPlace := stable || m.prefs.AutoFlush
+	// base holds the previous stable input's tail (prevRun bytes) then src,
+	// when both are in one slice
+	base, prevRun := src, 0
+	if p := m.stablePrev; stable && len(p) > 0 && len(src) > 0 && addr(p)+uintptr(len(p)) == addr(src) && cap(p) >= len(p)+len(src) {
+		base, prevRun = p[:len(p)+len(src)], len(p)
+	}
 	for ip := 0; ip < len(src); {
 		j := m.filling
 		if j == nil {
@@ -299,10 +308,10 @@ func (m *frameMT) update(src []byte, stable bool, mode blockCompressMode, emit f
 				j.prefix = len(m.history)
 			}
 			m.filling = j
-			if remaining := len(src) - ip; inPlace && (remaining >= m.jobSize || m.prefs.AutoFlush) && ip >= j.prefix {
+			if remaining := len(src) - ip; inPlace && (remaining >= m.jobSize || m.prefs.AutoFlush) && prevRun+ip >= j.prefix {
 				// the job and its history are in place
 				n := min(remaining, m.jobSize)
-				j.data = src[ip-j.prefix : ip+n]
+				j.data = base[prevRun+ip-j.prefix : prevRun+ip+n]
 				m.submit()
 				ip += n
 				continue
@@ -322,6 +331,12 @@ func (m *frameMT) update(src []byte, stable bool, mode blockCompressMode, emit f
 		}
 	}
 
+	if len(src) > 0 {
+		m.stablePrev = nil
+		if stable {
+			m.stablePrev = base[max(0, len(base)-mtPrefixSize):]
+		}
+	}
 	if m.prefs.AutoFlush {
 		if m.filling != nil {
 			m.submit()
@@ -339,5 +354,6 @@ func (m *frameMT) flush(emit func([]byte) error) error {
 	if m.filling != nil {
 		m.submit()
 	}
+	m.stablePrev = nil // stable input is only kept until a flush point
 	return m.emitDone(emit, true)
 }

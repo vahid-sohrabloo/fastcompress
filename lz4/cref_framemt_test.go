@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/vahid-sohrabloo/fastcompress/internal/creftest"
@@ -218,6 +219,59 @@ func TestFrameCompressorMT(t *testing.T) {
 			two, err := AppendFrame(nil, in, &p0)
 			if err != nil || !bytes.Equal(one[:n], two) {
 				t.Fatalf("one-shot with 4 and 1 workers differ: %v", err)
+			}
+		}
+	}
+}
+
+// TestFrameMTStable compresses with UpdateStable, from chunks of one buffer
+// (jobs read their history in place across calls) and from separate
+// copies, and with Update: the frames must equal C's (workers=1, plan of
+// the same writes).
+func TestFrameMTStable(t *testing.T) {
+	in := mtInputs(t)["mix"]
+	for _, level := range []int{1, 2, 9} {
+		for _, chunk := range []int{1 << 20, 3 << 20 / 2, 70000} {
+			p := &Preferences{CompressionLevel: level, NbWorkers: 3}
+			var plan []string
+			for off := 0; off < len(in); off += chunk {
+				plan = append(plan, "w"+strconv.Itoa(min(chunk, len(in)-off)))
+			}
+			want := creftest.LZ4Run(t, in, "frame", "workers=1", "level="+strconv.Itoa(level), "linked=1",
+				"plan="+strings.Join(plan, ","))
+			for mode := 0; mode < 3; mode++ {
+				var fc FrameCompressor
+				frame := make([]byte, maxFHSize)
+				n, err := fc.Begin(frame, p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				frame = frame[:n]
+				for off := 0; off < len(in); off += chunk {
+					piece := in[off:min(off+chunk, len(in))]
+					dst := make([]byte, CompressBoundFrame(len(piece), p))
+					switch mode {
+					case 0:
+						n, err = fc.UpdateStable(dst, piece)
+					case 1:
+						n, err = fc.UpdateStable(dst, append([]byte(nil), piece...))
+					default:
+						n, err = fc.Update(dst, piece)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					frame = append(frame, dst[:n]...)
+				}
+				dst := make([]byte, CompressBoundFrame(0, p))
+				n, err = fc.End(dst)
+				if err != nil {
+					t.Fatal(err)
+				}
+				frame = append(frame, dst[:n]...)
+				if !bytes.Equal(frame, want) {
+					t.Fatalf("level %d chunk %d mode %d: %d bytes, C %d", level, chunk, mode, len(frame), len(want))
+				}
 			}
 		}
 	}
