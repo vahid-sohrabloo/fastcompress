@@ -207,15 +207,14 @@ havehash:
 	PMOVMSKB X0, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $15
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORW  CX, DX
 	MOVWLZX DX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
@@ -1133,14 +1132,13 @@ havehash:
 	ORL   AX, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $31
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORL  CX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
@@ -2072,14 +2070,13 @@ havehash:
 	ORQ   AX, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $63
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORQ  CX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
@@ -2995,15 +2992,14 @@ havehash:
 	PMOVMSKB X0, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $15
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORW  CX, DX
 	MOVWLZX DX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
@@ -3921,14 +3917,13 @@ havehash:
 	ORL   AX, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $31
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORL  CX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
@@ -4860,14 +4855,13 @@ havehash:
 	ORQ   AX, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $63
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORQ  CX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
@@ -5783,15 +5777,14 @@ havehash:
 	PMOVMSKB X0, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $15
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORW  CX, DX
 	MOVWLZX DX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
@@ -6709,14 +6702,13 @@ havehash:
 	ORL   AX, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $31
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORL  CX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
@@ -7648,14 +7640,13 @@ havehash:
 	ORQ   AX, R10
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, $63
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 	RORQ  CX, DX
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16

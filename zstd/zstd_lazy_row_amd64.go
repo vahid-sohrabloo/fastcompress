@@ -8,16 +8,16 @@ import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 // loops (SSE2 and PREFETCHT0, which every amd64 CPU has).
 var useRowAsm bool
 
-// useRowBMI selects the row finder's faster candidate gather (BLSR,
-// POPCNT), read by the assembly. The gather needs only BMI1 and POPCNT; it
-// also requires BMI2 so that TestAsmEquiv's bmi2=off pass (cpu.DisableBMI2)
-// runs the C-loop fallback.
+// useRowBMI selects the row finder's faster candidate gather (BLSR), read
+// by the assembly, for searches that take every candidate of a row. The
+// gather needs only BMI1; it also requires BMI2 so that TestAsmEquiv's
+// bmi2=off pass (cpu.DisableBMI2) runs the C-loop fallback.
 var useRowBMI bool
 
 func init() {
 	cpu.RegisterAsm("row", &useRowAsm, func() bool { return true })
 	cpu.RegisterAsm("row-bmi", &useRowBMI, func() bool {
-		return cpu.X86.HasBMI1 && cpu.X86.HasBMI2 && cpu.X86.HasPOPCNT
+		return cpu.X86.HasBMI1 && cpu.X86.HasBMI2
 	})
 }
 

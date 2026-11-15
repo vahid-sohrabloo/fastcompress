@@ -368,10 +368,15 @@ bad:
 //   - The update loop keeps the salt and rowMask in registers and indexes
 //     the tables directly, at 6 fewer instructions per position than gcc's.
 //     L7 xml, whose matches are long, is 3% faster for it.
-//   - When BMI1/BMI2 and POPCNT are present (useRowBMI), the candidate
-//     gather has a faster form. The head entry's bit is cleared from the
-//     match mask before the loop, so matchPos is never 0. nbAttempts is
-//     tested only when the mask holds more candidates than that.
+//   - When BMI1/BMI2 are present (useRowBMI) and nbAttempts is at least
+//     rowEntries-1, so that every candidate of a row is taken, the gather
+//     has a faster form. The head entry's bit is cleared from the match
+//     mask before the loop, so matchPos is never 0, and nbAttempts is never
+//     tested. With fewer attempts (searchLog 3: levels 5 and 6 on large
+//     inputs) C's loop runs. Choosing per row by the mask's popcount, as
+//     this code did before, mispredicts: L5/L6 dickens ran 4-6% slower on
+//     an i9-13900H, and trimming the mask to nbAttempts candidates with
+//     PDEP was 1% slower than C's loop.
 //   - Every candidate is bounds-checked: lowLimit <= idx < curr. C does not
 //     check idx < curr. The check keeps the compare and count inside
 //     b[:iLimit] if a table entry is ever wrong; such an entry makes the
@@ -592,6 +597,8 @@ havehash:
 {{- end}}
 	CMPB  ·useRowBMI(SB), $0
 	JEQ   slow
+	CMPL  DI, ${{.Mask}}
+	JCS   slow              // nbAttempts < rowEntries - 1: C's loop
 	ANDQ  $-2, R10          // the head entry is never a candidate
 	MOVQ  R10, DX
 {{- if eq .R 6}}
@@ -604,9 +611,6 @@ havehash:
 {{- end}}
 	TESTQ R10, R10
 	JEQ   insert
-	POPCNTQ DX, AX
-	CMPL  AX, DI
-	JHI   gslow             // more candidates than nbAttempts: C's loop
 	MOVL  0x28(SP), R15     // curr
 	XORL  R10, R10
 	PCALIGN $16
