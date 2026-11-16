@@ -158,7 +158,7 @@ const hcAsmChunk = 256 * kb
 // external dictionary (no attached one), dst holding the bound
 // (notLimited) or maxOutputSize.
 func (c *hcCtx) parseAsmOK(win []byte, srcStart, inputSize int, dst []byte, maxOutputSize int, limit outputDirective, usingDictCtx bool) bool {
-	return useHCParseAsm && (!usingDictCtx || c.lowLimit == c.dictLimit && len(c.dictCtx.prefix) > 0) && inputSize >= minLength && c.lowLimit <= c.dictLimit &&
+	return useHCParseAsm && (hcParseFull || c.lowLimit == c.dictLimit && !usingDictCtx) && (!usingDictCtx || c.lowLimit == c.dictLimit && len(c.dictCtx.prefix) > 0) && inputSize >= minLength && c.lowLimit <= c.dictLimit &&
 		len(c.dict) >= int(c.dictLimit-c.lowLimit) &&
 		srcStart+inputSize == len(win) && c.nextToUpdate >= c.dictLimit && len(dst) >= maxOutputSize && maxOutputSize >= 1 &&
 		(limit != notLimited || len(dst) >= CompressBound(inputSize)) && (limit != fillOutput || maxOutputSize > lastLiterals)
@@ -553,7 +553,8 @@ func (c *hcCtx) midCompress(win []byte, srcStart int, srcSizePtr *int, dst []byt
 			base: uintptr(unsafe.Pointer(&d.prefix[0])) - uintptr(d.dictLimit), end: uint64(len(d.prefix)) + uint64(d.dictLimit),
 			mid: b2i(hcGetCLevelParams(int(d.compressionLevel)).strat == lz4mid)}
 	}
-	if *srcSizePtr >= minLength && useMidAsm && (searchIntoDict == nil || dctx != nil) && dictIdx <= prefixIdx && len(dict) >= int(prefixIdx-dictIdx) &&
+	if *srcSizePtr >= minLength && useMidAsm && (searchIntoDict == nil || dctx != nil) && dictIdx <= prefixIdx &&
+		(midDictAsm || dictIdx == prefixIdx && dctx == nil) && len(dict) >= int(prefixIdx-dictIdx) &&
 		iend == len(win) && len(dst) >= maxOutputSize && maxOutputSize >= 1 && (limit != fillOutput || oend > 0) &&
 		(limit != notLimited || len(dst) >= CompressBound(*srcSizePtr)) {
 		olimit := oend

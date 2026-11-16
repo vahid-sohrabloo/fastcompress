@@ -115,7 +115,7 @@ func (c *hcCtx) compressOptimal(win []byte, srcStart int, srcSizePtr *int, dst [
 	sufficientLen := min(targetLength, optNum-1)
 
 	*srcSizePtr = 0
-	if c.parseAsmOK(win, srcStart, inputSize, dst, dstCapacity, limit, usingDictCtx) {
+	if (hcParseFull || !favorDecSpeed) && c.parseAsmOK(win, srcStart, inputSize, dst, dstCapacity, limit, usingDictCtx) {
 		a := c.newParseArgs(win, srcStart, dst, oend, limit, usingDictCtx)
 		a.attempts = nbSearches
 		a.nbSeq = nbSearchesSeq

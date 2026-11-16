@@ -19,6 +19,10 @@ func hcChainAsm(a *hcChainArgs) int
 // without attached dictionary.
 var useMidAsm bool
 
+// midDictAsm reports whether midCompressDictAsm (the external and attached
+// dictionaries) exists in assembly.
+const midDictAsm = true
+
 func init() {
 	cpu.RegisterAsm("midCompress", &useMidAsm, func() bool { return true })
 }
@@ -33,6 +37,10 @@ func midCompressDictAsm(win []byte, ip, iend, prefixIdx int, t *uint32, dst []by
 // to 9) and the optimal levels (10 to 12) for a prefix with or without an
 // external dictionary (no attached one).
 var useHCParseAsm bool
+
+// hcParseFull reports whether the assembly parsers cover the external and
+// attached dictionaries and favorDecSpeed.
+const hcParseFull = true
 
 func init() {
 	cpu.RegisterAsm("hcParse", &useHCParseAsm, func() bool { return true })
