@@ -334,18 +334,19 @@ func (d *Decompressor) decompressDefault(in, out []byte, wantIn, wantOut bool) (
 	haveDecodeTables: // C: label have_decode_tables
 		litlenTablemask = 1<<d.litlenTablebits - 1
 
-		// amd64 with BMI2 (C: deflate_decompress_bmi2): the assembly runs
-		// the iterations of the fast loop below, under the same loop
-		// condition, and returns the loop's state when the condition
+		// amd64 with BMI2 (C: deflate_decompress_bmi2) and arm64: the
+		// assembly (decompress_fastloop_{amd64,arm64}.s) runs the
+		// iterations of the fast loop below, under the same loop condition,
+		// and returns the loop's state when the condition
 		// becomes false (the Go loop below then goes to generic_loop), at
 		// the end of the block, or at a bad match offset. One call's output
 		// end is lowered to outNext + fastloopChunk (it then returns
 		// fastloopContinue at an iteration boundary) so that a huge block
 		// does not hold off a GC stop-the-world; it is called again while
 		// the real loop condition holds.
-		for useFastloopBMI2 && inNext < inFastloopEnd && outNext < outFastloopEnd {
+		for useFastloopAsm && inNext < inFastloopEnd && outNext < outFastloopEnd {
 			var status int
-			bitbuf, bitsleft, inNext, outNext, status = decompressFastloopBMI2(in, out, litlenTable, offsetTable,
+			bitbuf, bitsleft, inNext, outNext, status = decompressFastloopAsm(in, out, litlenTable, offsetTable,
 				d.litlenTablebits, inFastloopEnd, min(outFastloopEnd, outNext+fastloopChunk), bitbuf, bitsleft,
 				inNext, outNext)
 			if status == fastloopEndOfBlock {

@@ -14,7 +14,7 @@ import (
 )
 
 // Assembly equivalence of the stream decoder (decompressStream, which runs
-// decompressFastloopBMI2 through the same hook as the whole-buffer
+// decompressFastloopAsm through the same hook as the whole-buffer
 // decoder): a stream is decoded call by call as StreamReader does, with
 // the assembly off (heap buffers) and on (input window and output window
 // flush against PROT_NONE guard pages, after the end and before the
@@ -346,7 +346,7 @@ func streamAsmCases(t testing.TB, maxLen, every int) (crafted, all []streamAsmCa
 // dictionary also equals the whole-buffer decoder's result, every trace
 // with one the standard library's.
 func TestStreamAsmEquiv(t *testing.T) {
-	if !useFastloopBMI2 {
+	if !useFastloopAsm {
 		t.Log("no assembly fast loop in this build or CPU: the comparisons run the Go loop twice")
 	}
 	maxLen, every := 1<<18, 1

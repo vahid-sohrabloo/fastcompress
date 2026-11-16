@@ -1,4 +1,4 @@
-//go:build amd64 && !appengine && !noasm && !purego && gc
+//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
 
 package deflate
 
@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
@@ -37,20 +36,20 @@ func fastloopFixture(t *testing.T, tc *tcode, toks []tok, pad int) (d *Decompres
 func runFastloop(d *Decompressor, in, out []byte, tb uint32) (bitsleft uint32, inNext, outNext, status int) {
 	inEnd := len(in) - min(len(in), fastloopMaxBytesRead)
 	outEnd := len(out) - min(len(out), fastloopMaxBytesWritten)
-	_, bitsleft, inNext, outNext, status = decompressFastloopBMI2(in, out, &d.litlenDecodeTable, &d.offsetDecodeTable,
+	_, bitsleft, inNext, outNext, status = decompressFastloopAsm(in, out, &d.litlenDecodeTable, &d.offsetDecodeTable,
 		tb, inEnd, outEnd, 0, 0, 0, 0)
 	return bitsleft, inNext, outNext, status
 }
 
-// TestFastloopBMI2Statuses calls the assembly directly: a block it decodes
+// TestFastloopAsmStatuses calls the assembly directly: a block it decodes
 // to the end (fastloopEndOfBlock, with the bits consumed equal to the
 // block's), one whose output margin stops it (fastloopContinue), and a
 // match before the start of the output (fastloopBadData). A tablebits
 // above 11 is clamped (it cannot happen; without the clamp 40 faults and
 // 12 decodes garbage).
-func TestFastloopBMI2Statuses(t *testing.T) {
-	if !cpu.X86.HasBMI2 {
-		t.Skip("no BMI2")
+func TestFastloopAsmStatuses(t *testing.T) {
+	if !fastloopAsmAvailable() {
+		t.Skip("the CPU does not run the assembly fast loop (amd64 without BMI2)")
 	}
 	// inputMarginStream's code: 11-bit literals (litlen_tablebits 11),
 	// lengths and offsets up to 15 bits (subtables).
@@ -99,7 +98,7 @@ func TestFastloopBMI2Statuses(t *testing.T) {
 		inEnd := len(in) - fastloopMaxBytesRead
 		one := guardmem.After(t, len(want)+fastloopMaxBytesWritten+1)
 		outEnd := len(one) - fastloopMaxBytesWritten
-		wBitbuf, wBitsleft, wIn, wOut, wSt := decompressFastloopBMI2(in, one, &d.litlenDecodeTable, &d.offsetDecodeTable,
+		wBitbuf, wBitsleft, wIn, wOut, wSt := decompressFastloopAsm(in, one, &d.litlenDecodeTable, &d.offsetDecodeTable,
 			tb, inEnd, outEnd, 0, 0, 0, 0)
 		for _, chunk := range []int{1, 2, 7, 64, 300, 1000} {
 			out := guardmem.After(t, len(one))
@@ -107,7 +106,7 @@ func TestFastloopBMI2Statuses(t *testing.T) {
 			var bitsleft uint32
 			var inNext, outNext, st, calls int
 			for {
-				bitbuf, bitsleft, inNext, outNext, st = decompressFastloopBMI2(in, out, &d.litlenDecodeTable,
+				bitbuf, bitsleft, inNext, outNext, st = decompressFastloopAsm(in, out, &d.litlenDecodeTable,
 					&d.offsetDecodeTable, tb, inEnd, min(outEnd, outNext+chunk), bitbuf, bitsleft, inNext, outNext)
 				calls++
 				if st != fastloopContinue || inNext >= inEnd || outNext >= outEnd {

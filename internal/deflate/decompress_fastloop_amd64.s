@@ -140,7 +140,7 @@
 //     the Go loop relies on the same entries (bounds-checked).
 // (6) Only AX..R15, X0, X1 are used, BP saved and restored by the frame;
 //     nothing is written to the stack.
-TEXT ·decompressFastloopBMI2(SB), NOSPLIT, $8-160
+TEXT ·decompressFastloopAsm(SB), NOSPLIT, $8-160
 	MOVQ in_base+0(FP), SI
 	MOVQ out_base+24(FP), DI
 	MOVQ litlenTable+48(FP), R9

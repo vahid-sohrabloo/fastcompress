@@ -332,7 +332,7 @@ func TestStreamDict(t *testing.T) {
 
 // fastloopRegion returns the assembly hook and the fast loop of a decoder
 // source file, each line without its indentation: the hook from its `for
-// useFastloopBMI2` line to its closing brace, then the fast loop from the
+// useFastloopAsm` line to its closing brace, then the fast loop from the
 // margin test that enters it to the end of its loop.
 //
 // Between the two only blank and comment lines may appear; they are left
@@ -364,7 +364,7 @@ func fastloopRegion(t *testing.T, file string) []string {
 		tl := strings.TrimLeft(l, "\t")
 		switch phase {
 		case findHook:
-			if tl != "for useFastloopBMI2 && inNext < inFastloopEnd && outNext < outFastloopEnd {" {
+			if tl != "for useFastloopAsm && inNext < inFastloopEnd && outNext < outFastloopEnd {" {
 				continue
 			}
 			phase, indent = inHook, l[:len(l)-len(tl)]

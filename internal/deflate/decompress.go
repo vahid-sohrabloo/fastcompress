@@ -119,14 +119,14 @@ const (
 	_ uint = consumableNbits - (lengthMaxbits + offsetMaxbits)
 )
 
-// Status of decompressFastloopBMI2: why the assembly fast loop returned.
+// Status of decompressFastloopAsm: why the assembly fast loop returned.
 const (
 	fastloopContinue   = 0 // loop condition false: continue in the Go code
 	fastloopEndOfBlock = 1 // end-of-block codeword consumed: C's goto block_done
 	fastloopBadData    = 2 // SAFETY_CHECK(offset <= out_next - out) failed
 )
 
-// fastloopChunkOut bounds the output of one decompressFastloopBMI2 call: an
+// fastloopChunkOut bounds the output of one decompressFastloopAsm call: an
 // assembly function is not a preemption point, and a DEFLATE block has no
 // size limit (one block can expand to about 1 GiB), so decompressDefault
 // (and decompressStream) calls it again every fastloopChunkOut bytes of
@@ -217,7 +217,9 @@ func NewDecompressor() *Decompressor {
 // decompress_impl DEFAULT_IMPL). C's deflate_decompress_bmi2
 // (lib/x86/decompress_impl.h) is the same template compiled for BMI2; here
 // only its fast loop differs, so decompressDefault itself runs the assembly
-// fast loop (decompressFastloopBMI2) when useFastloopBMI2 is set.
+// fast loop (decompressFastloopAsm) when useFastloopAsm is set; on arm64 the
+// same fast loop runs in assembly too (decompress_fastloop_arm64.s; C has
+// no aarch64-specific decompressor).
 // C: decompress_impl / dispatch_decomp
 func (d *Decompressor) decompressImpl(in, out []byte, wantIn, wantOut bool) (libdeflateResult, int, int) {
 	return d.decompressDefault(in, out, wantIn, wantOut)

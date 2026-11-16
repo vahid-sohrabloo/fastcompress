@@ -11,7 +11,8 @@ import (
 	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
-// Assembly equivalence of the decoder (decompress_fastloop_amd64.s): every
+// Assembly equivalence of the decoder (decompress_fastloop_amd64.s and
+// decompress_fastloop_arm64.s): every
 // decode is run with the assembly off (the Go fast loop, on ordinary heap
 // buffers) and on, with src and dst flush against PROT_NONE guard pages
 // (both after the end and before the start), so that an access past either
@@ -192,6 +193,31 @@ func offsetStreams() []diffStream {
 	return ss
 }
 
+// sweepStreams returns, for offsets in every copy class of the assembly
+// fast loops (1; 2..7; 8..15; 16 and up, around the 16-byte pair and
+// 40-byte round sizes; up to 32768), a static block with a match of every
+// length 3..258 at that offset, each after 0..2 random literals: every copy
+// loop runs every round count and stops at every position of its last
+// round, overlapping (offset < length) and not.
+func sweepStreams() []diffStream {
+	r := rand.New(rand.NewPCG(13, 14))
+	var ss []diffStream
+	for _, o := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 15, 16, 17, 23, 24, 31, 32, 33, 39, 40, 41, 48, 80, 81,
+		255, 256, 257, 1000, 4096, 32767, 32768} {
+		toks := litsOf(rndBytes(uint64(o), o))
+		for l := 3; l <= 258; l++ {
+			for k := r.IntN(3); k > 0; k-- {
+				toks = append(toks, lit(byte(r.Uint64())))
+			}
+			toks = append(toks, match(l, o))
+		}
+		var w bitWriter
+		w.static(true, toks)
+		ss = append(ss, diffStream{fmt.Sprintf("sweep/o%d", o), w.bytes(), len(tokOutput(nil, toks))})
+	}
+	return ss
+}
+
 // refillStreams pin the two refill thresholds of the offset decode. The
 // thresholds are on bitsleft, but bitbuf holds 64 - c valid bits after c
 // bits consumed since the last refill, so a missing refill only shows when
@@ -247,7 +273,7 @@ func refillStreams() []diffStream {
 // on golden, corpus (all levels), margin-boundary, offset-sweep, mutated and
 // random streams.
 func TestDeflateAsmEquiv(t *testing.T) {
-	if !useFastloopBMI2 {
+	if !useFastloopAsm {
 		t.Log("no assembly fast loop in this build or CPU: the comparisons run the Go loop twice")
 	}
 	tests := []struct {
@@ -366,6 +392,19 @@ func TestDeflateAsmEquiv(t *testing.T) {
 				ext := append(append([]byte(nil), s.in...), make([]byte, k)...)
 				b.check(t, fmt.Sprintf("%s/ext%d", s.name, k), ext, s.size+300, false)
 			}
+		}
+	})
+	// Every match length at offsets of every copy class (sweepStreams),
+	// with the output end at and past the stream's size, and re-entered
+	// at chunk bounds.
+	t.Run("sweep", func(t *testing.T) {
+		for _, s := range sweepStreams() {
+			for _, n := range []int{s.size, s.size + 1, s.size + 300} {
+				if r := b.check(t, s.name, s.in, n, n == s.size); n == s.size && r != libdeflateSuccess {
+					t.Fatalf("%s: does not decode: %d", s.name, r)
+				}
+			}
+			b.checkChunked(t, s.name, s.in, s.size, true, []int{1, 300})
 		}
 	})
 	t.Run("refill", func(t *testing.T) {

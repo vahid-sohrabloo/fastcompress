@@ -8,7 +8,7 @@
 //   - The fast loop is a verbatim copy of the one in decompress_generic.go
 //     (TestStreamFastloopCopyIdentical keeps them identical); it only runs
 //     with C's input and output margins, so it never needs to stop early.
-//     On amd64 with BMI2 the same assembly fast loop runs first, through
+//     On amd64 with BMI2 and on arm64 the same assembly fast loop runs first, through
 //     the same hook as in decompress_generic.go.
 //   - The generic ("slow") loop is C's, with zero padding past the end of
 //     in as in C, but a symbol that consumed padding bits is undone and the
@@ -415,15 +415,15 @@ nextBlock: // C: label next_block
 haveDecodeTables: // C: label have_decode_tables
 	litlenTablemask = 1<<d.litlenTablebits - 1
 
-	// amd64 with BMI2: the assembly runs the iterations of the fast loop
+	// amd64 with BMI2, and arm64: the assembly runs the iterations of the fast loop
 	// below, as in decompress_generic.go (see the comment there), from the
 	// same state and under the same condition; its exits are the Go loop's:
 	// the loop's state when the condition becomes false, the end of the
 	// block, or a bad match offset (0, 0 as the Go loop's exit). Never in
 	// the reader's rerun: s.slow sets inFastloopEnd = 0.
-	for useFastloopBMI2 && inNext < inFastloopEnd && outNext < outFastloopEnd {
+	for useFastloopAsm && inNext < inFastloopEnd && outNext < outFastloopEnd {
 		var status int
-		bitbuf, bitsleft, inNext, outNext, status = decompressFastloopBMI2(in, out, litlenTable, offsetTable,
+		bitbuf, bitsleft, inNext, outNext, status = decompressFastloopAsm(in, out, litlenTable, offsetTable,
 			d.litlenTablebits, inFastloopEnd, min(outFastloopEnd, outNext+fastloopChunk), bitbuf, bitsleft,
 			inNext, outNext)
 		if status == fastloopEndOfBlock {

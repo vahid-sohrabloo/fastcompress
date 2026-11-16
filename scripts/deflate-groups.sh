@@ -22,7 +22,7 @@
 #   other  everything else (unit tests, decoder differential tests run standalone, ...)
 #
 # Tier full rules (conservative: when a file is not recognised, everything runs):
-#   * internal/deflate/*_amd64.s (assembly only): its area's partitions + equiv (compressor) or dec
+#   * internal/deflate/*_amd64.s, *_arm64.s (assembly only): its area's partitions + equiv (compressor) or dec
 #     (decoder), asm on only. Every other internal/deflate file (Go, *_amd64.go included: it holds the
 #     dispatch and layout code) needs its partitions in both FASTCOMPRESS_FUZZ_ASM modes, plus other, noasm
 #     and, for a non-test file, the flate, gzip and zlib packages.
@@ -121,7 +121,7 @@ for f in "${files[@]}"; do
     internal/deflate/*)
       n=$((n+1))
       mode=both
-      case "$b" in *_amd64.s) mode=on ;; *_asm_equiv_test.go) mode=on ;; esac
+      case "$b" in *_amd64.s|*_arm64.s) mode=on ;; *_asm_equiv_test.go) mode=on ;; esac
       case "$b" in
         compress_fastest*|ht_matchfinder*|compress_level1*) areas="rest equiv" ;;
         compress_greedy*|hc_matchfinder*|compress_lazy*) areas="lazy rest equiv" ;;
@@ -153,7 +153,7 @@ for f in "${files[@]}"; do
         qre+=("$kw")
         case "$b" in
           *_test.go) own=("$D/$b") ;;
-          *) stem=${b%.*}; stem=${stem%_amd64}; stem=${stem%_noasm}; own=("$D/${stem}_test.go" $D/${stem}_*_test.go) ;;
+          *) stem=${b%.*}; stem=${stem%_amd64}; stem=${stem%_arm64}; stem=${stem%_noasm}; own=("$D/${stem}_test.go" $D/${stem}_*_test.go) ;;
         esac
         for t in $(testfuncs "${own[@]}"); do qre+=("^$t\$"); done
       fi
