@@ -146,9 +146,12 @@ binary-tree match finding loop (`btMatchLoopAsm`) and the backward
 min-cost-path pass (`minCostPathAsm`). The rest of levels 10..12 and
 Adler-32 are Go only; CRC-32 is `hash/crc32`. Each routine has a fuzz
 target comparing it with the Go code. On arm64 assembly runs the decoder's
-fast loop, the level 1 loop and the hash-chain search of levels 2..9
-(`hcLongestMatchAsm`, called from the Go greedy and lazy loops); the rest is
-Go there. Every other architecture runs pure Go.
+fast loop, the level 1 loop, the lazy / lazy2 loop of levels 5..9 and the
+hash-chain search (`hcLongestMatchAsm`, which the Go greedy loop of levels
+2..4 calls), the match finder's table init / rebase (NEON), and the
+binary-tree match finding loop and the min-cost-path pass of levels 10..12;
+the block flush and the greedy loop itself are Go there. Every other
+architecture runs pure Go.
 
 ### Speed
 
@@ -198,9 +201,16 @@ klauspost.
 The decoder's margin against libdeflate depends on the CPU and on code
 layout: the fast loop's alignment is tuned, and on another CPU the same
 code measured 100.2-100.6% of libdeflate. The pure-Go build (`-tags noasm`)
-is slower and is not measured here; arm64 has not been benchmarked. The
-charts are drawn from the `bench/gzip/compare.sh` output by
-`bench/plot.py`.
+is slower and is not measured here. The charts are drawn from the
+`bench/gzip/compare.sh` output by `bench/plot.py`.
+
+**arm64.** On an arm64 server core (the same method on dickens, mozilla,
+ooffice, xml and x-ray whole; libdeflate built from source with gcc -O2),
+compression is 97.0% of libdeflate's speed at level 1, 97.5% at 6, 100.9%
+at 9 and 113.0% at 12 (geomean; the lowest row is level 1 on x-ray,
+93.5%), and decompression 97.4-98.8% by level (rows 95.6-102.2%). The
+pure-Go code ran at 57-76% of libdeflate for compression and 53-56% for
+decompression on the same core.
 
 ### Tests
 
@@ -284,6 +294,16 @@ four inputs (xml, dickens, ooffice and `silesia.tar` in 1 MiB blocks):
 
 Expect other CPUs to give different numbers. The charts are drawn from the
 `bench/compare.sh` output by `bench/plot.py`.
+
+**arm64.** On an arm64 server core (the same method on dickens, mozilla,
+ooffice, xml and x-ray whole, C built from source with gcc -O2), compression
+is 88.7% of C's speed at level 1, 88.9% at 3, 89.1% at 7, 92.3% at 11 and
+87.4% at 19 (geomean; rows 81-99%), decompression 99.9%, 98.3%, 93.3%,
+92.0% and 92.9%. Most of the remaining gap at levels 1 to 7 is in the match
+finders and the sequence encoder, which are in arm64 assembly already; the
+optimal parser is Go there (amd64 has it in assembly for levels 16 and 17),
+with the binary-tree match finder in assembly. C's own speed varied by up to
+about 8% between runs on that machine.
 
 ## LZ4
 
@@ -440,7 +460,14 @@ inlines `LZ4HC_InsertAndGetWiderMatch` into each parser, and so does the
 assembly. C's `-T1` runs its job mode with one worker thread, which costs C
 about 2% against `--single-thread`. The pure-Go build (`-tags noasm`) is
 slower (measured before the assembly: 40 to 55% of C at level 1, 15 to 25%
-for decoding); arm64 is not measured.
+for decoding).
+
+**arm64.** On an arm64 server core (the same method with 4 MiB blocks on
+dickens, mozilla, ooffice, xml and x-ray, C built from source with gcc -O2),
+compression is 102.0% of C's speed at level 1, 100.8% at 2, 104.8% at 9 and
+103.6% at 12 (geomean; the lowest row is level 2 on dickens, 92.7%), and
+decompression 97.9% (level 1) and 98.3% (level 9); the pure-Go code ran at
+37-59% of C for compression and 28-30% for decompression on the same core.
 
 The other frame modes, against C with `--single-thread` (the same method;
 xml, dickens and ooffice; equal ratios on every row): linked blocks
