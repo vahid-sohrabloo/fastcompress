@@ -1,20 +1,66 @@
 # fastcompress
 
-Pure-Go compression, ported from C. `zstd` is a port of libzstd v1.5.7 that
-exposes the public API of `klauspost/compress/zstd`; `flate`, `gzip` and
-`zlib` are a port of libdeflate v1.26; `lz4` is a port of lz4 v1.11.1. No
-cgo and no dependencies.
+Pure-Go ports of three C compression libraries, with output byte-identical
+to C and speed at or near C's:
 
-Status: work in progress.
+| package | port of | API |
+|---|---|---|
+| `zstd` | [zstd](https://github.com/facebook/zstd) v1.5.7, levels 1 to 22 | the API of [klauspost/compress/zstd](https://github.com/klauspost/compress) |
+| `flate`, `gzip`, `zlib` | [libdeflate](https://github.com/ebiggers/libdeflate) v1.26, levels 0 to 12 | the standard library's `compress/*` streams, plus libdeflate's whole-buffer API |
+| `lz4` | [lz4](https://github.com/lz4/lz4) v1.11.1, levels 1 to 12 | C's block, HC and frame API, plus `io.Writer`/`io.Reader` |
 
-- **Phase 1, the encoder, is done:** `NewWriter`, `Encoder` (`EncodeAll`,
-  the streaming `io.WriteCloser`), `EncodeTo`, `ZipCompressor` and the
-  `EOption`s.
-- **Phase 2, the decoder, is done:** `NewReader`, `Decoder` (`DecodeAll`,
-  the streaming reader), the dictionary and trainer functions, and the zip and
-  snappy helpers. Every identifier of `klauspost/compress/zstd` is exported.
-  Compression is at 101.5% and decompression at 103.2% of C libzstd v1.5.7's
-  speed overall (see [zstd speed](#zstd-speed)).
+No cgo and no dependencies. Hot loops have amd64 and arm64 assembly; every
+other platform (and the `noasm` build tag) runs the same algorithms in Go.
+The decoders are written for untrusted input (see [Safety](#safety)).
+
+```
+go get github.com/vahid-sohrabloo/fastcompress
+```
+
+## Quick start
+
+```go
+import (
+	"bytes"
+
+	"github.com/vahid-sohrabloo/fastcompress/gzip"
+	"github.com/vahid-sohrabloo/fastcompress/lz4"
+	"github.com/vahid-sohrabloo/fastcompress/zstd"
+)
+
+// zstd: the klauspost/compress/zstd API; output is C zstd's at the same level.
+enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+compressed := enc.EncodeAll(data, nil)
+dec, _ := zstd.NewReader(nil)
+plain, err := dec.DecodeAll(compressed, nil)
+
+// gzip: a drop-in for compress/gzip ...
+var buf bytes.Buffer
+w := gzip.NewWriter(&buf)
+w.Write(data)
+w.Close()
+// ... or libdeflate's whole-buffer API (levels 0 to 12).
+c, _ := gzip.NewCompressor(9)
+gz, err := c.AppendCompress(nil, data)
+out, err := gzip.NewDecompressor().AppendDecompress(nil, gz, len(data))
+
+// lz4: frames through io.Writer / io.Reader, or C's block functions.
+zw := lz4.NewWriter(&buf, lz4.WithLevel(9))
+zw.Write(data)
+zw.Close()
+zr := lz4.NewReader(&buf)
+```
+
+Each package's documentation has the full API; the sections below cover how
+it maps to C, what differs, the tests and the speed.
+
+**Byte-identical to C** means: for the same input and parameters, the
+compressed bytes equal the C library's, checked by differential tests
+against the C code over the Silesia corpus and fuzzing. The decoders accept
+and reject what C accepts and rejects, with C's error class. The few
+deliberate differences are listed per package
+([zstd](#deliberate-api-differences), [DEFLATE](#deflate-gzip-and-zlib),
+[LZ4](#lz4)).
 
 ## Speed at a glance
 
