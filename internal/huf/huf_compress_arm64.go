@@ -25,8 +25,27 @@ func init() {
 //go:noescape
 func compress1XAsm(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
 
-// compress1XAsmVariant runs compress1XAsm (arm64 has no other variant,
-// so tableLog is unused).
+// compress1XAsmX5 is compress1XAsm with 5 codes per flush (C: kUnroll 5),
+// for tableLog <= 11, with the same preconditions.
+//
+//go:noescape
+func compress1XAsmX5(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
+
+// compress1XAsmX10 is compress1XAsmX5 with 10 codes per loop iteration and
+// unclamped flushes, for tableLog <= 11 and dstLen >= srcLen*tableLog/8 +
+// 8 (C: HUF_tightCompressBound, below which C clamps).
+//
+//go:noescape
+func compress1XAsmX10(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
+
+// compress1XAsmVariant runs compress1XAsmX10, compress1XAsmX5 or
+// compress1XAsm, by tableLog and dstLen.
 func compress1XAsmVariant(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt, tableLog uint32) int {
+	if tableLog <= 11 {
+		if dstLen >= srcLen*int(tableLog)>>3+8 {
+			return compress1XAsmX10(dst, dstLen, src, srcLen, ct)
+		}
+		return compress1XAsmX5(dst, dstLen, src, srcLen, ct)
+	}
 	return compress1XAsm(dst, dstLen, src, srcLen, ct)
 }

@@ -1,4 +1,4 @@
-//go:build amd64 && !appengine && !noasm && !purego && gc
+//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
 
 package huf
 
@@ -6,30 +6,26 @@ import (
 	"bytes"
 	"math/rand/v2"
 	"testing"
-
-	"github.com/vahid-sohrabloo/fastcompress/internal/cpu"
 )
 
-// TestCompress1XAsmVariants checks every amd64 stream writer against
+// hufVariant is one assembly stream writer (hufAsmVariants lists them per
+// architecture).
+type hufVariant struct {
+	name string
+	fn   func(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
+	max  uint        // largest tableLog it accepts
+	ok   func() bool // whether the CPU runs it
+	// tight: only for dstLen >= srcLen*tableLog/8 + 8
+	tight bool
+}
+
+// TestCompress1XAsmVariants checks every assembly stream writer against
 // compress1XBodyGeneric, on every input length up to 300 and some larger
 // ones, for each table log, with dst capacities around the tight bound
-// (compress1XAsmBMI2x10's precondition) and around the size that just
+// (the tight variants' precondition) and around the size that just
 // fails (so the end-mark overflow check is exercised).
 func TestCompress1XAsmVariants(t *testing.T) {
-	type variant struct {
-		name string
-		fn   func(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int
-		max  uint // largest tableLog it accepts
-		bmi2 bool
-		// tight: only for dstLen >= srcLen*tableLog/8 + 8
-		tight bool
-	}
-	variants := []variant{
-		{"base", compress1XAsm, TableLogMax, false, false},
-		{"bmi2", compress1XAsmBMI2, TableLogMax, true, false},
-		{"bmi2x5", compress1XAsmBMI2x5, 11, true, false},
-		{"bmi2x10", compress1XAsmBMI2x10, 11, true, true},
-	}
+	variants := hufAsmVariants()
 	r := rand.New(rand.NewPCG(3, 4))
 	wksp := make([]byte, WorkspaceSize)
 	var lens []int
@@ -79,7 +75,7 @@ func TestCompress1XAsmVariants(t *testing.T) {
 				ref := make([]byte, c)
 				wn := compress1XBodyGeneric(ref, src, ct)
 				for _, v := range variants {
-					if uint(tl) > v.max || (v.bmi2 && !cpu.X86.HasBMI2) || (v.tight && c < bound) {
+					if uint(tl) > v.max || !v.ok() || (v.tight && c < bound) {
 						continue
 					}
 					dst := make([]byte, c)
@@ -97,7 +93,7 @@ func TestCompress1XAsmVariants(t *testing.T) {
 	}
 }
 
-// FuzzCompress1XAsmVariants compares the amd64 stream writers with
+// FuzzCompress1XAsmVariants compares the assembly stream writers with
 // compress1XBodyGeneric on arbitrary input, with the table built for it at
 // a table log taken from the first byte and a dst capacity from the second
 // (around the tight bound).
@@ -138,22 +134,14 @@ func FuzzCompress1XAsmVariants(f *testing.F) {
 		ref := make([]byte, c)
 		wn := compress1XBodyGeneric(ref, src, ct)
 		elts := (*[SymbolValueMax + 1]CElt)(ct[1:])
-		check := func(name string, fn func(dst *byte, dstLen int, src *byte, srcLen int, ct *CElt) int) {
-			dst := make([]byte, c)
-			gn := fn(&dst[0], c, &src[0], len(src), &elts[0])
-			if gn != wn || !bytes.Equal(dst[:gn], ref[:wn]) {
-				t.Fatalf("%s: n=%d tableLog=%d cap=%d: got %d bytes, want %d", name, len(src), tl, c, gn, wn)
+		for _, v := range hufAsmVariants() {
+			if uint(tl) > v.max || !v.ok() || (v.tight && c < bound) {
+				continue
 			}
-		}
-		check("base", compress1XAsm)
-		if !cpu.X86.HasBMI2 {
-			return
-		}
-		check("bmi2", compress1XAsmBMI2)
-		if tl <= 11 {
-			check("bmi2x5", compress1XAsmBMI2x5)
-			if c >= bound {
-				check("bmi2x10", compress1XAsmBMI2x10)
+			dst := make([]byte, c)
+			gn := v.fn(&dst[0], c, &src[0], len(src), &elts[0])
+			if gn != wn || !bytes.Equal(dst[:gn], ref[:wn]) {
+				t.Fatalf("%s: n=%d tableLog=%d cap=%d: got %d bytes, want %d", v.name, len(src), tl, c, gn, wn)
 			}
 		}
 	})
