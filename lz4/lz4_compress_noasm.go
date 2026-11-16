@@ -1,4 +1,4 @@
-//go:build !amd64 || appengine || noasm || purego || !gc
+//go:build !(amd64 || arm64) || appengine || noasm || purego || !gc
 
 package lz4
 

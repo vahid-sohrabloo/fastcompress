@@ -1,31 +1,6 @@
-//go:build amd64 && !appengine && !noasm && !purego && gc
+//go:build (amd64 || arm64) && !appengine && !noasm && !purego && gc
 
 package lz4
-
-import "github.com/vahid-sohrabloo/fastcompress/internal/cpu"
-
-// useFastAsm selects the assembly main loop of the fast compressor for
-// noDict blocks (baseline amd64 instructions only).
-var useFastAsm bool
-
-func init() {
-	cpu.RegisterAsm("compressFast", &useFastAsm, func() bool { return true })
-}
-
-//go:noescape
-func compressFast32Asm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
-
-//go:noescape
-func compressFast32NoDictAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
-
-//go:noescape
-func compressFast32FillAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
-
-//go:noescape
-func compressFast16FillAsm(src, dst []byte, table *uint16, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
-
-//go:noescape
-func compressFast16Asm(src, dst []byte, table *uint16, startIndex, accel, olimit, lowIdx, clampIdx, prefixLen, ip0, anchor0, op0, resume int) (anchor, op, status int)
 
 // compressNoDictAsm is compressGenericValidated for noDict and the byU32
 // or byU16 table, with the main loop in assembly (inputConsumed is set for
@@ -132,9 +107,6 @@ func (c *streamInternal) compressPrefixAsm(win []byte, srcStart int, dst []byte,
 	return lastLiteralsAsm(src, dst, anchor, op, maxOutputSize, od)
 }
 
-//go:noescape
-func compressFastExtAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx int, dict []byte, seqLimit int) (anchor, op, status int)
-
 // compressExtDictAsm is compressGenericValidated for usingExtDict, byU32 and
 // limitedOutput with the main loop in assembly, suspending (suspend != nil,
 // noDictIssue) where C does. ok is false when the assembly cannot run (then
@@ -143,7 +115,7 @@ func (c *streamInternal) compressExtDictAsm(src, dst []byte, dstCapacity int, od
 	acceleration int, suspend *resumeState) (int, bool) {
 	inputSize := len(src)
 	dict := c.dictRegion()
-	if !useFastAsm || od != limitedOutput || inputSize < minLength || len(dst) < dstCapacity || len(dict) == 0 ||
+	if !useFastAsm || !fastExtAsm || od != limitedOutput || inputSize < minLength || len(dst) < dstCapacity || len(dict) == 0 ||
 		uint64(c.currentOffset)+uint64(inputSize) >= 1<<31 || c.dictSize > c.currentOffset ||
 		(di == noDictIssue && c.dictSize < 64*kb && c.dictSize < c.currentOffset) {
 		return 0, false
@@ -172,16 +144,13 @@ func (c *streamInternal) compressExtDictAsm(src, dst []byte, dstCapacity int, od
 	return 0, true
 }
 
-//go:noescape
-func compressFastDictCtxAsm(src, dst []byte, table *uint32, startIndex, accel, olimit, lowIdx int, dict []byte, seqLimit int, dctx *uint32, dictDelta int) (anchor, op, status int)
-
 // compressDictCtxAsm is compressGenericValidated for usingDictCtx
 // (noDictIssue), byU32 and limitedOutput with the main loop in assembly. ok
 // is false when the assembly cannot run (then nothing changed).
 func (c *streamInternal) compressDictCtxAsm(src, dst []byte, dstCapacity int, od outputDirective, di dictIssue, acceleration int) (int, bool) {
 	inputSize := len(src)
 	dictCtx := c.dictCtx
-	if !useFastAsm || dictCtx == nil || od != limitedOutput || di != noDictIssue || inputSize < minLength || len(dst) < dstCapacity ||
+	if !useFastAsm || !fastExtAsm || dictCtx == nil || od != limitedOutput || di != noDictIssue || inputSize < minLength || len(dst) < dstCapacity ||
 		dictCtx.tableType != byU32 || uint64(c.currentOffset)+uint64(inputSize) >= 1<<31 {
 		return 0, false
 	}
