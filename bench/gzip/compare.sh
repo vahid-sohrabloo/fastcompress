@@ -342,7 +342,7 @@ LDTAG=$(git -C ref/libdeflate describe --tags --always 2>/dev/null || echo unkno
 LDVER=$(ref/ldref/ldref version 2>/dev/null | tr '\n' ' ' || true)
 CCV=$(${CC:-cc} --version 2>/dev/null | head -1 || echo unknown)
 CCFLAGS=$(make -C ref/ldref -n -B ldbench 2>/dev/null | grep -m1 -E '^(cc|gcc|clang|[^ ]*/cc)' | sed -E 's/ -o ldbench.*//; s/^[^ ]+ //' || true)
-CPUMODEL=$(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //')
+CPUMODEL=$({ grep -m1 'model name' /proc/cpuinfo || true; } | sed 's/.*: //') # none on arm64
 OUT=${OUT:-bench/results/$(date +%F)-gzip-$LABEL.md}
 mkdir -p "$(dirname "$OUT")"
 {
