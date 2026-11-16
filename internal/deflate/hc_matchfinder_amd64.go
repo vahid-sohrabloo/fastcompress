@@ -160,3 +160,12 @@ func greedyLoopAsm(pg *greedyState, freqs *deflateFreqs, stats *blockSplitStats,
 //
 //go:noescape
 func lazyLoopAsm(pg *greedyState, freqs *deflateFreqs, stats *blockSplitStats, in []byte, st *lazyLoopState)
+
+// useHCSearchAsm is false: amd64 runs the whole greedy and lazy loops in
+// assembly (greedyLoopAsm, lazyLoopAsm), not the search alone.
+const useHCSearchAsm = false
+
+// hcLongestMatchAsm is never called (useHCSearchAsm is false).
+func hcLongestMatchAsm(*hcMatchfinder, []byte, *int, int, uint32, uint32, uint32, uint32, *[2]uint32) (uint32, uint32) {
+	panic("deflate: no assembly search alone")
+}

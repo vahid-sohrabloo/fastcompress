@@ -1,4 +1,4 @@
-//go:build !amd64 || appengine || noasm || purego || !gc
+//go:build !(amd64 || arm64) || appengine || noasm || purego || !gc
 
 package deflate
 
@@ -26,3 +26,11 @@ func greedyLoopAsm(*greedyState, *deflateFreqs, *blockSplitStats, []byte, *greed
 
 // lazyLoopAsm is never called (useLazyLoopAsm is false).
 func lazyLoopAsm(*greedyState, *deflateFreqs, *blockSplitStats, []byte, *lazyLoopState) {}
+
+// useHCSearchAsm is false: no assembly search in this build.
+const useHCSearchAsm = false
+
+// hcLongestMatchAsm is never called (useHCSearchAsm is false).
+func hcLongestMatchAsm(*hcMatchfinder, []byte, *int, int, uint32, uint32, uint32, uint32, *[2]uint32) (uint32, uint32) {
+	panic("deflate: no assembly search")
+}

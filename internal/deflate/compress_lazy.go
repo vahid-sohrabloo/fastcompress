@@ -130,7 +130,7 @@ func deflateCompressLazyGeneric(c *Compressor, in []byte, os *outputBitstream, l
 
 			// Find the longest match at the current position.
 			maxLen, niceLen = adjustMaxAndNiceLen(maxLen, niceLen, inEnd-inNext)
-			curLen, curOffset := mf.longestMatch(in, &inCurBase, inNext, minLen-1, maxLen, niceLen,
+			curLen, curOffset := mf.search(in, &inCurBase, inNext, minLen-1, maxLen, niceLen,
 				maxSearchDepth, &nextHashes)
 			if curLen < minLen || (curLen == deflateMinMatchLen && curOffset > 8192) {
 				// No match found. Choose a literal.
@@ -156,7 +156,7 @@ func deflateCompressLazyGeneric(c *Compressor, in []byte, os *outputBitstream, l
 					// current position, only half the
 					// max_search_depth is used for the next one.
 					maxLen, niceLen = adjustMaxAndNiceLen(maxLen, niceLen, inEnd-inNext)
-					nextLen, nextOffset := mf.longestMatch(in, &inCurBase, inNext, curLen-1, maxLen,
+					nextLen, nextOffset := mf.search(in, &inCurBase, inNext, curLen-1, maxLen,
 						niceLen, maxSearchDepth>>1, &nextHashes)
 					inNext++
 					if lazyNextIsBetter(curLen, curOffset, nextLen, nextOffset, 2) {
@@ -171,7 +171,7 @@ func deflateCompressLazyGeneric(c *Compressor, in []byte, os *outputBitstream, l
 					if lazy2 {
 						// In lazy2 mode, look ahead another position.
 						maxLen, niceLen = adjustMaxAndNiceLen(maxLen, niceLen, inEnd-inNext)
-						nextLen, nextOffset = mf.longestMatch(in, &inCurBase, inNext, curLen-1, maxLen,
+						nextLen, nextOffset = mf.search(in, &inCurBase, inNext, curLen-1, maxLen,
 							niceLen, maxSearchDepth>>2, &nextHashes)
 						inNext++
 						if lazyNextIsBetter(curLen, curOffset, nextLen, nextOffset, 6) {

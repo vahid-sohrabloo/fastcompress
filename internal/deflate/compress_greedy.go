@@ -220,6 +220,13 @@ func deflateCompressGreedy(c *Compressor, in []byte, os *outputBitstream) {
 			var length, offset uint32
 		search:
 			for {
+				if useHCSearchAsm {
+					nh := [2]uint32{nextHash3, nextHash4}
+					length, offset = hcLongestMatchAsm(mf, in, &inCurBase, inNext, minLen-1, maxLen, niceLen,
+						maxSearchDepth, &nh)
+					nextHash3, nextHash4 = nh[0], nh[1]
+					break search
+				}
 				bestLen := minLen - 1
 				depthRemaining := maxSearchDepth
 				bestMatchptr := inNext

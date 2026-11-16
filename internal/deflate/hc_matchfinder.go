@@ -97,6 +97,17 @@ func (mf *hcMatchfinder) slideWindow() {
 // 4 bytes at inNext+1 cannot be read) nothing is searched, inserted or
 // hashed. The lazy compressors call it; deflateCompressGreedy has it
 // written out.
+// search is longestMatch, run by the assembly search hcLongestMatchAsm in
+// builds that have it (useHCSearchAsm: arm64; amd64 has the whole
+// compressor loops in assembly instead).
+func (mf *hcMatchfinder) search(in []byte, inBase *int, inNext int, bestLen, maxLen, niceLen,
+	maxSearchDepth uint32, nextHashes *[2]uint32) (length, offset uint32) {
+	if useHCSearchAsm {
+		return hcLongestMatchAsm(mf, in, inBase, inNext, bestLen, maxLen, niceLen, maxSearchDepth, nextHashes)
+	}
+	return mf.longestMatch(in, inBase, inNext, bestLen, maxLen, niceLen, maxSearchDepth, nextHashes)
+}
+
 // port of hc_matchfinder_longest_match
 func (mf *hcMatchfinder) longestMatch(in []byte, inBase *int, inNext int, bestLen, maxLen, niceLen,
 	maxSearchDepth uint32, nextHashes *[2]uint32) (length, offset uint32) {
