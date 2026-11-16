@@ -13,8 +13,50 @@ Status: work in progress.
 - **Phase 2, the decoder, is done:** `NewReader`, `Decoder` (`DecodeAll`,
   the streaming reader), the dictionary and trainer functions, and the zip and
   snappy helpers. Every identifier of `klauspost/compress/zstd` is exported.
-  Compression is at 100.3% and decompression at 102.6% of C libzstd v1.5.7's
+  Compression is at 101.5% and decompression at 103.2% of C libzstd v1.5.7's
   speed overall (see [zstd speed](#zstd-speed)).
+
+## Speed at a glance
+
+Single-threaded, one core, against the C library each package ports and
+the other Go libraries for the same format. Speeds are the geometric mean
+of the percentage of C's speed per row; ratios are geometric means too.
+Our output is byte-identical to C's, so our ratio is C's; the other Go
+libraries produce different output, so compare their speed together with
+their ratio. For decompression every library decodes the same C-made data.
+
+**zstd** against C zstd v1.5.7 and klauspost/compress/zstd v1.20.3 (16
+Silesia rows per level; [details](#zstd-speed)):
+
+| level | compression: ours / klauspost | ratio: C and ours / klauspost | decompression: ours / klauspost |
+|---|---|---|---|
+| 1 | 100.3% / 71.7% | 2.877 / 2.844 | 102.1% / 82.7% |
+| 3 | 97.8% / 74.5% | 3.146 / 3.087 | 103.8% / 87.6% |
+| 7 | 102.4% / 160.4% | 3.453 / 3.236 | 103.8% / 87.4% |
+| 11 | 105.6% / 73.8% | 3.591 / 3.483 | 103.0% / 86.7% |
+| all | 101.5% / 89.2% | 3.255 / 3.154 | 103.2% / 86.1% |
+
+**DEFLATE** against libdeflate v1.26, Go's `compress/flate` and
+klauspost/compress/flate v1.20.3 (15 Silesia rows per level; the Go
+libraries have no levels 10 to 12; [details](#speed)):
+
+| level | compression: ours / `compress/flate` / klauspost | ratio: libdeflate and ours / the other two | decompression: ours / `compress/flate` / klauspost |
+|---|---|---|---|
+| 1 | 101.6% / 88.4% / 105.5% | 2.810 / 2.592 | 98.8% / 22.4% / 30.3% |
+| 3 | 99.1% / 106.9% / 127.3% | 2.950 / 2.755 | 97.6% / 21.7% / 28.6% |
+| 6 | 98.7% / 105.8% / 125.7% | 3.097 / 2.973 | 97.9% / 21.9% / 29.6% |
+| 9 | 97.9% / 54.7% / 62.4% | 3.147 / 3.095 | 97.4% / 23.0% / 30.5% |
+| 12 | 118.2% / - / - | 3.253 / - | 97.4% / - / - |
+
+**LZ4** against C lz4 v1.11.1 and pierrec/lz4/v4 v4.1.33 (frames of 4 MiB
+blocks; xml, dickens and ooffice; pierrec's levels mapped as described in
+[its comparison](#compared-with-pierrecl4)):
+
+| level | compression: ours / pierrec | ratio: C and ours / pierrec | decompression: ours / pierrec |
+|---|---|---|---|
+| 1 | 104.3% / 58.1% | 2.172 / 2.312 | 102.0% / 76.1% |
+| 9 | 106.5% / 111.3% | 3.022 / 2.866 | 100.6% / 78.9% |
+| 12 | 105.8% / 175.8% | 3.050 / 2.867 | 100.5% / 79.5% |
 
 ## Encoder output
 
@@ -172,13 +214,19 @@ Go standard library and klauspost produce other output (2-9% larger than
 libdeflate's at the same level number), so the chart plots speed against
 compression ratio. A point further up and to the right is better.
 
-| level | % of libdeflate's speed (geomean) | lowest row |
-|---|---|---|
-| 1 | 101.6% | 99.5% (ooffice) |
-| 3 | 99.1% | 96.5% (nci) |
-| 6 | 98.7% | 74.1% (nci; the other 14 rows are 96-101%) |
-| 9 | 98.0% | 86.4% (`silesia.tar`, 128 KiB blocks) |
-| 12 | 118.2% | 104.3% (sao) |
+| level | ours, % of libdeflate's speed (geomean) | ours, lowest row | Go `compress/flate`, % of libdeflate | klauspost, % of libdeflate | ratio, libdeflate and ours | ratio, `compress/flate` and klauspost |
+|---|---|---|---|---|---|---|
+| 1 | 101.6% | 99.5% (ooffice) | 88.4% | 105.5% | 2.810 | 2.592 |
+| 3 | 99.1% | 96.5% (nci) | 106.9% | 127.3% | 2.950 | 2.755 |
+| 6 | 98.7% | 74.1% (nci; the other 14 rows are 96-101%) | 105.8% | 125.7% | 3.097 | 2.973 |
+| 9 | 97.9% | 86.4% (`silesia.tar`, 128 KiB blocks) | 54.7% | 62.4% | 3.147 | 3.095 |
+| 12 | 118.2% | 104.3% (sao) | - | - | 3.253 | - |
+
+Ratios are geometric means over the 15 rows of each level. Go 1.27's
+`compress/flate` and klauspost produce the same compressed size on 59 of
+the 60 rows (on the other, level 9 on `silesia.tar` in 128 KiB blocks,
+the ratios are 3.046 and 3.045), so they share a ratio column; klauspost is the faster of the two. At levels 3 and 6 both
+are faster than libdeflate and compress 4-7% less.
 
 ![DEFLATE decompression: % of libdeflate](bench/img/deflate-decompress.svg)
 
@@ -250,13 +298,18 @@ levels are its own and do not match C's, so the chart plots speed against
 compression ratio instead of speed alone. A point further up and to the
 right is better.
 
-| level | % of C's speed (geomean) | lowest row |
-|---|---|---|
-| 1 | 100.3% | 97.2% (x-ray) |
-| 3 | 97.8% | 81.2% (xml)* |
-| 7 | 102.3% | 98.1% (`silesia.tar`, 16 KiB blocks) |
-| 11 | 105.6% | 95.2% (reymont) |
-| all | 101.5% | |
+| level | ours, % of C's speed (geomean) | ours, lowest row | klauspost, % of C's speed | ratio, C and ours | ratio, klauspost |
+|---|---|---|---|---|---|
+| 1 | 100.3% | 97.2% (x-ray) | 71.7% | 2.877 | 2.844 |
+| 3 | 97.8% | 81.2% (xml)* | 74.5% | 3.146 | 3.087 |
+| 7 | 102.4% | 98.1% (`silesia.tar`, 16 KiB blocks) | 160.4% | 3.453 | 3.236 |
+| 11 | 105.6% | 95.2% (reymont) | 73.8% | 3.591 | 3.483 |
+| all | 101.5% | | 89.2% | 3.255 | 3.154 |
+
+Ratios are geometric means over the 16 rows of each level. klauspost's
+`SpeedBetterCompression` (level 7) is faster than C's level 7 because it
+compresses less (6.3% below C's ratio); its other levels are 25-28% slower
+than C and compress 1-3% less.
 
 \* The xml row at level 3 swings between runs on a shared machine (81% in
 this run, 87% and 98.5% in earlier ones); on a quiet core it measures
@@ -517,6 +570,44 @@ of C); the ratios are equal, linked frames included (C's job output):
 Level 9 scales 6.8 times from 1 to 8 threads (C 7.5 times, from a slower
 start); level 1 at 8 threads (2.5 GB/s) is within noise of C. The 2-thread
 independent row's C value was low in each of its runs.
+
+#### Compared with pierrec/lz4
+
+[pierrec/lz4/v4](https://github.com/pierrec/lz4) v4.1.33 is timed by
+`bench/compare-lz4.sh -p` (`bench/lz4`, a nested module) with the same
+method, interleaved with C and ours: one reused `lz4.Writer` per pass
+(independent blocks, no checksums, `ConcurrencyOption(1)`, 4 MiB writes),
+and for decompression one reused `lz4.Reader` decoding our frames, which
+are C's, so all three decoders see the same input. pierrec's levels are its
+own: level 1 runs its default `Fast` compressor, level 9 `CompressorHC`
+`Level1` (up to 512 candidates per position, the nearest to C's 256 at
+level 9) and level 12 `Level9` (its highest; pierrec has no optimal
+parser). Its output differs from C's, so its ratio is shown. A separate
+run from the table above (median of three interleaved runs, 3 s each).
+
+![LZ4 compression: speed vs ratio](bench/img/lz4-compress.svg)
+
+| file, level | compression: ours / pierrec (% of C) | ratio: C and ours / pierrec | decompression: ours / pierrec (% of C) |
+|---|---|---|---|
+| xml, 1 | 102.0% / 72.0% | 4.542 / 4.715 | 102.9% / 76.1% |
+| xml, 9 | 104.4% / 98.5% | 6.928 / 6.435 | 101.4% / 72.8% |
+| xml, 12 | 105.3% / 179.4% | 7.021 / 6.442 | 101.4% / 74.1% |
+| dickens, 1 | 103.8% / 58.7% | 1.591 / 1.824 | 100.4% / 79.1% |
+| dickens, 9 | 107.4% / 104.1% | 2.295 / 2.186 | 98.6% / 82.5% |
+| dickens, 12 | 103.6% / 147.9% | 2.324 / 2.187 | 99.3% / 82.9% |
+| ooffice, 1 | 107.1% / 46.4% | 1.418 / 1.437 | 102.6% / 73.2% |
+| ooffice, 9 | 107.8% / 134.4% | 1.735 / 1.673 | 101.7% / 81.8% |
+| ooffice, 12 | 108.7% / 204.6% | 1.739 / 1.673 | 100.9% / 81.8% |
+| `silesia.tar` 64 KiB, 1 | 106.8% / 76.4% | 2.084 / 2.093 | 101.2% / 77.5% |
+| `silesia.tar` 64 KiB, 9 | 106.9% / 170.5% | 2.475 / 2.381 | 101.2% / 75.7% |
+| `silesia.tar` 64 KiB, 12 | 109.7% / 329.6% | 2.489 / 2.382 | 100.9% / 75.4% |
+
+pierrec's `Fast` compresses more than C's level 1 (6.4% higher ratio,
+geomean of the 4 MiB rows) at 58% of its speed. Its HC levels compress 5-6% less than C's levels 9
+and 12 and are faster on most rows (geomean 111.3% and 175.8% of C);
+`Level1` and `Level9` give almost the same ratio. It decodes at 73-83% of
+C's speed. The chart is drawn from the `silesia.tar` rows by
+`bench/plot.py`.
 
 ### Tests
 
