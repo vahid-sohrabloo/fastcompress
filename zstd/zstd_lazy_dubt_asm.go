@@ -60,7 +60,7 @@ func insertBt1Loop(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, b
 // btAsmSetup prepares ms.btAsm for compressBlockOptGeneric's noDict
 // searches (with their match table) or btlazy2's (matches nil) over a
 // block ending at iend (a position in ms.window.base), for mls 4 to 6, and
-// on amd64 (btAsmMls3) for the optimal parser's mls 3, which adds its hash3
+// (btAsmMls3) for the optimal parser's mls 3, which adds its hash3
 // table: then 0 < hashLog3 (so a hash3 is below 1<<hashLog3 <=
 // len(hashTable3)) and baseIdx <= ms.nextToUpdate3, which compressBlockOptGeneric
 // has just set to nextToUpdate. Every later value of nextToUpdate3 is the

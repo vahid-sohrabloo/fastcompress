@@ -302,17 +302,24 @@ bbad:
 #define BP_DICTLIMIT 80
 #define BP_SUFF 84
 #define BP_ILIMIT 88
+#define BP_HASH3 104
+#define BP_NEXT3 112
+#define BP_H3SHIFT 120
+#define BP_MLS3 124
 
 // func btGetAllNoDictAsm(p *btAsmParams, ip int, rep *[repNum]uint32, ll0, lengthToBeat uint32) (mnum uint32, bad bool)
 //
-// C: zstd_opt.c:ZSTD_btGetAllMatches_internal (noDict, mls 4 to 6): the
+// C: zstd_opt.c:ZSTD_btGetAllMatches_internal (noDict, mls 3 to 6): the
 // skip check, the tree update (ZSTD_updateTree_internal with
 // ZSTD_insertBt1) and ZSTD_insertBtAndGetAllMatches, as zstd_lazy_dubt_amd64.s (see
-// it for the bounds). Registers as in the functions above, with R15
-// windowLow while updating, then matchLow; R21 bestLength, R22 mnum, R23
-// matchEndIdx, R24 curr, R25 p, R26 the position being inserted (C's idx).
-// Frame: 8(RSP) dummy32, 16(RSP) hash, 24(RSP) windowLow.
-TEXT ·btGetAllNoDictAsm(SB), NOSPLIT, $32-37
+// it for the bounds), with mls 3 (p.mls3: repcodes compare 3 bytes, the
+// HC3 match finder through *p.nextToUpdate3 runs before the tree search).
+// Registers as in the functions above, with R15 windowLow while updating,
+// then matchLow; R21 bestLength, R22 mnum, R23 matchEndIdx, R24 curr, R25
+// p, R26 the position being inserted (C's idx).
+// Frame: 8(RSP) dummy32, 16(RSP) hash, 24(RSP) windowLow, 32(RSP)
+// minMatch (3 or 4), 40(RSP) the mask of its bytes in a 32-bit load.
+TEXT ·btGetAllNoDictAsm(SB), NOSPLIT, $48-37
 	MOVD  p+0(FP), R25
 	MOVD  BP_BT(R25), R0
 	MOVD  BP_B(R25), R1
@@ -474,6 +481,18 @@ search:
 	SUB   $1, R21               // bestLength (lengthToBeat >= 1)
 	ADDW  $9, R24, R23          // matchEndIdx = curr + 8 + 1
 
+	// minMatch = mls == 3 ? 3 : 4
+	MOVD  $4, R16
+	MOVD  $0xffffffff, R17
+	MOVWU BP_MLS3(R25), R19
+	CBZW  R19, mmset
+	MOVD  $3, R16
+	MOVD  $0x00ffffff, R17
+
+mmset:
+	MOVD  R16, 32(RSP)
+	MOVD  R17, 40(RSP)
+
 	// repcodes: R7 repCode in [ll0, R8 = ll0 + 3)
 	MOVWU ll0+24(FP), R7
 	ADDW  $3, R7, R8
@@ -505,13 +524,16 @@ repgot:
 	SUB   R17, R4, R16          // b + ip - repOffset
 	MOVWU (R16), R19
 	MOVWU (R4), R20
-	CMPW  R19, R20
-	BNE   repnext
-	// repLen = count(ip+4, ip+4-repOffset, iLimit) + 4
-	ADD   $4, R16
-	ADD   $4, R4, R5
+	EORW  R19, R20, R20
+	MOVWU 40(RSP), R19
+	ANDW  R19, R20, R20
+	CBNZW R20, repnext          // ZSTD_readMINMATCH(ip, minMatch) == ZSTD_readMINMATCH(ip - repOffset, minMatch)
+	// repLen = count(ip+minMatch, ip+minMatch-repOffset, iLimit) + minMatch
+	MOVD  32(RSP), R19
+	ADD   R19, R16
+	ADD   R19, R4, R5
 	SUB   R2, R3, R10
-	SUB   $4, R10
+	SUB   R19, R10
 	MOVD  ZR, R11
 
 rc8:
@@ -542,7 +564,8 @@ rctail:
 	B     rctail
 
 rcdone:
-	ADD   $4, R11               // repLen
+	MOVD  32(RSP), R19
+	ADD   R19, R11              // repLen
 	CMP   R21, R11
 	BLE   repnext
 	MOVD  R11, R21
@@ -570,6 +593,108 @@ repret:
 	RET
 
 repdone:
+	// HC3 match finder: mls 3 and bestLength < 3
+	MOVWU BP_MLS3(R25), R16
+	CBZW  R16, hupdate
+	CMP   $3, R21
+	BGE   hupdate
+
+	// matchIndex3 = ZSTD_insertAndFindFirstIndexHash3: hashTable3[hash3]
+	// = idx for idx in [nextToUpdate3, curr), then nextToUpdate3 = curr;
+	// hash3 = ((le32 << 8) * prime3bytes) >> (32 - hashLog3). R5 ->
+	// nextToUpdate3, R6 idx, R7 prime3bytes, R10 hashTable3, R11 the shift.
+	MOVD  BP_NEXT3(R25), R5
+	MOVWU (R5), R6
+	MOVD  BP_HASH3(R25), R10
+	MOVWU BP_H3SHIFT(R25), R11
+	MOVW  $0x1e35a7bd, R7
+
+h3loop:
+	CMPW  R24, R6
+	BHS   h3found
+	SUBW  R13, R6, R16          // its position (zero-extended)
+	MOVWU (R1)(R16), R16
+	LSLW  $8, R16
+	MULW  R7, R16
+	LSRW  R11, R16
+	MOVW  R6, (R10)(R16<<2)
+	ADDW  $1, R6
+	B     h3loop
+
+h3found:
+	MOVW  R24, (R5)             // nextToUpdate3 = curr
+	MOVWU (R4), R16
+	LSLW  $8, R16
+	MULW  R7, R16
+	LSRW  R11, R16
+	MOVWU (R10)(R16<<2), R10    // matchIndex3
+	CMPW  R15, R10
+	BLO   hupdate               // matchIndex3 < matchLow
+	SUBW  R10, R24, R6          // curr - matchIndex3
+	MOVW  $0x40000, R16
+	CMPW  R16, R6
+	BHS   hupdate               // heuristic : longer distance likely too expensive (1<<18)
+	SUBW  R13, R10, R16         // its position (zero-extended)
+	CMP   R2, R16
+	BHS   gbad                  // not before ip (impossible)
+
+	// mlen = count(ip, match, iLimit)
+	ADD   R1, R16, R16
+	SUB   R2, R3, R17
+	MOVD  ZR, R11
+
+h3c8:
+	ADD   $8, R11, R19
+	CMP   R17, R19
+	BHI   h3ctail
+	MOVD  (R16)(R11), R19
+	MOVD  (R4)(R11), R20
+	EOR   R19, R20, R20
+	CBNZ  R20, h3cdiff
+	ADD   $8, R11
+	B     h3c8
+
+h3cdiff:
+	RBIT  R20, R20
+	CLZ   R20, R20
+	ADD   R20>>3, R11, R11
+	B     h3cdone
+
+h3ctail:
+	CMP   R17, R11
+	BHS   h3cdone
+	MOVBU (R16)(R11), R19
+	MOVBU (R4)(R11), R20
+	CMPW  R19, R20
+	BNE   h3cdone
+	ADD   $1, R11
+	B     h3ctail
+
+h3cdone:
+	// save best solution: mlen >= 3 (> bestLength), matches[0] (no prior one)
+	CMP   $3, R11
+	BLO   hupdate
+	MOVD  R11, R21              // bestLength
+	MOVD  BP_MATCHES(R25), R16
+	ADDW  $3, R6, R19
+	MOVW  R19, (R16)            // off = offsetToOffBase(curr - matchIndex3)
+	MOVW  R11, 4(R16)           // len
+	MOVD  $1, R22               // mnum
+	MOVWU BP_SUFF(R25), R19
+	CMP   R19, R11
+	BHI   h3ret                 // mlen > sufficientLen: best possible length
+	ADD   R2, R11, R19
+	CMP   R3, R19
+	BNE   hupdate
+
+h3ret:
+	MOVD  BP_NEXT(R25), R16
+	ADDW  $1, R24, R19
+	MOVW  R19, (R16)            // nextToUpdate = curr + 1: skip insertion
+	MOVW  R22, mnum+32(FP)
+	RET
+
+hupdate:
 	// hashTable[h] = curr
 	MOVD  16(RSP), R16
 	MOVD  BP_HASH(R25), R17
