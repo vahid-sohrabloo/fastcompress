@@ -66,7 +66,7 @@ Setup: `ref/fetch.sh` builds `ref/lz4/programs/lz4` and fetches the Silesia corp
 
 ## compare-lz4.sh
 
-    bench/compare-lz4.sh [-mode c|d] [-l "1 2 9 12"] [-f "FILE..."] [-B BLOCK] [-D] [-S] [-i SECS] [-g SECS] [-n RUNS] -label NAME
+    bench/compare-lz4.sh [-mode c|d] [-l "1 2 9 12"] [-f "FILE..."] [-B BLOCK] [-D] [-S] [-p] [-i SECS] [-g SECS] [-n RUNS] -label NAME
 
 Writes `bench/results/<date>-lz4-<label>.md` with columns
 `file | level | C MB/s | Go MB/s | % of C | C ratio | Go ratio`, plus the geometric mean of "% of C" per level. Every cell is the median of `-n` (default 3) runs, C and Go interleaved, each pinned with `taskset -c $CPU` (default 2). Keep the machine idle, in particular `$CPU`'s SMT sibling. A row whose ratios differ is flagged `MISMATCH` (the output must be byte-identical).
@@ -78,3 +78,13 @@ C side: `lz4 -b<L> -T1 -B<BLOCK> -i<SECS> FILE` (default `-B4M`). bench.c compre
     go run ./bench/cmd/lz4bench [-mode c|d] [-level N] [-block N] [-linked] [-secs S] [-cpuprofile F] FILE
 
 Mirrors bench.c: one `lz4.FrameCompressor` reused across passes (`Begin`, one `Update` per 4 MiB chunk or per custom-size block with autoFlush, `End`; `CompressFrame` for a file smaller than the block), `lz4.AppendDecompressFrame` into a buffer of the file's size for `-mode d`, the same timing statistic. `-linked` uses linked blocks (`lz4 -BD`). Prints `MB/s ratio`; it checks that the decoded output equals the input.
+
+`-p` adds [pierrec/lz4/v4](https://github.com/pierrec/lz4) as three more columns (`pierrec MB/s | pierrec % of C | pierrec ratio`, and its geomean per level), run interleaved with C and Go by `bench/lz4` (independent blocks of 64K, 256K, 1M or 4M only).
+
+## bench/lz4 (pierrec/lz4)
+
+    (cd bench/lz4 && go run . [-mode c|d] [-level N] [-plevel N] [-block N] [-secs S] FILE)
+
+A nested module, so the root module never depends on pierrec/lz4. The same method as lz4bench: one reused `lz4.Writer` per pass (independent blocks, no checksums, `ConcurrencyOption(1)`, one `Write` per 4 MiB chunk, `Close`), or with `-mode d` one reused `lz4.Reader` decoding the frame that this port's `FrameCompressor` produces for the same level and block size (C's frame), so every decoder sees the same input. pierrec's levels are its own: `-level 1` runs its `Fast` compressor, 2 to 9 `CompressorHC` `Level1` (512 candidates, the nearest to C's 256 at level 9), 10 to 12 `Level9` (its highest); `-plevel N` (0 = `Fast`, 1 to 9 = `LevelN`) overrides the mapping. Its compressed frames are checked with this port's decoder. Prints `MB/s ratio`; the ratio is pierrec's own with `-mode c` and that of the decoded frame with `-mode d`.
+
+`python3 bench/plot.py lz4 RESULTS.md bench/img` draws `bench/img/lz4-compress.svg` (speed against ratio) from a `-p` compression result of one file.

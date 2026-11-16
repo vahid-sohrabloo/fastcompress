@@ -4,6 +4,7 @@
 usage:
   python3 bench/plot.py zstd COMPRESS.md DECOMPRESS.md OUTDIR   (bench/compare.sh -k, -mode c and d)
   python3 bench/plot.py gzip RESULTS.md OUTDIR                  (bench/gzip/compare.sh -mode both)
+  python3 bench/plot.py lz4 COMPRESS.md OUTDIR                  (bench/compare-lz4.sh -p, -mode c)
 
 Compression is drawn as speed against compression ratio on one input
 (silesia.tar in independent blocks), one point per level and library: the
@@ -15,6 +16,7 @@ every row. Every library decodes the same compressed data (C's, which ours
 reproduces byte for byte), so the bars compare like with like.
 """
 import math
+import re
 import sys
 
 import matplotlib
@@ -23,12 +25,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.ticker  # noqa: E402
 
-COLORS = {"C": "#6b7280", "ours": "#2563eb", "stdlib": "#16a34a", "klauspost": "#ea580c"}
+COLORS = {"C": "#6b7280", "ours": "#2563eb", "stdlib": "#16a34a", "klauspost": "#ea580c",
+          "pierrec": "#9333ea"}
 MARKERS = {
     "C": dict(marker="o", markersize=11, fillstyle="none", markeredgewidth=2),
     "ours": dict(marker="o", markersize=6),
     "stdlib": dict(marker="^", markersize=7),
     "klauspost": dict(marker="s", markersize=6),
+    "pierrec": dict(marker="D", markersize=6),
 }
 
 
@@ -69,6 +73,18 @@ def gzip_rows(path):
         out[mode].append(dict(file=c[0], level=int(c[1]), block=c[2],
                               C=num(c[3]), ours=num(c[4]), std=num(c[8]), kp=num(c[9]),
                               rC=num(c[6]), rours=num(c[6]), rstd=num(c[10]), rkp=num(c[11])))
+    return out
+
+
+def lz4_rows(path):
+    """Rows of a bench/compare-lz4.sh -p table."""
+    out = []
+    for line in open(path):
+        c = cells(line)
+        if len(c) < 10 or not c[1].lstrip("-").isdigit():
+            continue
+        out.append(dict(file=c[0], level=int(c[1]), C=num(c[2]), ours=num(c[3]), p=num(c[7]),
+                        rC=num(c[5]), rours=num(c[6]), rp=num(c[9])))
     return out
 
 
@@ -174,12 +190,28 @@ def gzip(path, outdir):
                    f"{outdir}/deflate-decompress.svg")
 
 
+def lz4(cpath, outdir):
+    c = lz4_rows(cpath)
+    files = sorted({r["file"] for r in c})
+    if len(files) != 1:
+        sys.exit(f"{cpath}: want rows of one file, got {files}")
+    m = re.search(r" -B(\d+[KM]?)\b", open(cpath).read())
+    blocks = {"64K": "64 KiB", "256K": "256 KiB", "1M": "1 MiB", "4M": "4 MiB"}.get(m.group(1), m.group(1)) if m else "?"
+    speed_ratio_chart(c, [("C", "C lz4 1.11.1", "C", "rC"),
+                          ("ours", "fastcompress", "ours", "rours"),
+                          ("pierrec", "pierrec/lz4", "p", "rp")],
+                      f"LZ4 compression: speed vs ratio ({files[0]}, {blocks} blocks)",
+                      f"{outdir}/lz4-compress.svg")
+
+
 def main():
     a = sys.argv[1:]
     if len(a) == 4 and a[0] == "zstd":
         zstd(*a[1:])
     elif len(a) == 3 and a[0] == "gzip":
         gzip(*a[1:])
+    elif len(a) == 3 and a[0] == "lz4":
+        lz4(*a[1:])
     else:
         sys.exit(__doc__)
 
