@@ -145,8 +145,10 @@ table init / rebase (SSE2), and, for the near-optimal levels 10..12, the
 binary-tree match finding loop (`btMatchLoopAsm`) and the backward
 min-cost-path pass (`minCostPathAsm`). The rest of levels 10..12 and
 Adler-32 are Go only; CRC-32 is `hash/crc32`. Each routine has a fuzz
-target comparing it with the Go code. arm64 and every other architecture
-run pure Go: there is no arm64 assembly, and arm64 is only tested on CI.
+target comparing it with the Go code. On arm64 assembly runs the decoder's
+fast loop, the level 1 loop and the hash-chain search of levels 2..9
+(`hcLongestMatchAsm`, called from the Go greedy and lazy loops); the rest is
+Go there. Every other architecture runs pure Go.
 
 ### Speed
 
@@ -240,11 +242,16 @@ right is better.
 
 | level | % of C's speed (geomean) | lowest row |
 |---|---|---|
-| 1 | 96.4% | 91.3% (ooffice) |
-| 3 | 98.8% | 95.0% (sao) |
-| 7 | 101.3% | 90.1% (`silesia.tar`, 128 KiB blocks) |
-| 11 | 105.0% | 97.3% (osdb) |
-| all | 100.3% | |
+| 1 | 100.3% | 97.2% (x-ray) |
+| 3 | 97.8% | 81.2% (xml)* |
+| 7 | 102.3% | 98.1% (`silesia.tar`, 16 KiB blocks) |
+| 11 | 105.6% | 95.2% (reymont) |
+| all | 101.5% | |
+
+\* The xml row at level 3 swings between runs on a shared machine (81% in
+this run, 87% and 98.5% in earlier ones); on a quiet core it measures
+about 101% of C. Without it, level 3's lowest row is 94.2% (`silesia.tar`,
+4 MiB blocks).
 
 ![zstd decompression: % of C](bench/img/zstd-decompress.svg)
 
@@ -254,14 +261,14 @@ percentage of C's speed:
 
 | level | ours | klauspost |
 |---|---|---|
-| 1 | 102.1% | 83.5% |
-| 3 | 103.4% | 88.1% |
-| 7 | 102.3% | 86.1% |
-| 11 | 102.4% | 86.4% |
-| all | 102.6% | 86.0% |
+| 1 | 102.1% | 82.7% |
+| 3 | 103.8% | 87.6% |
+| 7 | 103.8% | 87.4% |
+| 11 | 103.0% | 86.7% |
+| all | 103.2% | 86.1% |
 
-Our lowest decompression row is `mozilla` at level 7 (91.0%). klauspost
-falls to about 66% of C on the 128 KiB and 16 KiB rows.
+Our lowest decompression row is `silesia.tar` in 16 KiB blocks at level 1
+(95.8%). klauspost falls to about 66% of C on the 128 KiB and 16 KiB rows.
 
 **Higher levels (13 to 22).** Ported from C as well (btultra, btultra2, the
 post-block splitter and long-distance matching), reached with
@@ -391,9 +398,13 @@ fuzz target comparing it with the Go code.
 Baseline instructions only (SSE2; no BMI2 or AVX2 needed): 16-byte match
 compares measured slower than 8-byte ones on the short matches that
 dominate, except in LZ4MID's count past the first 8 bytes.
-arm64 and the other architectures run the Go code, tested in CI's way
-(`GOARCH=arm64 go vet`, `-tags noasm` test runs); arm64 speed is not
-measured.
+On arm64 assembly runs the decoder's fast loop, the fast compressor's
+main loop (one-shot, the streaming prefix mode with its resume and
+`destSize`; external and attached dictionaries run the Go loop), the LZ4MID
+loop without dictionary, the candidate loop of the hash chain search, and
+the whole hash chain and optimal parsers for a prefix without dictionary and
+without `favorDecSpeed` (the other modes run the Go parsers with the
+assembly candidate loop). The other architectures run the Go code.
 
 ### Speed
 
