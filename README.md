@@ -209,7 +209,7 @@ ooffice, xml and x-ray whole; libdeflate built from source with gcc -O2),
 compression is 97.0% of libdeflate's speed at level 1, 97.5% at 6, 100.9%
 at 9 and 113.0% at 12 (geomean; the lowest row is level 1 on x-ray,
 93.5%), and decompression 97.4-98.8% by level (rows 95.6-102.2%). The
-pure-Go code ran at 57-76% of libdeflate for compression and 53-56% for
+pure-Go code ran at 57-76% of libdeflate for compression and 52-56% for
 decompression on the same core.
 
 ### Tests
