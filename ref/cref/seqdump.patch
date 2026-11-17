@@ -1,0 +1,42 @@
+--- zstd_compress.c
++++ zstd_compress.c
+@@ -4101,6 +4101,11 @@
+  *
+  * Returns the total size of that block (including header) or a ZSTD error code.
+  */
++/* fastcompress cref: seqStore dump hook. NULL (a no-op) unless cref's seqs mode sets it.
++ * type: 0 = raw block, 1 = compressed block, 2 = RLE block. seqStore is NULL when
++ * ZSTD_buildSeqStore declined to build one (tiny block, emitted raw). */
++void (*ZSTD_crefHook)(const SeqStore_t* seqStore, size_t srcSize, int type) = NULL;
++
+ static size_t
+ ZSTD_compressSeqStore_singleBlock(ZSTD_CCtx* zc,
+                             const SeqStore_t* const seqStore,
+@@ -4141,6 +4146,9 @@
+         cSeqsSize = 1;
+     }
+ 
++    if (ZSTD_crefHook)
++        ZSTD_crefHook(seqStore, srcSize, cSeqsSize == 0 ? 0 : (cSeqsSize == 1 ? 2 : 1));
++
+     /* Sequence collection not supported when block splitting */
+     if (zc->seqCollector.collectSequences) {
+         FORWARD_IF_ERROR(ZSTD_copyBlockSequences(&zc->seqCollector, seqStore, dRepOriginal.rep), "copyBlockSequences failed");
+@@ -4400,6 +4408,7 @@
+         FORWARD_IF_ERROR(bss, "ZSTD_buildSeqStore failed");
+         if (bss == ZSTDbss_noCompress) {
+             RETURN_ERROR_IF(zc->seqCollector.collectSequences, sequenceProducer_failed, "Uncompressible block");
++            if (ZSTD_crefHook) ZSTD_crefHook(NULL, srcSize, 0);
+             cSize = 0;
+             goto out;
+         }
+@@ -4433,6 +4442,9 @@
+         op[0] = ip[0];
+     }
+ 
++    if (ZSTD_crefHook && !ZSTD_isError(cSize))
++        ZSTD_crefHook(&zc->seqStore, srcSize, cSize == 0 ? 0 : (cSize == 1 ? 2 : 1));
++
+ out:
+     if (!ZSTD_isError(cSize) && cSize > 1) {
+         ZSTD_blockState_confirmRepcodesAndEntropyTables(&zc->blockState);

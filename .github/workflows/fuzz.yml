@@ -1,0 +1,85 @@
+name: fuzz
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZSTD_TAG: v1.5.7
+  # Must match LDTAG in ref/fetch.sh (the cache key of ref/libdeflate).
+  LIBDEFLATE_TAG: v1.26
+  # Must match LZ4TAG in ref/fetch.sh (the cache key of ref/lz4).
+  LZ4_TAG: v1.11.1
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.suite }}, ${{ matrix.runner }}, asm=${{ matrix.asm }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        asm: ["on", "off", nobmi2]
+        # deflate = the gzip/DEFLATE packages, zstd = every other package:
+        # all targets at 10m each do not fit in one job's 360 minutes.
+        suite: [zstd, deflate]
+        exclude:
+          # BMI2 is x86 only: on arm64 nobmi2 is the same run as on.
+          - runner: ubuntu-24.04-arm
+            asm: nobmi2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cache C reference (zstd source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/zstd
+          key: zstd-${{ env.ZSTD_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Cache C reference (libdeflate source)
+        uses: actions/cache@v4
+        with:
+          path: ref/libdeflate
+          key: libdeflate-${{ env.LIBDEFLATE_TAG }}
+      - name: Cache C reference (lz4 source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/lz4
+          key: lz4-${{ env.LZ4_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch C zstd and libdeflate, build the zstd CLI (no corpus)
+        run: ref/fetch.sh --no-corpus
+      - name: Build cref
+        run: make -C ref/cref
+      - name: Build ldref
+        run: make -C ref/ldref
+      # lz4ref: the lz4 v1.11.1 driver of the lz4 differential tests.
+      - name: Build lz4ref
+        run: make -C ref/lz4ref
+      - name: Fuzz (10m per target)
+        env:
+          FASTCOMPRESS_FUZZ_ASM: ${{ matrix.asm }}
+          SUITE: ${{ matrix.suite }}
+        run: |
+          deflate='/(flate|gzip|zlib|internal/deflate|internal/deflatetest|internal/adler32)$'
+          if [ "$SUITE" = deflate ]; then sel=(grep -E "$deflate"); else sel=(grep -Ev "$deflate"); fi
+          args=()
+          for p in $(go list ./... | "${sel[@]}"); do args+=(-p "$p"); done
+          scripts/fuzz.sh -t 10m "${args[@]}"
+      - name: Collect failing inputs
+        if: failure() || cancelled()
+        run: |
+          mkdir -p fuzz-findings
+          git ls-files -z --others --exclude-standard -- '*/testdata/fuzz/*' | xargs -0 -r cp --parents -t fuzz-findings
+      - name: Upload failing inputs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings-${{ matrix.suite }}-${{ matrix.runner }}-${{ matrix.asm }}
+          path: fuzz-findings
+          if-no-files-found: ignore

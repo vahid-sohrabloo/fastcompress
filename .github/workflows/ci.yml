@@ -1,0 +1,294 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  ZSTD_TAG: v1.5.7
+  # Must match LDTAG in ref/fetch.sh (the cache key of ref/libdeflate).
+  LIBDEFLATE_TAG: v1.26
+  # Must match LZ4TAG in ref/fetch.sh (the cache key of ref/lz4).
+  LZ4_TAG: v1.11.1
+
+jobs:
+  test:
+    name: test (${{ matrix.runner }}, ${{ matrix.group }})
+    runs-on: ${{ matrix.runner }}
+    # Every go test has -timeout 60m per package; a job runs two long ones
+    # (default and noasm) plus the setup. packages runs zstd, flate, gzip,
+    # zlib and the rest side by side (-p = cores), so it gets more room.
+    # zstd has groups of its own (measured on 2 cores: TestAsmEquiv about
+    # 55 min, the rest about 25 min per pass).
+    timeout-minutes: ${{ (matrix.group == 'packages' || matrix.group == 'zstd') && 240 || matrix.group == 'zstdasm' && 180 || 150 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        # internal/deflate is split into the partitions of
+        # scripts/deflate-groups.sh (-regex; disjoint, together the whole
+        # package; other is the -skip of the rest): unsplit, its full suite
+        # can exceed the 60m test timeout on a small runner (the ldref cache
+        # is off under CI). zstdasm = zstd's TestAsmEquiv; zstd = the rest of
+        # ./zstd; packages = every other package; short = the 386 and race
+        # -short passes of ./... (X64 only) and the API check.
+        group: [lazy, nopt, rest, equiv, dec, other, zstdasm, zstd, packages, short]
+    env:
+      GROUP: ${{ matrix.group }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cache C reference (zstd source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/zstd
+          key: zstd-${{ env.ZSTD_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Cache C reference (libdeflate source)
+        uses: actions/cache@v4
+        with:
+          path: ref/libdeflate
+          key: libdeflate-${{ env.LIBDEFLATE_TAG }}
+      - name: Cache C reference (lz4 source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/lz4
+          key: lz4-${{ env.LZ4_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      # The flate, gzip, zlib and zstd differential tests read Silesia
+      # (bench/corpus/silesia and silesia.tar) and fail when it is missing.
+      - name: Cache Silesia corpus
+        uses: actions/cache@v4
+        with:
+          path: bench/corpus
+          key: silesia-${{ hashFiles('ref/fetch.sh') }}
+      - name: Fetch C zstd, libdeflate and the Silesia corpus, build the zstd CLI
+        run: ref/fetch.sh
+      # internal/creftest fails (rather than skips) under CI=true when cref or
+      # ldref is missing.
+      - name: Build cref
+        run: make -C ref/cref
+      # ldref (and ldbench): the libdeflate v1.26 driver of the internal/deflate,
+      # flate, gzip and zlib differential tests (all steps below, 386 included:
+      # ldref runs natively).
+      - name: Build ldref
+        run: make -C ref/ldref
+      # lz4ref: the lz4 v1.11.1 driver of the lz4 differential tests.
+      - name: Build lz4ref
+        run: make -C ref/lz4ref
+      # The group's selection: the packages, or ./internal/deflate with the
+      # partition's -run regex (other: -skip of the other partitions). The
+      # noasm pass also runs every Fuzz target's seed corpus with the
+      # assembly compiled out.
+      - name: Test
+        if: matrix.group != 'short'
+        run: |
+          timeout=60m
+          if [ "$GROUP" = packages ]; then
+            pkgs=$(go list ./... | grep -Ev '/(internal/deflate|zstd)$')
+            args=($pkgs)
+          elif [ "$GROUP" = zstd ]; then
+            args=(-skip '^TestAsmEquiv$' ./zstd)
+            timeout=120m
+          elif [ "$GROUP" = zstdasm ]; then
+            # The cref suite once per assembly mode (about 55 min on 2
+            # cores). Under noasm it is the cref suite once, which the zstd
+            # group runs already: one pass.
+            go test -timeout 150m -run '^TestAsmEquiv$' ./zstd
+            exit 0
+          else
+            re=$(scripts/deflate-groups.sh -regex "$GROUP")
+            [ -n "$re" ] || { echo "empty regex for $GROUP"; exit 1; }
+            flag=-run
+            [ "$GROUP" = other ] && flag=-skip
+            args=("$flag" "$re" ./internal/deflate)
+          fi
+          go test -timeout "$timeout" "${args[@]}"
+          echo "::group::noasm"
+          go test -timeout "$timeout" -tags noasm "${args[@]}"
+          echo "::endgroup::"
+      - name: Test (386, short)
+        if: matrix.group == 'short' && runner.arch == 'X64'
+        env:
+          GOARCH: "386"
+        run: go test -timeout 60m -short ./...
+      - name: Test (race)
+        if: matrix.group == 'short' && runner.arch == 'X64'
+        # The race runtime needs cgo on linux/amd64. The library itself has no
+        # cgo; this is test tooling only.
+        # The DEFLATE packages run no goroutines outside their concurrency
+        # tests, so their heavy differential/exhaustive tests skip or shrink
+        # under -race (raceEnabled) and run in full in the steps above.
+        # Measured -race -short on the GitHub runner: internal/deflate 1163 s,
+        # lz4 647 s, zlib 179 s, gzip 121 s, others under 100 s; zstd (which
+        # skips TestAsmEquiv under -race) about 30 min on a loaded laptop.
+        # -timeout is per package.
+        env:
+          CGO_ENABLED: "1"
+        run: go test -timeout 60m -race -short ./...
+      - name: API check (full)
+        if: matrix.group == 'short'
+        run: scripts/apicheck.sh
+
+  fuzz-coverage:
+    # Its own job: about 40 minutes of zstd coverage, a few of DEFLATE
+    # coverage and about 15 of fuzzing, run in parallel with test.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cache C reference (zstd source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/zstd
+          key: zstd-${{ env.ZSTD_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Cache C reference (libdeflate source)
+        uses: actions/cache@v4
+        with:
+          path: ref/libdeflate
+          key: libdeflate-${{ env.LIBDEFLATE_TAG }}
+      - name: Cache C reference (lz4 source and CLI)
+        uses: actions/cache@v4
+        with:
+          path: ref/lz4
+          key: lz4-${{ env.LZ4_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      # The DEFLATE coverage gate's -short tests read Silesia.
+      - name: Cache Silesia corpus
+        uses: actions/cache@v4
+        with:
+          path: bench/corpus
+          key: silesia-${{ hashFiles('ref/fetch.sh') }}
+      - name: Fetch C zstd, libdeflate and the Silesia corpus, build the zstd CLI
+        run: ref/fetch.sh
+      - name: Build cref
+        run: make -C ref/cref
+      - name: Build ldref
+        run: make -C ref/ldref
+      # lz4ref: the lz4 v1.11.1 driver of the lz4 differential tests.
+      - name: Build lz4ref
+        run: make -C ref/lz4ref
+      - name: Fuzz (20s per target)
+        run: scripts/fuzz.sh -t 20s
+      - name: Collect failing inputs
+        if: failure() || cancelled()
+        run: |
+          mkdir -p fuzz-findings
+          git ls-files -z --others --exclude-standard -- '*/testdata/fuzz/*' | xargs -0 -r cp --parents -t fuzz-findings
+      - name: Upload failing inputs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: fuzz-findings
+          if-no-files-found: ignore
+      - name: Coverage gate (decoder files, 95% of statements)
+        run: |
+          # -short: the full zstd suite under coverage runs over 90 minutes.
+          go test -short -timeout 60m -coverprofile=cover.out ./zstd ./internal/huf
+          awk '
+            FNR == 1 { next }
+            {
+              split($1, a, ":"); f = a[1]
+              if (f ~ /\/zstd\/zstd_decompress[^\/]*\.go$/) nz++
+              else if (f ~ /\/internal\/huf\/huf_decompress[^\/]*\.go$/) nh++
+              else next
+              n[f, $1] = $2; files[f] = 1
+              if ($3 > 0) hit[f, $1] = 1
+            }
+            END {
+              for (k in n) { split(k, p, SUBSEP); tot[p[1]] += n[k]; if (k in hit) cov[p[1]] += n[k] }
+              bad = 0
+              for (f in files) {
+                pct = 100 * cov[f] / tot[f]
+                printf "%-72s %6.2f%% (%d/%d)\n", f, pct, cov[f], tot[f]
+                if (pct < 95) { print "  below 95%"; bad = 1 }
+              }
+              if (nz == 0) { print "no zstd/zstd_decompress*.go in the profile"; bad = 1 }
+              if (nh == 0) { print "no internal/huf/huf_decompress*.go in the profile"; bad = 1 }
+              exit bad
+            }' cover.out
+      - name: Coverage gate (DEFLATE core files, 95% of statements)
+        run: |
+          # Decoder: decompress*, decode_table*, static_codes; compressor core:
+          # compress*, huffman, *matchfinder* (internal/deflate).
+          go test -short -timeout 60m -coverprofile=cover-deflate.out ./internal/deflate
+          awk '
+            FNR == 1 { next }
+            {
+              split($1, a, ":"); f = a[1]
+              if (f ~ /\/internal\/deflate\/(decompress[^\/]*|decode_table[^\/]*|static_codes)\.go$/) nd++
+              else if (f ~ /\/internal\/deflate\/(compress[^\/]*|huffman|[^\/]*matchfinder[^\/]*)\.go$/) nc++
+              else next
+              n[f, $1] = $2; files[f] = 1
+              if ($3 > 0) hit[f, $1] = 1
+            }
+            END {
+              for (k in n) { split(k, p, SUBSEP); tot[p[1]] += n[k]; if (k in hit) cov[p[1]] += n[k] }
+              bad = 0
+              for (f in files) {
+                pct = 100 * cov[f] / tot[f]
+                printf "%-72s %6.2f%% (%d/%d)\n", f, pct, cov[f], tot[f]
+                if (pct < 95) { print "  below 95%"; bad = 1 }
+              }
+              if (nd == 0) { print "no internal/deflate decoder files in the profile"; bad = 1 }
+              if (nc == 0) { print "no internal/deflate compressor files in the profile"; bad = 1 }
+              exit bad
+            }' cover-deflate.out
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: go vet (noasm)
+        run: go vet -tags noasm ./...
+      - name: go vet (386)
+        env:
+          GOARCH: "386"
+        run: go vet ./...
+      - name: go vet (arm64)
+        env:
+          GOARCH: arm64
+        run: go vet ./...
+      - name: Decoder safety check
+        run: scripts/decodercheck.sh
+
+  cross-build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: "386"}
+          - {goos: linux, goarch: arm}
+          - {goos: linux, goarch: ppc64le}
+          - {goos: linux, goarch: s390x}
+          - {goos: linux, goarch: riscv64}
+          - {goos: darwin, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./...

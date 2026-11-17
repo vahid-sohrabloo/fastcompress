@@ -1,0 +1,46 @@
+# Normalised `go doc -all` lines (scripts/apicheck.sh) where ./flate differs
+# textually from the standard library's compress/flate.
+#   "+ line": only in ./flate (an addition, or our spelling of a declaration
+#             the standard library spells differently)
+#   "- line": only in compress/flate (spelled differently here: receiver or
+#             parameter names, named results, HuffmanOnly declared outside
+#             the const block)
+# The types and signatures behind every "-" line are the same in both;
+# flate/apiparity_test.go checks that with go/types and reflect, and its
+# apiExtras lists every addition with the reason.
+- const ( | HuffmanOnly = -2
+- func (w *Writer) Close() error
+- func (w *Writer) Flush() error
+- func (w *Writer) Reset(dst io.Writer)
+- func (w *Writer) Write(data []byte) (n int, err error)
++ const ( | Level10 = 10
++ const ( | Level11 = 11
++ const ( | Level12 = 12
++ const ( | MaxLevel = Level12
++ const DefaultMaxOutput = 1 << 30
++ const HuffmanOnly = deflate.HuffmanOnly
++ func (c *Compressor) AppendCompress(dst, src []byte) ([]byte, error)
++ func (c *Compressor) Compress(dst, src []byte) (n int, err error)
++ func (c *Compressor) CompressBound(n int) int
++ func (c *Compressor) Level() int
++ func (d *Decompressor) AppendDecompress(dst, src []byte, sizeHint int) ([]byte, error)
++ func (d *Decompressor) Decompress(dst, src []byte) (n int, err error)
++ func (d *Decompressor) DecompressEx(dst, src []byte) (nIn, nOut int, err error)
++ func (d *Decompressor) MaxOutput() int
++ func (d *Decompressor) SetMaxOutput(n int)
++ func (z *Writer) Close() error
++ func (z *Writer) Flush() error
++ func (z *Writer) Reset(w io.Writer)
++ func (z *Writer) Write(p []byte) (int, error)
++ func CompressBound(n int) int
++ func NewCompressor(level int) (*Compressor, error)
++ func NewDecompressor() *Decompressor
++ type Compressor struct {
++ type Decompressor struct {
++ var (
++ var ( | ErrBadData = deflate.ErrBadData
++ var ( | ErrInsufficientSpace = deflate.ErrInsufficientSpace
++ var ( | ErrInvalidLevel = deflate.ErrInvalidLevel
++ var ( | ErrOutputLimit = fmt.Errorf("deflate: decompressed data exceeds the output limit: %w", ErrInsufficientSpace)
++ var ( | ErrShortBuffer = errors.New("deflate: output buffer too small for the compressed data")
++ var ( | ErrShortOutput = deflate.ErrShortOutput
