@@ -23,6 +23,9 @@
 #define P_CHAIN 112(R15)
 #define P_CHAINMASK 120(R15)
 #define P_BT 128(R15)
+#define P_DICTBASE 136(R15)
+#define P_DICTBASEIDX 144(R15)
+#define P_DICTLIMIT 148(R15)
 
 // The same fields off R9, where the row finder keeps p (C keeps ms there).
 #define Q_HASHTABLE 0(R9)
@@ -40,6 +43,9 @@
 #define Q_ISDICT 80(R9)
 #define Q_ILIMIT 96(R9)
 #define Q_SKIP 104(R9)
+#define Q_DICTBASE 136(R9)
+#define Q_DICTBASEIDX 144(R9)
+#define Q_DICTLIMIT 148(R9)
 
 // Lazy-parser frame.
 #define L_IP 0(SP)

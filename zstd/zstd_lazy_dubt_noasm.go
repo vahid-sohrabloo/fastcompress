@@ -35,3 +35,20 @@ func lazyBtRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLow
 func dubtFindBestMatchFast(ms *matchState, ip, iend int) (int, uint32, bool) {
 	return 0, 0, false
 }
+
+func insertDUBT1ExtDict(ms *matchState, curr uint32, inputEnd int, nbCompares, btLow uint32) {
+	insertDUBT1ExtDictGeneric(ms, curr, inputEnd, nbCompares, btLow)
+}
+
+func dubtSearchExtDict(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLow, windowLow uint32) (int, uint32, uint32) {
+	return dubtSearchExtDictGeneric(ms, ip, iend, curr, matchIndex, nbCompares, btLow, windowLow)
+}
+
+func insertBt1ExtLoop(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLow, windowLow uint32) (int, uint32, bool) {
+	return 0, 0, false
+}
+
+func btWalkExt(matches *[optSize]optMatch, ms *matchState, ip, iLimit int, curr, matchIndex, nbCompares, btLow, matchLow, mnum uint32,
+	bestLength int) (uint32, uint32, bool) {
+	return 0, 0, false
+}

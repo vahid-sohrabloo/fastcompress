@@ -88,3 +88,9 @@ func lazyRow66(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilim
 	rep1, rep2 uint32, depth int) (ipOut, anchorOut, nSeq, nLits int, rep1Out, rep2Out, llType, llPos uint32)
 func rowSearch66()
 func rowUpd66()
+
+// lazyRowExtRun: the extDict lazy parser has no arm64 assembly yet.
+func lazyRowExtRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit int,
+	offset1, offset2 uint32, depth int, mls, rowLog uint32) (int, int, uint32, uint32, bool) {
+	return ip, anchor, offset1, offset2, false
+}

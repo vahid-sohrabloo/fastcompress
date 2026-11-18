@@ -966,10 +966,12 @@ func rowFindBestMatchExtDict(ms *matchState, ip, iLimit int, mls, rowLog uint32)
 	return ml, offBase
 }
 
-// insertDUBT1ExtDict. C: zstd_lazy.c:ZSTD_insertDUBT1 with dictMode
+// insertDUBT1ExtDictGeneric. C: zstd_lazy.c:ZSTD_insertDUBT1 with dictMode
 // ZSTD_extDict; see insertDUBT1. curr (an unsorted candidate) may lie in
 // the extDict: it is then compared within the extDict only.
-func insertDUBT1ExtDict(ms *matchState, curr uint32, inputEnd int, nbCompares, btLow uint32) {
+// insertDUBT1ExtDict (zstd_lazy_dubt_*.go) runs it, or the same loop in
+// assembly.
+func insertDUBT1ExtDictGeneric(ms *matchState, curr uint32, inputEnd int, nbCompares, btLow uint32) {
 	bt := ms.chainTable
 	btLog := ms.cParams.chainLog - 1
 	btMask := uint32(1)<<btLog - 1
@@ -1081,7 +1083,6 @@ func dubtFindBestMatchExtDict(ms *matchState, ip, iend int, mls uint32) (int, ui
 	nbCompares := uint32(1) << cParams.searchLog
 	nbCandidates := nbCompares
 	var previousCandidate uint32
-	offBase := uint32(offBaseNotFound)
 
 	// reach end of unsorted candidates list
 	for matchIndex > unsortLimit && bt[nextCandidate+1] == dubtUnsortedMark && nbCandidates > 1 {
@@ -1109,19 +1110,34 @@ func dubtFindBestMatchExtDict(ms *matchState, ip, iend int, mls uint32) (int, ui
 	}
 
 	// find longest match
+	matchIndex = hashTable[h]
+	hashTable[h] = curr // Update Hash Table
+	bestLength, offBase, matchEndIdx := dubtSearchExtDict(ms, ip, iend, curr, matchIndex, nbCompares, btLow, windowLow)
+
+	ms.nextToUpdate = matchEndIdx - 8 // skip repetitive patterns
+	return bestLength, offBase
+}
+
+// dubtSearchExtDictGeneric is dubtSearchGeneric for a window with an
+// extDict (C: zstd_lazy.c:ZSTD_DUBT_findBestMatch, "find longest match",
+// dictMode ZSTD_extDict). dubtSearchExtDict (zstd_lazy_dubt_*.go) runs it,
+// or the same loop in assembly.
+func dubtSearchExtDictGeneric(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLow, windowLow uint32) (int, uint32, uint32) {
+	bt := ms.chainTable
+	btMask := uint32(1)<<(ms.cParams.chainLog-1) - 1
+	w := &ms.window
+	b, baseIdx := w.base, w.baseIdx
 	d, dictBaseIdx := w.dictBase, w.dictBaseIdx
 	dictLimit := w.dictLimit
 	dictEnd := int(dictLimit - dictBaseIdx)
 	prefixStart := int(dictLimit - baseIdx)
+	offBase := uint32(offBaseNotFound)
 	var commonLengthSmaller, commonLengthLarger int
 	smallerPtr := &bt[2*(curr&btMask)]
 	largerPtr := &bt[2*(curr&btMask)+1]
 	matchEndIdx := curr + 8 + 1
 	var dummy32 uint32 // to be nullified at the end
 	bestLength := 0
-
-	matchIndex = hashTable[h]
-	hashTable[h] = curr // Update Hash Table
 
 	for ; nbCompares > 0 && matchIndex > windowLow; nbCompares-- {
 		nextPtr := bt[2*(matchIndex&btMask):][:2]
@@ -1179,8 +1195,7 @@ func dubtFindBestMatchExtDict(ms *matchState, ip, iend int, mls uint32) (int, ui
 	*largerPtr = 0
 	*smallerPtr = 0
 
-	ms.nextToUpdate = matchEndIdx - 8 // skip repetitive patterns
-	return bestLength, offBase
+	return bestLength, offBase, matchEndIdx
 }
 
 // btFindBestMatchExtDict. C: zstd_lazy.c:ZSTD_BtFindBestMatch with dictMode
@@ -1312,6 +1327,9 @@ func compressBlockLazyExtDictGeneric(ms *matchState, ss *seqStore, rep *[repNum]
 	}
 	if method == searchRowHash {
 		rowFillHashCache(ms, b, baseIdx, mls, ms.nextToUpdate, ilimit)
+		// The whole match loop in assembly when it can run; the Go loop
+		// below then has nothing left to do (ip >= ilimit).
+		ip, anchor, offset1, offset2, _ = lazyRowExtRun(ms, ss, ip, anchor, iend, ilimit, offset1, offset2, depth, mls, rowLog)
 	}
 
 	// Match Loop

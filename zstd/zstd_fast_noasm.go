@@ -5,3 +5,7 @@ package zstd
 func compressBlockFastNoDict(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, mls uint32) int {
 	return compressBlockFastNoDictGeneric(ms, ss, rep, src, srcIdx, mls)
 }
+
+func compressBlockFastExtDictMls(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, mls uint32) int {
+	return compressBlockFastExtDictGeneric(ms, ss, rep, src, srcIdx, mls)
+}

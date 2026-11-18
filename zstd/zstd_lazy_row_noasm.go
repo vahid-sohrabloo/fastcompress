@@ -12,3 +12,9 @@ func lazyRowRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit, prefixLo
 	offset1, offset2 uint32, depth int, mls, rowLog uint32) (int, int, uint32, uint32, bool) {
 	return ip, anchor, offset1, offset2, false
 }
+
+// lazyRowExtRun: the extDict lazy parser has no assembly here.
+func lazyRowExtRun(ms *matchState, ss *seqStore, ip, anchor, iend, ilimit int,
+	offset1, offset2 uint32, depth int, mls, rowLog uint32) (int, int, uint32, uint32, bool) {
+	return ip, anchor, offset1, offset2, false
+}

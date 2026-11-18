@@ -92,7 +92,7 @@ func compressBlockDoubleFastExtDict(ms *matchState, ss *seqStore, rep *[repNum]u
 	if mls < 4 || mls > 7 {
 		mls = 4 // includes case 3
 	}
-	return compressBlockDoubleFastExtDictGeneric(ms, ss, rep, src, srcIdx, mls)
+	return compressBlockDoubleFastExtDictMls(ms, ss, rep, src, srcIdx, mls)
 }
 
 // compressBlockDoubleFastExtDictGeneric.

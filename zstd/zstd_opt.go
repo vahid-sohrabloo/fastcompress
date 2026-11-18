@@ -713,6 +713,12 @@ func insertBt1ExtDict(ms *matchState, ip, iend int, target, mls uint32) uint32 {
 
 	hashTable[h] = curr // Update Hash Table
 
+	if bl, me, ok := insertBt1ExtLoop(ms, ip, iend, curr, matchIndex, nbCompares, btLow, windowLow); ok {
+		// The walk is done and the tree's open ends are cleared.
+		bestLength, matchEndIdx = bl, me
+		nbCompares = 0
+		smallerPtr, largerPtr = &dummy32, &dummy32
+	}
 	for ; nbCompares > 0 && matchIndex >= windowLow; nbCompares-- {
 		nextPtr := bt[2*(matchIndex&btMask):][:2]
 		matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes
@@ -881,6 +887,12 @@ func insertBtAndGetAllMatchesExtDict(matches *[optSize]optMatch, ms *matchState,
 
 	hashTable[h] = curr // Update Hash Table
 
+	if n, me, ok := btWalkExt(matches, ms, ip, iLimit, curr, matchIndex, nbCompares, btLow, matchLow, mnum, bestLength); ok {
+		// The walk is done and the tree's open ends are cleared.
+		mnum, matchEndIdx = n, me
+		nbCompares = 0
+		smallerPtr, largerPtr = &dummy32, &dummy32
+	}
 	for ; nbCompares > 0 && matchIndex >= matchLow; nbCompares-- {
 		nextPtr := bt[2*(matchIndex&btMask):][:2]
 		matchLength := min(commonLengthSmaller, commonLengthLarger) // guaranteed minimum nb of common bytes

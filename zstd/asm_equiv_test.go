@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand/v2"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -291,7 +292,125 @@ func FuzzEncodeAsmEquiv(f *testing.F) {
 		if !bytes.Equal(got, src) {
 			t.Fatalf("cctx L%d mode %d: C decode mismatch", lv, mode)
 		}
+
+		// With a small window and no dictionary, also stream src: the
+		// context's input buffer (window + block) wraps, so the blocks
+		// after the first window run the extDict compressors.
+		if wlog != 0 && dict == nil {
+			sc := streamCase{level: lv, windowLog: wlog, chunk: 1 + int(mode>>2)*997}
+			var off, on []byte
+			withAsm(t, false, func() { off = cctxStream(t, sc, src) })
+			withAsm(t, true, func() { on = cctxStream(t, sc, src) })
+			if !bytes.Equal(off, on) {
+				t.Fatalf("stream %v: assembly changes the output (%d vs %d bytes)", sc, len(on), len(off))
+			}
+			if got := creftest.DecodeC(t, on); !bytes.Equal(got, src) {
+				t.Fatalf("stream %v: C decode mismatch", sc)
+			}
+		}
 	})
+}
+
+// TestAsmEquivStreamExtDict streams inputs of eight windows through a
+// context at every level from 1 to 19, with windows of 2^10 to 2^17, so
+// that its input buffer (window + block) wraps and the extDict block
+// compressors run (C: ZSTD_compressBlock_*_extDict), the extDict starting
+// at changing offsets of the buffer and matches crossing the
+// extDict/prefix boundary. The frames with the assembly off and on must
+// be equal and decode with C, and with the assembly on the extDict blocks
+// must have run it (every extDict block of fast, double-fast and the row
+// lazy parsers runs its match loop in assembly, the binary-tree ones call
+// it per search; matchState.asmLoopRuns + asmCalls count both, the noDict
+// blocks of the first window included).
+func TestAsmEquivStreamExtDict(t *testing.T) {
+	text := readTestdata(t, "dickens-32k.raw")
+	r := rand.New(rand.NewPCG(21, 22))
+	windowLogs := []uint32{10, 12, 14, 17}
+	levels := 19
+	if testing.Short() {
+		windowLogs = []uint32{10, 14}
+		levels = 16
+	}
+	for _, wlog := range windowLogs {
+		// Text with repeats from a window or more back (into the extDict),
+		// random runs, and runs copied across the window's size.
+		size := 8 << wlog
+		src := make([]byte, 0, size)
+		for len(src) < size { // not cap(src): an append past it makes cap grow
+			switch r.IntN(4) {
+			case 0:
+				for range 1 + r.IntN(512) {
+					src = append(src, byte(r.Uint32()))
+				}
+			case 1:
+				if len(src) > 1<<wlog {
+					from := len(src) - (1 << wlog) - r.IntN(256) + r.IntN(512)
+					from = max(0, min(from, len(src)-1))
+					n := min(1+r.IntN(2<<wlog), len(src)-from)
+					src = append(src, src[from:from+n]...)
+				}
+			default:
+				chunk := text[r.IntN(len(text)/2):]
+				src = append(src, chunk[:min(len(chunk), 1+r.IntN(4096))]...)
+			}
+		}
+		src = src[:8<<wlog]
+		for lv := 1; lv <= levels; lv++ {
+			sc := streamCase{level: lv, windowLog: wlog}
+			var off, on []byte
+			var runs int
+			stream := func() []byte {
+				c := newCCtx()
+				c.setLevel(lv)
+				if err := c.setWindowLog(wlog); err != nil {
+					t.Fatal(err)
+				}
+				var res []byte
+				buf := make([]byte, 0, cStreamOutSize)
+				pos := 0
+				for _, n := range sc.chunks(len(src)) {
+					op := eContinue
+					in := src[pos : pos+n]
+					pos += n
+					if pos == len(src) {
+						op = eEnd
+					}
+					for {
+						out, consumed, remaining, err := c.compressStream2(buf, in, op)
+						if err != nil {
+							t.Fatalf("%v: %v", sc, err)
+						}
+						res = append(res, out...)
+						in = in[consumed:]
+						if op == eContinue && len(in) == 0 || op != eContinue && remaining == 0 {
+							break
+						}
+					}
+				}
+				ms := &c.blockState.matchState
+				runs = ms.asmLoopRuns + ms.asmCalls
+				return res
+			}
+			var ext extDictRuns
+			ext.install(t)
+			withAsm(t, false, func() { off = stream() })
+			ext.take()
+			withAsm(t, true, func() { on = stream() })
+			extBlocks := 0
+			for _, n := range ext.take() {
+				extBlocks += n
+			}
+			if !bytes.Equal(off, on) {
+				t.Fatalf("%v: assembly changes the output (%d vs %d bytes)%s", sc, len(on), len(off), firstDiff(on, off))
+			}
+			if got := creftest.DecodeC(t, on); !bytes.Equal(got, src) {
+				t.Fatalf("%v: C decode mismatch", sc)
+			}
+			if len(cpu.AsmRoutines()) > 0 && runtime.GOARCH == "amd64" && extBlocks > 0 && runs < extBlocks {
+				t.Fatalf("%v: %d extDict blocks, but the assembly ran only %d times", sc, extBlocks, runs)
+			}
+		}
+	}
 }
 
 // TestAsmEquivParams compresses one input with explicit compression
