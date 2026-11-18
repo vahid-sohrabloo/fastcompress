@@ -121,13 +121,21 @@ is bounded by `WithDecoderMaxMemory`. CI enforces this:
   default.
 - `WithSingleSegment` is accepted and ignored: the frame header follows C's
   automatic choice, so output stays identical to C.
-- `WithConcurrentBlocks` and `WithLowerEncoderMem` are accepted and have no
-  effect. Encoding is single-threaded per call (C's `nbWorkers = 0`).
-  `WithEncoderConcurrency(n)` caps the number of concurrent `EncodeAll` calls;
-  with `n > 1` (the default on multi-core machines) the streaming Writer
-  compresses on a background goroutine while `Write` fills the next 512 KiB
-  buffer, as klauspost's does. The output is byte-identical either way, and
-  `n = 1` keeps the stream synchronous.
+- `WithConcurrentBlocks(true)` with `WithEncoderConcurrency(n)`, `n > 1`, is
+  C's multithreaded compressor (zstdmt, `ZSTD_c_nbWorkers = n`) for the
+  streaming Writer and for `EncodeAll` inputs above 512 KiB: the input is cut
+  into C's jobs (`ZSTD_c_jobSize` and `ZSTD_c_overlapLog` at C's defaults)
+  that up to `n` goroutines compress at once. The output is byte-identical to
+  C v1.5.7 with `nbWorkers` set, and the same for every `n > 1` (C's is the
+  same for every `nbWorkers >= 1`), but it is not the single-threaded output.
+  With `n = 1` the flag has no effect. C's rsyncable mode is not available.
+  `WithLowerEncoderMem` is accepted and has no effect. Without
+  `WithConcurrentBlocks`, encoding is single-threaded per call (C's
+  `nbWorkers = 0`): `WithEncoderConcurrency(n)` caps the number of concurrent
+  `EncodeAll` calls; with `n > 1` (the default on multi-core machines) the
+  streaming Writer compresses on a background goroutine while `Write` fills
+  the next 512 KiB buffer, as klauspost's does. The output is byte-identical
+  either way, and `n = 1` keeps the stream synchronous.
 - `BuildDict` returns C's `ZDICT_finalizeDictionary` output. Non-zero
   `Offsets` replace C's starting repcodes {1, 4, 8} (the history is
   zero-padded in front up to the largest); `CompatV155` changes nothing, as

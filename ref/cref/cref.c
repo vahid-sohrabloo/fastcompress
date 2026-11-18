@@ -1,7 +1,8 @@
 /*
  * cref - C reference driver for fastcompress. Built straight from ref/zstd/lib
- * (libzstd v1.5.7, single-threaded). Reads stdin, writes stdout. Exit status 0
- * on success, nonzero (with a message on stderr) on any error.
+ * (libzstd v1.5.7; single-threaded unless -workers is given). Reads stdin,
+ * writes stdout. Exit status 0 on success, nonzero (with a message on stderr)
+ * on any error.
  *
  * Common options (accepted by compress, stream, seqs where meaningful):
  *   -level L        compression level (default 3)
@@ -28,6 +29,11 @@
  *                   2 disable
  *   -ldm L          ZSTD_c_enableLongDistanceMatching: 0 auto (default),
  *                   1 enable, 2 disable
+ *   -workers N      ZSTD_c_nbWorkers (default 0: single-threaded). N >= 1 runs
+ *                   C's multithreaded compressor (zstdmt_compress.c) for
+ *                   ZSTD_compress2 and ZSTD_compressStream2, with N threads.
+ *   -job-size N     ZSTD_c_jobSize (default 0: C's default from windowLog)
+ *   -overlap-log N  ZSTD_c_overlapLog (default 0: C's default per strategy)
  *
  * MODES
  *
@@ -274,7 +280,7 @@ static void dieErr(size_t rc) {
 }
 
 typedef struct {
-    int level, checksum, pledged, windowLog, rawDict, tablelog, flags, litMode, row, ldm;
+    int level, checksum, pledged, windowLog, rawDict, tablelog, flags, litMode, row, ldm, workers, jobSize, overlapLog;
     const char* cparams;
     const char* dictFile;
     unsigned long long seed;
@@ -336,6 +342,9 @@ static void parseOpts(int argc, char** argv, Opts* o, int defaultPledged) {
         else if (!strcmp(a, "-cparams"))    o->cparams = v;
         else if (!strcmp(a, "-row"))        o->row = atoi(v);
         else if (!strcmp(a, "-ldm"))        o->ldm = atoi(v);
+        else if (!strcmp(a, "-workers"))    o->workers = atoi(v);
+        else if (!strcmp(a, "-job-size"))   o->jobSize = atoi(v);
+        else if (!strcmp(a, "-overlap-log")) o->overlapLog = atoi(v);
         else if (!strcmp(a, "-tablelog"))   o->tablelog = atoi(v);
         else if (!strcmp(a, "-flags"))      o->flags = atoi(v);
         else if (!strcmp(a, "-seed"))       o->seed = strtoull(v, NULL, 0);
@@ -404,6 +413,18 @@ static ZSTD_CCtx* newCCtx(const Opts* o) {
     if (o->ldm) {
         r = ZSTD_CCtx_setParameter(c, ZSTD_c_enableLongDistanceMatching, o->ldm);
         if (ZSTD_isError(r)) dieZ("set enableLongDistanceMatching", r);
+    }
+    if (o->workers) {
+        r = ZSTD_CCtx_setParameter(c, ZSTD_c_nbWorkers, o->workers);
+        if (ZSTD_isError(r)) dieZ("set nbWorkers", r);
+    }
+    if (o->jobSize) {
+        r = ZSTD_CCtx_setParameter(c, ZSTD_c_jobSize, o->jobSize);
+        if (ZSTD_isError(r)) dieZ("set jobSize", r);
+    }
+    if (o->overlapLog) {
+        r = ZSTD_CCtx_setParameter(c, ZSTD_c_overlapLog, o->overlapLog);
+        if (ZSTD_isError(r)) dieZ("set overlapLog", r);
     }
     if (o->dictFile) {
         FILE* f = fopen(o->dictFile, "rb");

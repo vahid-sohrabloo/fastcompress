@@ -67,6 +67,17 @@ type cctxParams struct {
 	preBlockSplitterLevel  int
 	maxBlockSize           int // 0 = default (C: ZSTD_resolveMaxBlockSize)
 	ldmParams              ldmParams
+
+	// Multithreading (zstdmt_compress.go). C: ZSTD_c_nbWorkers (0 =
+	// single-threaded), ZSTD_c_jobSize (0 = default), ZSTD_c_overlapLog
+	// (0 = default).
+	nbWorkers  int
+	jobSize    int
+	overlapLog int
+	// forceWindow makes a loaded dictionary plain history, bounded by the
+	// window like the input (C: ZSTD_c_forceMaxWindow); only zstdmt sets
+	// it, for its jobs after the first.
+	forceWindow bool
 }
 
 // fseRepeat. C: fse.h:FSE_repeat

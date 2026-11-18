@@ -28,8 +28,20 @@ import (
 // at once, and ResetWithOptions must not run while EncodeAll calls are
 // running.
 //
-// With WithEncoderConcurrency above 1 (the default when GOMAXPROCS > 1) the
-// stream is async: Write and ReadFrom copy the input into a buffer of
+// With WithConcurrentBlocks and WithEncoderConcurrency(n) above 1, the
+// stream is C's multithreaded compressor with ZSTD_c_nbWorkers = n
+// (zstdmt): the input is cut into jobs of several MiB that n goroutines
+// compress at once, and the output is C's with nbWorkers set. C's output
+// is the same for every nbWorkers >= 1 (and so is this port's: it never
+// depends on n or on scheduling), but it differs from the single-threaded
+// output. Write copies the input into the jobs' buffer and returns, unless
+// all of it is in use by jobs not yet done; the output of the jobs is
+// written to the io.Writer, in order, by Write, Flush and Close. Flush and
+// Close wait for the jobs they need. A frame whose pledged size
+// (ResetContentSize) is 512 KiB or less is single-threaded, as in C.
+//
+// Otherwise, with WithEncoderConcurrency above 1 (the default when
+// GOMAXPROCS > 1) the stream is async: Write and ReadFrom copy the input into a buffer of
 // asyncChunk bytes and, when it is full, hand it to a goroutine that makes
 // the same ZSTD_e_continue calls and writes their output, while the caller
 // fills a second buffer. At most one buffer is being compressed at a time
@@ -175,6 +187,7 @@ func configureParams(c *cctx, o *encoderOptions) {
 	c.setChecksum(o.checksum)
 	_ = c.setWindowLog(o.windowLog) // in range: validated by WithWindowSize
 	c.requestedParams.literalCompressionMode = o.literalCompressionMode()
+	c.requestedParams.nbWorkers = o.nbWorkers()
 	c.hugePages = o.hugePages
 }
 
@@ -193,6 +206,11 @@ func configureParams(c *cctx, o *encoderOptions) {
 // the frame does not depend on which pooled context serves the call. At
 // most WithEncoderConcurrency calls hold a context at once; further calls
 // wait for one to finish.
+//
+// With WithConcurrentBlocks (and WithEncoderConcurrency(n) above 1), an
+// input of more than 512 KiB is C's ZSTD_compress2 with ZSTD_c_nbWorkers =
+// n: zstdmt splits it into jobs that n goroutines compress (see Encoder).
+// Each concurrent call then uses its own n workers and job buffers.
 func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 	if e.cctxs == nil {
 		panic(errEncoderZero)
@@ -453,6 +471,9 @@ func (e *Encoder) Reset(w io.Writer) {
 func (e *Encoder) ResetContentSize(w io.Writer, size int64) {
 	s := &e.s
 	s.collect(true) // the abandoned stream's error, if any, is dropped
+	if s.c != nil {
+		s.c.mtAbandon() // no job of the abandoned frame outlives Reset
+	}
 	*s = encStream{c: s.c, w: w, out: s.out, readBuf: s.readBuf, pledged: -1,
 		fill: s.fill[:0], job: s.job, done: s.done, run: s.run}
 	if size > 0 {
@@ -548,9 +569,11 @@ func (e *Encoder) drain(op endDirective) error {
 }
 
 // async reports whether the stream compresses in the background
-// (WithEncoderConcurrency above 1, as in klauspost's Encoder).
+// (WithEncoderConcurrency above 1, as in klauspost's Encoder), on one
+// goroutine. With WithConcurrentBlocks the stream is C's multithreaded
+// compressor instead, whose jobs already run in the background.
 func (e *Encoder) async() bool {
-	return e.o.maxEncodeAll > 1
+	return e.o.maxEncodeAll > 1 && e.o.nbWorkers() == 0
 }
 
 // writeAsync copies p into the fill buffer, handing each full one to the

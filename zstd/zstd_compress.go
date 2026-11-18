@@ -588,6 +588,13 @@ type cctx struct {
 	ldmState          ldmState // long distance matching state
 	ldmSequences      []rawSeq // storage for the ldm output sequences
 	maxNbLdmSequences int
+	// mt is the multithreaded compressor, created on the first frame
+	// with nbWorkers >= 1 (C: mtctx).
+	mt *mtCCtx
+	// externSeqStore holds the long-distance matches zstdmt's serial stage
+	// found for a job (C: externSeqStore, ZSTD_referenceExternalSequences);
+	// empty otherwise.
+	externSeqStore rawSeqStore
 
 	tmpWorkspace []byte         // C: tmpWorkspace, used for entropy
 	splitStats   *fpStats       // pre-block-splitter workspace (C: tmpWorkspace too)
@@ -681,7 +688,8 @@ func (c *cctx) reset() {
 // requested parameters and the content size pledged.
 // C: zstd_compress.c:ZSTD_compress2, via ZSTD_compressStream2(ZSTD_e_end):
 // ZSTD_CCtx_init_compressStream2, then ZSTD_compressStream_generic's
-// shortcut that compresses straight into the output buffer. Its capacity is
+// shortcut that compresses straight into the output buffer (or, with
+// nbWorkers >= 1 and more than 512 KiB of input, zstdmt). Its capacity is
 // ZSTD_compressBound(len(src)), what a caller sizing dst with
 // ZSTD_compressBound gives C (output can depend on it only through
 // dstSize_tooSmall fallbacks, which this capacity rules out except where C
@@ -693,6 +701,19 @@ func (c *cctx) compress2(dst, src []byte) ([]byte, error) {
 	}
 	n0 := len(dst)
 	dst = slices.Grow(dst, compressBound(len(src)))
+	if c.appliedParams.nbWorkers > 0 {
+		// C: ZSTD_compressStream2(ZSTD_e_end) delegating to zstdmt; the
+		// output buffer is the same.
+		out, _, remaining, err := c.compressStreamMT(dst[n0:n0:n0+compressBound(len(src))], src, eEnd)
+		if err == nil && remaining != 0 {
+			err = errDstSizeTooSmall // compression not completed, due to lack of output space
+		}
+		if err != nil {
+			c.reset()
+			return dst[:n0], err
+		}
+		return dst[:n0+len(out)], nil
+	}
 	out := dst[n0 : n0+compressBound(len(src))]
 	n, err := c.compressEnd(out, src)
 	c.reset()
@@ -707,8 +728,9 @@ func (c *cctx) compress2(dst, src []byte) ([]byte, error) {
 // buffered selects the streaming buffers (C: ZSTD_bm_buffered in and out
 // buffer modes); compress2 compresses straight from and into the caller's
 // buffers (C: ZSTD_compress2 sets both modes to ZSTD_bm_stable).
-// C: zstd_compress.c:ZSTD_CCtx_init_compressStream2 (single-threaded, no
-// prefix dictionary). The CDict is always the local dictionary's, so C's
+// C: zstd_compress.c:ZSTD_CCtx_init_compressStream2 (no prefix
+// dictionary); with nbWorkers >= 1 and a pledged size above 512 KiB (or
+// unknown) it starts the multithreaded compressor instead. The CDict is always the local dictionary's, so C's
 // override of the level by the CDict's does not apply.
 func (c *cctx) initCompressStream2(endOp endDirective, inSize int, buffered bool) error {
 	params := c.requestedParams
@@ -731,6 +753,22 @@ func (c *cctx) initCompressStream2(endOp endDirective, inSize int, buffered bool
 	params.ldmParams.enableLdm = resolveEnableLdm(params.ldmParams.enableLdm, &params.cParams)
 	params.useRowMatchFinder = resolveRowMatchFinderMode(params.useRowMatchFinder, &params.cParams)
 	params.maxBlockSize = resolveMaxBlockSize(params.maxBlockSize)
+	if pledgedSrcSize <= mtJobSizeMin {
+		params.nbWorkers = 0 // do not invoke multi-threading when src size is too small
+	}
+	if params.nbWorkers > 0 {
+		if c.mt == nil {
+			c.mt = newMTCCtx(params.nbWorkers)
+		}
+		if err := c.mt.initCStream(c.cdict, params, pledgedSrcSize, c.hugePages); err != nil {
+			return err
+		}
+		c.consumedSrcSize = 0
+		c.producedCSize = 0
+		c.streamStage = zcssLoad
+		c.appliedParams = params
+		return nil
+	}
 	if err := c.compressBeginInternal(&params, pledgedSrcSize, buffered); err != nil {
 		return err
 	}
@@ -880,6 +918,7 @@ func (c *cctx) resetCCtxInternal(params *cctxParams, pledgedSrcSize uint64, load
 	}
 
 	// sequences storage
+	c.externSeqStore = rawSeqStore{} // C: ZSTD_referenceExternalSequences(zc, NULL, 0)
 	ss := &c.seqStore
 	if cap(ss.sequences) < nbSeq {
 		ss.sequences = make([]seqDef, 0, nbSeq)
@@ -1189,16 +1228,19 @@ const (
 )
 
 // buildSeqStore runs the match finder over the block src at srcIdx.
-// C: zstd_compress.c:ZSTD_buildSeqStore (no external sequences: C's
-// externSeqStore is always empty, so its skips and its branch are no-ops)
+// C: zstd_compress.c:ZSTD_buildSeqStore (externSeqStore is only filled by
+// zstdmt's jobs, see referenceExternalSequences)
 func (c *cctx) buildSeqStore(src []byte, srcIdx uint32) (int, error) {
 	ms := &c.blockState.matchState
 	// See C issue 3090. MIN_CBLOCK_SIZE was reduced from 3 to 2, so 1 is
 	// added to compensate. This guard also keeps the entropy stage's
 	// maxCSize positive (see entropyCompressSeqStoreWExtLitBuffer).
 	if len(src) < minCBlockSize+blockHeaderSize+1+1 {
-		// C: ZSTD_ldm_skipRawSeqStoreBytes / ZSTD_ldm_skipSequences of the
-		// (empty) externSeqStore
+		if c.appliedParams.cParams.strategy >= zstdBtopt {
+			ldmSkipRawSeqStoreBytes(&c.externSeqStore, len(src))
+		} else {
+			ldmSkipSequences(&c.externSeqStore, len(src), c.appliedParams.cParams.minMatch)
+		}
 		return bssNoCompress, nil // don't even attempt compression below a certain srcSize
 	}
 	resetSeqStore(&c.seqStore)
@@ -1217,7 +1259,15 @@ func (c *cctx) buildSeqStore(src []byte, srcIdx uint32) (int, error) {
 	mode := matchStateDictMode(ms)
 	c.blockState.nextCBlock.rep = c.blockState.prevCBlock.rep
 	var lastLLSize int
-	if c.appliedParams.ldmParams.enableLdm == psEnable {
+	if c.externSeqStore.pos < c.externSeqStore.size {
+		// Updates externSeqStore.pos
+		var err error
+		lastLLSize, err = ldmBlockCompress(&c.externSeqStore, ms, &c.seqStore, &c.blockState.nextCBlock.rep,
+			c.appliedParams.useRowMatchFinder, src, srcIdx)
+		if err != nil {
+			return 0, err
+		}
+	} else if c.appliedParams.ldmParams.enableLdm == psEnable {
 		ldmSeqStore := rawSeqStore{seq: c.ldmSequences, capacity: c.maxNbLdmSequences}
 		// src's index in the LDM window: both windows end where the chunk
 		// given to compressContinueInternal ends (ms.window.nextSrc).
@@ -1687,8 +1737,8 @@ var errInitMissing = errors.New("zstd: stream not initialized") // ERROR(init_mi
 // bytes still to flush: with eFlush or eEnd the call must be repeated (with
 // free output space) until it is 0; 0 after eEnd means the frame is
 // complete. With eContinue the call must be repeated until in is consumed.
-// C: zstd_compress.c:ZSTD_compressStream2 (single-threaded, buffered
-// in/out modes, so no stable-buffer checks).
+// C: zstd_compress.c:ZSTD_compressStream2 (buffered in/out modes, so no
+// stable-buffer checks; nbWorkers >= 1 goes to compressStreamMT).
 func (c *cctx) compressStream2(dst []byte, in []byte, op endDirective) ([]byte, int, int, error) {
 	// transparent initialization stage
 	if c.streamStage == zcssInit {
@@ -1697,6 +1747,9 @@ func (c *cctx) compressStream2(dst []byte, in []byte, op endDirective) ([]byte, 
 		}
 	}
 	// compression stage
+	if c.appliedParams.nbWorkers > 0 {
+		return c.compressStreamMT(dst, in, op)
+	}
 	dst, consumed, err := c.compressStreamGeneric(dst, in, op)
 	if err != nil {
 		return dst, consumed, 0, err

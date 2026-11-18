@@ -404,11 +404,9 @@ func loadCEntropy(bs *compressedBlockState, dict []byte) (int, error) {
 // loadDictionaryContent appends src to ms's window and indexes it into the
 // match finder tables, and into the long-distance matcher's (ls) when it
 // is not nil and LDM is enabled. C: zstd_compress.c:ZSTD_loadDictionaryContent.
-// C also calls ZSTD_overflowCorrectIfNeeded before filling the tables;
-// with at most currentMax - windowStartIndex bytes loaded into a window
-// that was just reset (every path here loads into a fresh CDict or a
-// freshly reset context), the index cannot exceed currentMax, so it never
-// corrects.
+// The overflow correction before filling the tables can only trigger for a
+// context whose indices continue from earlier frames (zstdmt's job
+// contexts loading their overlap prefix); a CDict's window is fresh.
 func loadDictionaryContent(ms *matchState, ls *ldmState, params *cctxParams, src []byte, dtlm dictTableLoadMethod, tfp tableFillPurpose) {
 	loadLdmDict := params.ldmParams.enableLdm == psEnable && ls != nil
 
@@ -445,6 +443,9 @@ func loadDictionaryContent(ms *matchState, ls *ldmState, params *cctxParams, src
 		// src ends the LDM window's prefix too
 		lend := len(ls.window.base)
 		ls.loadedDictEnd = uint32(lend) + ls.window.baseIdx // C: forceWindow ? 0 : iend - base
+		if params.forceWindow {
+			ls.loadedDictEnd = 0
+		}
 		ldmFillHashTable(ls, lend-len(src), lend, &params.ldmParams)
 	}
 
@@ -459,12 +460,18 @@ func loadDictionaryContent(ms *matchState, ls *ldmState, params *cctxParams, src
 	}
 
 	ms.nextToUpdate = uint32(ip) + baseIdx
-	ms.loadedDictEnd = uint32(iend) + baseIdx // C: forceWindow ? 0 : iend - base (forceWindow is never set)
-	ms.forceNonContiguous = false             // C: params->deterministicRefPrefix (never set)
+	ms.loadedDictEnd = uint32(iend) + baseIdx // C: forceWindow ? 0 : iend - base
+	if params.forceWindow {
+		ms.loadedDictEnd = 0
+	}
+	ms.forceNonContiguous = false // C: params->deterministicRefPrefix (never set)
 
 	if len(src) <= hashReadSize {
 		return
 	}
+
+	overflowCorrectIfNeeded(ms, params, uint32(ip)+baseIdx, uint32(iend)+baseIdx)
+	baseIdx = ms.window.baseIdx // C's ip and iend are pointers: a correction moves their indices
 
 	switch params.cParams.strategy {
 	case zstdFast:

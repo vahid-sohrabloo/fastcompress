@@ -31,10 +31,15 @@ const (
 //	WithNoEntropyCompression     ZSTD_c_literalCompressionMode = ZSTD_ps_disable
 //	WithAllLitEntropyCompression ZSTD_c_literalCompressionMode = ZSTD_ps_enable
 //	                             (false: ZSTD_ps_auto, the level's default)
-//	WithEncoderConcurrency       none; each call is single-threaded (nbWorkers=0),
-//	                             the value caps concurrent EncodeAll calls;
-//	                             above 1 the Writer compresses in the background
-//	WithConcurrentBlocks         none; accepted, encoding is single-threaded
+//	WithEncoderConcurrency       ZSTD_c_nbWorkers = n with WithConcurrentBlocks
+//	                             and n > 1, else none (nbWorkers = 0); the value
+//	                             caps concurrent EncodeAll calls; above 1 the
+//	                             Writer compresses in the background
+//	WithConcurrentBlocks         ZSTD_c_nbWorkers = WithEncoderConcurrency's n
+//	                             (if n > 1): C's multithreaded compressor
+//	                             (zstdmt) for the Writer and for EncodeAll
+//	                             above 512 KiB; ZSTD_c_jobSize and
+//	                             ZSTD_c_overlapLog keep C's defaults
 //	WithEncoderDictDelete        removes the dictionary (no C call)
 //	WithLowerEncoderMem          none; accepted, no effect on output
 //	WithHugePages                none (not a klauspost option); speed only
@@ -59,7 +64,7 @@ type encoderOptions struct {
 	checksum     bool
 	windowLog    uint32 // 0 = level default
 	maxEncodeAll int    // max concurrent EncodeAll calls (contexts held at once)
-	concBlocks   bool   // stored only (WithConcurrentBlocks), to reject a change in ResetWithOptions
+	concBlocks   bool   // WithConcurrentBlocks: C's multithreaded compressor, see nbWorkers
 	zeroFrames   bool
 	padMultiple  int    // 0 or 1 = no padding
 	litDisable   bool   // WithNoEntropyCompression: C's ZSTD_ps_disable
@@ -69,6 +74,16 @@ type encoderOptions struct {
 	dict         []byte // dictionary (private copy); nil = none
 	dictRaw      bool   // dict is raw content (WithEncoderDictRaw)
 	dictID       uint32 // WithEncoderDictRaw: the ID written into frame headers
+}
+
+// nbWorkers is C's ZSTD_c_nbWorkers for o: WithEncoderConcurrency's n
+// with WithConcurrentBlocks and n > 1 (clamped to C's
+// ZSTDMT_NBWORKERS_MAX), else 0 (single-threaded).
+func (o *encoderOptions) nbWorkers() int {
+	if !o.concBlocks || o.maxEncodeAll <= 1 {
+		return 0
+	}
+	return min(o.maxEncodeAll, mtNbWorkersMax)
 }
 
 func (o *encoderOptions) defaults() {
@@ -115,8 +130,16 @@ func WithEncoderCRC(b bool) EOption {
 // n > 1 the stream is async (see Encoder): its single context compresses on
 // a background goroutine, one buffer at a time, while Write fills the next
 // (C: still ZSTD_c_nbWorkers = 0, the same ZSTD_compressStream2 calls); with
-// n = 1 it compresses on the caller's goroutine. The value never changes
-// the output.
+// n = 1 it compresses on the caller's goroutine. Without
+// WithConcurrentBlocks the value never changes the output.
+//
+// With WithConcurrentBlocks(true) and n > 1, n is C's ZSTD_c_nbWorkers (at
+// most 256, C's limit; 64 on 32-bit platforms): the Writer, and each
+// EncodeAll call of more than 512 KiB, run C's multithreaded compressor
+// with n workers. Its output differs from the single-threaded one, but not
+// between values of n above 1. With n = 1 the flag has no effect: C's
+// nbWorkers = 1 would give the multithreaded output on one worker, but
+// klauspost's n = 1 means synchronous, so this port stays single-threaded.
 func WithEncoderConcurrency(n int) EOption {
 	return func(o *encoderOptions) error {
 		if n < 0 {
@@ -135,8 +158,19 @@ func WithEncoderConcurrency(n int) EOption {
 // that are compressed simultaneously by multiple goroutines.
 // Cannot be changed with ResetWithOptions.
 //
-// C: none (nbWorkers = 0). The value is stored but encoding is always
-// single-threaded, so it never changes the output.
+// C: ZSTD_c_nbWorkers = n, the WithEncoderConcurrency value, when n > 1
+// (with n = 1, or false, nbWorkers = 0). The Writer, and EncodeAll for
+// inputs above 512 KiB (C's ZSTD_compress2 then runs zstdmt too), produce
+// C's multithreaded output: the input is cut into jobs (C's default
+// ZSTD_c_jobSize: 4 times the window, at least 1 MiB; 1 MiB to 1 GiB) that
+// are compressed independently, each starting from the end of the previous
+// one (C's default ZSTD_c_overlapLog: from 1/8 of the window at the fastest
+// levels to the whole window at level 22), on up to n goroutines. The
+// output is byte-identical to C v1.5.7 with ZSTD_c_nbWorkers set, for any
+// n > 1, and differs from the single-threaded output (it is usually
+// slightly larger). Memory grows with n: C's round input buffer of about
+// (n + 3) jobs, plus up to n job contexts. C's rsyncable mode is not
+// available.
 func WithConcurrentBlocks(b bool) EOption {
 	return func(o *encoderOptions) error { o.concBlocks = b; return nil }
 }
