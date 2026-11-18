@@ -622,6 +622,10 @@ func TestStreamErrors(t *testing.T) {
 	if _, err := e.Write(src); err != nil {
 		t.Fatalf("Write after Reset = %v", err)
 	}
+	// An async stream may write to buf until Close; buf is reused below.
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// A nil writer: EncodeAll-only use and Close without writes are fine.
 	e, err = NewWriter(nil)
@@ -674,10 +678,15 @@ func TestStreamErrors(t *testing.T) {
 		t.Fatalf("stream after a failed one differs from C%s", firstDiff(buf.Bytes(), want))
 	}
 
-	// A short write without an error is io.ErrShortWrite.
+	// A short write without an error is io.ErrShortWrite (an async stream
+	// may return it only from Close).
 	e.Reset(shortWriter{})
-	if _, err := e.Write(src); err != io.ErrShortWrite {
-		t.Fatalf("Write to a short writer = %v, want io.ErrShortWrite", err)
+	_, err = e.Write(src)
+	if err == nil {
+		err = e.Close()
+	}
+	if err != io.ErrShortWrite {
+		t.Fatalf("Write and Close to a short writer = %v, want io.ErrShortWrite", err)
 	}
 }
 

@@ -124,7 +124,10 @@ is bounded by `WithDecoderMaxMemory`. CI enforces this:
 - `WithConcurrentBlocks` and `WithLowerEncoderMem` are accepted and have no
   effect. Encoding is single-threaded per call (C's `nbWorkers = 0`).
   `WithEncoderConcurrency(n)` caps the number of concurrent `EncodeAll` calls;
-  streams are never async.
+  with `n > 1` (the default on multi-core machines) the streaming Writer
+  compresses on a background goroutine while `Write` fills the next 512 KiB
+  buffer, as klauspost's does. The output is byte-identical either way, and
+  `n = 1` keeps the stream synchronous.
 - `BuildDict` returns C's `ZDICT_finalizeDictionary` output. Non-zero
   `Offsets` replace C's starting repcodes {1, 4, 8} (the history is
   zero-padded in front up to the largest); `CompatV155` changes nothing, as

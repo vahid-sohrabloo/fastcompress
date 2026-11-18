@@ -28,6 +28,19 @@ import (
 // at once, and ResetWithOptions must not run while EncodeAll calls are
 // running.
 //
+// With WithEncoderConcurrency above 1 (the default when GOMAXPROCS > 1) the
+// stream is async: Write and ReadFrom copy the input into a buffer of
+// asyncChunk bytes and, when it is full, hand it to a goroutine that makes
+// the same ZSTD_e_continue calls and writes their output, while the caller
+// fills a second buffer. At most one buffer is being compressed at a time
+// and Flush and Close first compress what is buffered, so the context gets
+// the same input between the same ZSTD_e_flush and ZSTD_e_end calls as the
+// synchronous stream, only split differently, and the output is the same.
+// An error of the background work is returned by a
+// later Write, ReadFrom, Flush or Close; Flush, Close and Reset first wait
+// for it, so the io.Writer may be written to after Write returns, until
+// one of them returns. No goroutine outlives the buffer it compresses.
+//
 // The zero value is not usable: EncodeAll panics and the streaming methods
 // return an error.
 type Encoder struct {
@@ -53,7 +66,23 @@ type encStream struct {
 	closed   bool      // Close succeeded; cleared by Reset
 	pledged  int64     // content size from ResetContentSize; < 0 unknown
 	nWritten int64     // bytes written to w since Reset, for padding
+
+	// Async stream (see Encoder). While busy, the worker owns c, out, w,
+	// nWritten, job and jobErr; the caller owns fill. done hands them back.
+	fill     []byte        // input not yet handed off, cap asyncChunk
+	job      []byte        // input the worker compresses
+	busy     bool          // a worker runs; set and cleared by the caller
+	done     chan struct{} // the worker's completion (cap 1)
+	jobErr   error         // the worker's error
+	jobPanic any           // the worker's panic, re-raised by the caller
+	run      func()        // s.runJob, bound once so that go s.run() does not allocate
 }
+
+// asyncChunk is the input an async stream hands to its worker at once: four
+// full blocks (C: ZSTD_BLOCKSIZE_MAX), so the hand-off (a goroutine start
+// and a wake-up) is amortized; at one block it measurably cuts the overlap.
+// An async stream holds two such buffers.
+const asyncChunk = 4 * blockSizeMax
 
 // errNilWriter is returned by the streaming methods when output must be
 // written but the Encoder has no io.Writer (NewWriter(nil) without Reset).
@@ -248,13 +277,15 @@ func appendPadding(b []byte, total int64, n int) []byte {
 // When done writing, use Close to flush the remaining output
 // and write CRC if requested.
 //
-// C: ZSTD_compressStream2(ZSTD_e_continue), repeated until p is consumed.
-// Errors, including those of the io.Writer, are sticky until Reset.
+// C: ZSTD_compressStream2(ZSTD_e_continue), repeated until p is consumed
+// (async: buffered, and made by the worker; see Encoder). Errors, including
+// those of the io.Writer, are sticky until Reset.
 func (e *Encoder) Write(p []byte) (n int, err error) {
 	if e.cctxs == nil {
 		return 0, errEncoderZero
 	}
 	s := &e.s
+	s.collect(false)
 	if err := s.check(); err != nil {
 		return 0, err
 	}
@@ -265,6 +296,9 @@ func (e *Encoder) Write(p []byte) (n int, err error) {
 		return 0, errNilWriter
 	}
 	c := e.startFrame()
+	if e.async() {
+		return s.writeAsync(p)
+	}
 	for {
 		out, consumed, _, err := c.compressStream2(s.out[:0], p[n:], eContinue)
 		n += consumed
@@ -287,15 +321,19 @@ func (e *Encoder) Write(p []byte) (n int, err error) {
 //
 // The Copy function uses ReaderFrom if available.
 //
-// Every chunk read is passed to Write; how the input is split does not
-// change the output.
+// Every chunk read is passed to Write (async: r reads straight into the
+// stream's buffer); how the input is split does not change the output.
 func (e *Encoder) ReadFrom(r io.Reader) (n int64, err error) {
 	if e.cctxs == nil {
 		return 0, errEncoderZero
 	}
 	s := &e.s
+	s.collect(false)
 	if err := s.check(); err != nil {
 		return 0, err
+	}
+	if e.async() {
+		return e.readFromAsync(r)
 	}
 	if s.readBuf == nil {
 		s.readBuf = make([]byte, blockSizeMax)
@@ -333,6 +371,9 @@ func (e *Encoder) Flush() error {
 	}
 	if !s.started {
 		return nil
+	}
+	if err := s.settle(); err != nil {
+		return err
 	}
 	return e.drain(eFlush)
 }
@@ -373,6 +414,9 @@ func (e *Encoder) Close() error {
 		}
 		e.startFrame()
 	}
+	if err := s.settle(); err != nil {
+		return err
+	}
 	if err := e.drain(eEnd); err != nil {
 		return err
 	}
@@ -408,7 +452,9 @@ func (e *Encoder) Reset(w io.Writer) {
 // writing less fails at Close.
 func (e *Encoder) ResetContentSize(w io.Writer, size int64) {
 	s := &e.s
-	*s = encStream{c: s.c, w: w, out: s.out, readBuf: s.readBuf, pledged: -1}
+	s.collect(true) // the abandoned stream's error, if any, is dropped
+	*s = encStream{c: s.c, w: w, out: s.out, readBuf: s.readBuf, pledged: -1,
+		fill: s.fill[:0], job: s.job, done: s.done, run: s.run}
 	if size > 0 {
 		s.pledged = size
 	}
@@ -499,6 +545,151 @@ func (e *Encoder) drain(op endDirective) error {
 			return nil
 		}
 	}
+}
+
+// async reports whether the stream compresses in the background
+// (WithEncoderConcurrency above 1, as in klauspost's Encoder).
+func (e *Encoder) async() bool {
+	return e.o.maxEncodeAll > 1
+}
+
+// writeAsync copies p into the fill buffer, handing each full one to the
+// worker. A frame is open (startFrame was called).
+func (s *encStream) writeAsync(p []byte) (n int, err error) {
+	for n < len(p) {
+		if cap(s.fill) == 0 {
+			s.fill = make([]byte, 0, asyncChunk)
+		}
+		k := copy(s.fill[len(s.fill):cap(s.fill)], p[n:])
+		s.fill = s.fill[:len(s.fill)+k]
+		n += k
+		if len(s.fill) == cap(s.fill) {
+			if err := s.handOff(); err != nil {
+				return n, err
+			}
+		}
+	}
+	return n, nil
+}
+
+// readFromAsync is ReadFrom of an async stream: r reads straight into the
+// fill buffer.
+func (e *Encoder) readFromAsync(r io.Reader) (n int64, err error) {
+	s := &e.s
+	for {
+		if cap(s.fill) == 0 {
+			s.fill = make([]byte, 0, asyncChunk)
+		}
+		nr, rerr := r.Read(s.fill[len(s.fill):cap(s.fill)])
+		if nr > 0 {
+			if s.w == nil {
+				return n, errNilWriter
+			}
+			e.startFrame()
+			s.fill = s.fill[:len(s.fill)+nr]
+			n += int64(nr)
+			if len(s.fill) == cap(s.fill) {
+				if err := s.handOff(); err != nil {
+					return n, err
+				}
+			}
+		}
+		if rerr == io.EOF {
+			return n, nil
+		}
+		if rerr != nil {
+			return n, rerr
+		}
+	}
+}
+
+// handOff waits for the worker, then gives it the fill buffer and takes
+// its previous buffer to fill.
+func (s *encStream) handOff() error {
+	if err := s.collect(true); err != nil {
+		return err
+	}
+	s.fill, s.job = s.job[:0], s.fill
+	if s.run == nil {
+		s.run = s.runJob
+		s.done = make(chan struct{}, 1)
+	}
+	s.busy = true
+	go s.run()
+	return nil
+}
+
+// runJob is the worker: ZSTD_compressStream2(ZSTD_e_continue) on job,
+// repeated until it is consumed, writing the output.
+func (s *encStream) runJob() {
+	defer func() {
+		if r := recover(); r != nil {
+			s.jobPanic = r
+		}
+		s.done <- struct{}{}
+	}()
+	s.jobErr = s.compress(s.job)
+}
+
+// collect ends the worker's job, if one runs and has finished or block is
+// set (then it waits), and makes its error sticky. It returns the sticky
+// error.
+func (s *encStream) collect(block bool) error {
+	if s.busy {
+		if block {
+			<-s.done
+		} else {
+			select {
+			case <-s.done:
+			default:
+				return s.err
+			}
+		}
+		s.busy = false
+		if p := s.jobPanic; p != nil {
+			s.jobPanic = nil
+			panic(p)
+		}
+		if s.err == nil {
+			s.err = s.jobErr
+		}
+		s.jobErr = nil
+	}
+	return s.err
+}
+
+// settle waits for the worker and compresses the rest of the fill buffer
+// on the caller's goroutine, so that the context has all input written so
+// far and Flush or Close can continue as for a synchronous stream.
+func (s *encStream) settle() error {
+	if err := s.collect(true); err != nil {
+		return err
+	}
+	if len(s.fill) == 0 {
+		return nil
+	}
+	err := s.compress(s.fill)
+	s.fill = s.fill[:0]
+	if err != nil {
+		s.err = err
+	}
+	return err
+}
+
+// compress repeats ZSTD_compressStream2(ZSTD_e_continue) until in is
+// consumed, writing the output.
+func (s *encStream) compress(in []byte) error {
+	for len(in) > 0 {
+		out, consumed, _, err := s.c.compressStream2(s.out[:0], in, eContinue)
+		if err == nil {
+			err = s.write(out)
+		}
+		if err != nil {
+			return err
+		}
+		in = in[consumed:]
+	}
+	return nil
 }
 
 // write writes b to the destination.

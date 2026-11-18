@@ -32,7 +32,8 @@ const (
 //	WithAllLitEntropyCompression ZSTD_c_literalCompressionMode = ZSTD_ps_enable
 //	                             (false: ZSTD_ps_auto, the level's default)
 //	WithEncoderConcurrency       none; each call is single-threaded (nbWorkers=0),
-//	                             the value caps concurrent EncodeAll calls
+//	                             the value caps concurrent EncodeAll calls;
+//	                             above 1 the Writer compresses in the background
 //	WithConcurrentBlocks         none; accepted, encoding is single-threaded
 //	WithEncoderDictDelete        removes the dictionary (no C call)
 //	WithLowerEncoderMem          none; accepted, no effect on output
@@ -110,8 +111,12 @@ func WithEncoderCRC(b bool) EOption {
 // Each EncodeAll call holds one compression context and runs on its
 // caller's goroutine (C: ZSTD_c_nbWorkers = 0); at most n calls hold one at
 // once, and further calls wait. This bounds the memory concurrent EncodeAll
-// calls use. The streaming Writer's single context is not counted, and
-// streams are never async. The value never changes the output.
+// calls use. The streaming Writer's single context is not counted. With
+// n > 1 the stream is async (see Encoder): its single context compresses on
+// a background goroutine, one buffer at a time, while Write fills the next
+// (C: still ZSTD_c_nbWorkers = 0, the same ZSTD_compressStream2 calls); with
+// n = 1 it compresses on the caller's goroutine. The value never changes
+// the output.
 func WithEncoderConcurrency(n int) EOption {
 	return func(o *encoderOptions) error {
 		if n < 0 {
