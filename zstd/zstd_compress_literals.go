@@ -116,11 +116,14 @@ func compressLiterals(dst []byte, src []byte, prevHuf *hufCTables, nextHuf *hufC
 		if repeat == huf.RepeatValid && lhSize == 3 {
 			singleStream = true
 		}
-		hufCompress := huf.Compress4XRepeat
+		// Both are called directly: through a function variable (the
+		// compiler before Go 1.26 cannot see through it) &repeat escapes,
+		// and every block allocates.
 		if singleStream {
-			hufCompress = huf.Compress1XRepeat
+			cLitSize, err = huf.Compress1XRepeat(dst[lhSize:], src, huf.SymbolValueMax, litHufLog, wksp, nextHuf.cTable[:], &repeat, flags)
+		} else {
+			cLitSize, err = huf.Compress4XRepeat(dst[lhSize:], src, huf.SymbolValueMax, litHufLog, wksp, nextHuf.cTable[:], &repeat, flags)
 		}
-		cLitSize, err = hufCompress(dst[lhSize:], src, huf.SymbolValueMax, litHufLog, wksp, nextHuf.cTable[:], &repeat, flags)
 		if repeat != huf.RepeatNone {
 			// reused the existing table
 			hType = setRepeat
