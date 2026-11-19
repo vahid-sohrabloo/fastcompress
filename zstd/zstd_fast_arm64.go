@@ -44,8 +44,3 @@ func compressBlockFastAsmStale(hashTable *uint32, b *byte, seqs *seqDef, lits *b
 // Register-convention helpers of compressBlockFastAsm (never called from Go).
 func fastCopyLits()
 func fastCount()
-
-// compressBlockFastExtDictMls: the extDict loop has no arm64 assembly yet.
-func compressBlockFastExtDictMls(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, mls uint32) int {
-	return compressBlockFastExtDictGeneric(ms, ss, rep, src, srcIdx, mls)
-}

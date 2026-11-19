@@ -406,7 +406,7 @@ func TestAsmEquivStreamExtDict(t *testing.T) {
 			if got := creftest.DecodeC(t, on); !bytes.Equal(got, src) {
 				t.Fatalf("%v: C decode mismatch", sc)
 			}
-			if len(cpu.AsmRoutines()) > 0 && runtime.GOARCH == "amd64" && extBlocks > 0 && runs < extBlocks {
+			if len(cpu.AsmRoutines()) > 0 && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") && extBlocks > 0 && runs < extBlocks {
 				t.Fatalf("%v: %d extDict blocks, but the assembly ran only %d times", sc, extBlocks, runs)
 			}
 		}
