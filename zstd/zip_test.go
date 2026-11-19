@@ -129,12 +129,26 @@ func TestEncoderDictDelete(t *testing.T) {
 	}
 }
 
+// TestConcurrentBlocks: with one worker WithConcurrentBlocks has no effect;
+// with several it selects C's multithreaded frame (byte-identical to C:
+// zstdmt_test.go), which is the same for every worker count and decodes to
+// the input.
 func TestConcurrentBlocks(t *testing.T) {
+	d := newTestDecoder(t)
 	for name, in := range creftest.Inputs(t) {
 		want := newTestEncoder(t).EncodeAll(in, nil)
-		e := newTestEncoder(t, WithConcurrentBlocks(true))
-		if !bytes.Equal(e.EncodeAll(in, nil), want) {
-			t.Fatalf("%s: WithConcurrentBlocks changed the output", name)
+		one := newTestEncoder(t, WithConcurrentBlocks(true), WithEncoderConcurrency(1))
+		if !bytes.Equal(one.EncodeAll(in, nil), want) {
+			t.Fatalf("%s: WithConcurrentBlocks with concurrency 1 changed the output", name)
+		}
+		two := newTestEncoder(t, WithConcurrentBlocks(true), WithEncoderConcurrency(2)).EncodeAll(in, nil)
+		four := newTestEncoder(t, WithConcurrentBlocks(true), WithEncoderConcurrency(4)).EncodeAll(in, nil)
+		if !bytes.Equal(two, four) {
+			t.Fatalf("%s: the output depends on the worker count", name)
+		}
+		got, err := d.DecodeAll(two, nil)
+		if err != nil || !bytes.Equal(got, in) {
+			t.Fatalf("%s: multithreaded frame does not decode to the input: %v", name, err)
 		}
 	}
 	e := newTestEncoder(t, WithConcurrentBlocks(true))
