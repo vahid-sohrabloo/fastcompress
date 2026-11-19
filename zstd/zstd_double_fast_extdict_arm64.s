@@ -270,7 +270,7 @@ foundshort:
 	B     lmatch
 
 short4:
-	MOVW R12, R13
+	MOVWU R12, R13              // zero-extended: R13 is added to a base in lmatch (an index over 2^31 must not go negative)
 	SUBW R13, R10, R16
 	MOVW R16, OFFSET            // offset = curr - matchIndex
 	MOVD $4, R15
