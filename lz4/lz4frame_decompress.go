@@ -124,7 +124,51 @@ func decodeViaScratch(prefix, dict, blk []byte, maxBlockSize int, emit func([]by
 // were compressed with, or nil. Corrupt or truncated input returns an
 // error (io.ErrUnexpectedEOF when src ends within a frame) with dst holding
 // the content decoded so far.
+//
+// When dst has no spare capacity and the first frame does not declare its
+// content size, the content is decoded in a pooled buffer (up to
+// appendScratchMax bytes) and appended to dst in an array of exactly the
+// bytes of dst and the content, rather than grown block by block.
 func AppendDecompressFrame(dst, src, dict []byte) ([]byte, error) {
+	if cap(dst) > len(dst) || !unknownContentSize(src) {
+		return appendDecompressFrame(dst, src, dict)
+	}
+	bp, _ := appendScratch.Get().(*[]byte)
+	if bp == nil {
+		b := make([]byte, 64*kb)
+		bp = &b
+	}
+	out, err := appendDecompressFrame((*bp)[:0], src, dict)
+	if cap(out) > appendScratchMax && len(dst) == 0 {
+		appendScratch.Put(bp)
+		return out, err // too large a buffer to keep: it is the result
+	}
+	if cap(out) > len(*bp) && cap(out) <= appendScratchMax {
+		*bp = out[:cap(out)] // grown: kept for the next calls
+	}
+	if len(out) > 0 {
+		if len(dst) == 0 {
+			dst = make([]byte, len(out)) // (make and copy: not zeroed first)
+			copy(dst, out)
+		} else {
+			nd := make([]byte, len(dst)+len(out))
+			copy(nd, dst)
+			copy(nd[len(dst):], out)
+			dst = nd
+		}
+	}
+	appendScratch.Put(bp)
+	return dst, err
+}
+
+// unknownContentSize reports whether src starts with a frame (not a
+// skippable one) whose header has no content size.
+func unknownContentSize(src []byte) bool {
+	info, _, _, need, err := frameHeader(src)
+	return err == nil && need == 0 && !info.Skippable && info.ContentSize == 0
+}
+
+func appendDecompressFrame(dst, src, dict []byte) ([]byte, error) {
 	var xxh xxhash.Digest32
 	for len(src) > 0 {
 		info, maxBlockSize, hSize, need, err := frameHeader(src)
@@ -145,7 +189,9 @@ func AppendDecompressFrame(dst, src, dict []byte) ([]byte, error) {
 		frameStart := len(dst)
 		remaining := info.ContentSize
 		if info.ContentSize > 0 && info.ContentSize <= 1<<30 && cap(dst)-len(dst) < int(info.ContentSize) {
-			nd := make([]byte, len(dst), len(dst)+int(info.ContentSize)+maxBlockSize)
+			// Exactly the content: a last block with less room than
+			// maxBlockSize goes through decodeViaScratch.
+			nd := make([]byte, len(dst), len(dst)+int(info.ContentSize))
 			copy(nd, dst)
 			dst = nd
 		}
@@ -253,6 +299,7 @@ type Reader struct {
 	outStart int    // start of the data not yet returned
 	cbuf     []byte // compressed block
 	hdr      [maxFHSize]byte
+	bh       [4]byte // a block header or the content checksum (a local would escape to readFull's io.Reader)
 }
 
 // NewReader returns a Reader decoding the frames read from r.
@@ -336,21 +383,21 @@ func (z *Reader) startFrame() error {
 
 // nextBlock decodes the next block into buf (or ends the frame).
 func (z *Reader) nextBlock() error {
-	var bh [4]byte
-	if err := z.readFull(bh[:]); err != nil {
+	bh := z.bh[:]
+	if err := z.readFull(bh); err != nil {
 		return err
 	}
-	h := binary.LittleEndian.Uint32(bh[:])
+	h := binary.LittleEndian.Uint32(bh)
 	if h == 0 {
 		z.inFrame = false
 		if z.remaining != 0 {
 			return ErrFrameSize
 		}
 		if z.info.ContentChecksum {
-			if err := z.readFull(bh[:]); err != nil {
+			if err := z.readFull(bh); err != nil {
 				return err
 			}
-			if binary.LittleEndian.Uint32(bh[:]) != z.xxh.Sum32() {
+			if binary.LittleEndian.Uint32(bh) != z.xxh.Sum32() {
 				return ErrContentChecksum
 			}
 		}

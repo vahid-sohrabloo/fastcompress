@@ -3,6 +3,7 @@ package lz4
 import (
 	"encoding/binary"
 	"errors"
+	"sync"
 
 	"github.com/vahid-sohrabloo/fastcompress/internal/xxhash"
 )
@@ -803,29 +804,100 @@ func (c *frameCCtx) compressFrame(dst, src []byte, dict []byte, cdict *CDict, p 
 // LZ4F_compressFrame). p may be nil (C's defaults). dst must hold
 // CompressFrameBound(len(src), p) bytes. It returns the frame's size.
 func CompressFrame(dst, src []byte, p *Preferences) (int, error) {
-	var c frameCCtx
-	return c.compressFrame(dst, src, nil, nil, p)
+	return compressFramePooled(dst, src, nil, p)
 }
 
 // CompressFrameUsingCDict is CompressFrame with a digested dictionary (C:
 // LZ4F_compressFrame_usingCDict). Set p.DictID so the decoder can tell
 // which dictionary it needs.
 func CompressFrameUsingCDict(dst, src []byte, cdict *CDict, p *Preferences) (int, error) {
-	var c frameCCtx
-	return c.compressFrame(dst, src, nil, cdict, p)
+	return compressFramePooled(dst, src, cdict, p)
+}
+
+// framePool holds the contexts of CompressFrame and
+// CompressFrameUsingCDict (C: LZ4F_compressFrame's context, on its stack
+// or allocated per call): a reused context gives the frame a fresh one
+// does (see FrameCompressor), without allocating its tables per call.
+var framePool = sync.Pool{New: func() any { return new(frameCCtx) }}
+
+func compressFramePooled(dst, src []byte, cdict *CDict, p *Preferences) (int, error) {
+	c := framePool.Get().(*frameCCtx)
+	n, err := c.compressFrame(dst, src, nil, cdict, p)
+	c.dropRefs()
+	framePool.Put(c)
+	return n, err
+}
+
+// dropRefs drops the references of an idle context (and of its job
+// contexts) to the caller's input and dictionary, so that a pooled
+// context does not keep them alive. It changes only state the next frame
+// resets first: the fast stream's dictionary fields, which every fast
+// path clears (C: LZ4_prepareTable) or resets with the table, and the HC
+// stream's prefix, which every HC path drops first (C:
+// LZ4_resetStreamHC_fast, done here instead; the dictionary start is set
+// again when the prefix is).
+func (c *frameCCtx) dropRefs() {
+	c.cdict = nil
+	if c.fast != nil {
+		c.fast.c.dictionary, c.fast.c.dictCtx, c.fast.c.dictSize = nil, nil, 0
+	}
+	if c.hc != nil {
+		c.hc.c.resetFast(int(c.hc.c.compressionLevel))
+		c.hc.c.dict = nil
+	}
+	if c.mt != nil && !c.mtActive {
+		c.mt.cdict, c.mt.stablePrev = nil, nil
+		for _, w := range c.mt.workers {
+			w.dropRefs()
+		}
+	}
 }
 
 // AppendFrame appends the frame of src to dst (CompressFrame with the
 // allocation done).
+//
+// When dst lacks the room for CompressFrameBound(len(src), p) bytes, up
+// to appendScratchMax of them, the frame is made in a pooled buffer and
+// appended to dst in an array of exactly the bytes of dst and the frame,
+// rather than of the bound.
 func AppendFrame(dst, src []byte, p *Preferences) ([]byte, error) {
 	n0 := len(dst)
-	dst = growLen(dst, CompressFrameBound(len(src), p))
+	bound := CompressFrameBound(len(src), p)
+	if cap(dst)-n0 < bound && bound <= appendScratchMax {
+		bp, _ := appendScratch.Get().(*[]byte)
+		if bp == nil || len(*bp) < bound {
+			b := make([]byte, max(bound, 64*kb))
+			bp = &b
+		}
+		n, err := CompressFrame(*bp, src, p)
+		frame := (*bp)[:n]
+		if err == nil {
+			if n0 == 0 {
+				dst = make([]byte, len(frame)) // (make and copy: not zeroed first)
+				copy(dst, frame)
+			} else {
+				nd := make([]byte, n0+len(frame))
+				copy(nd, dst)
+				copy(nd[n0:], frame)
+				dst = nd
+			}
+		}
+		appendScratch.Put(bp)
+		return dst, err
+	}
+	dst = growLen(dst, bound)
 	n, err := CompressFrame(dst[n0:], src, p)
 	if err != nil {
 		return dst[:n0], err
 	}
 	return dst[:n0+n], nil
 }
+
+// appendScratchMax is the largest frame bound AppendFrame compresses in
+// a pooled buffer (appendScratch).
+const appendScratchMax = 4 << 20
+
+var appendScratch sync.Pool
 
 // growLen extends dst by n bytes, reallocating when the capacity is short.
 func growLen(dst []byte, n int) []byte {

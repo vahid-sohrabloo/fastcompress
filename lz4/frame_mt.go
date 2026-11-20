@@ -72,7 +72,12 @@ type mtJob struct {
 	out    []byte
 	cSize  int
 	err    error
-	done   chan struct{}
+	// done receives one value when the job is compressed (cap 1, kept
+	// with the job, which the ring's order receives from once).
+	done chan struct{}
+	// compress runs the job on its goroutine (submit), bound once to the
+	// job and its frameMT so that the go statement does not allocate.
+	compress func()
 }
 
 func (j *mtJob) content() []byte { return j.data[j.prefix:] }
@@ -139,7 +144,13 @@ func (m *frameMT) acquire() *mtJob {
 	}
 	m.mu.Unlock()
 	if j == nil {
-		j = new(mtJob)
+		j = &mtJob{done: make(chan struct{}, 1)}
+		j.compress = func() {
+			m.sem <- struct{}{} // at most NbWorkers jobs compress at once
+			m.run(j)
+			<-m.sem
+			j.done <- struct{}{}
+		}
 	}
 	outCap := blocksBound(m.jobSize, m.blockSize, true)
 	if cap(j.out) < outCap {
@@ -147,7 +158,6 @@ func (m *frameMT) acquire() *mtJob {
 	}
 	j.out = j.out[:outCap]
 	j.data, j.cSize, j.err = nil, 0, nil
-	j.done = make(chan struct{})
 	return j
 }
 
@@ -219,12 +229,7 @@ func (m *frameMT) submit() {
 	if !m.prefs.BlockIndependent {
 		m.addHistory(j.content())
 	}
-	go func() {
-		m.sem <- struct{}{} // at most NbWorkers jobs compress at once
-		m.run(j)
-		<-m.sem
-		close(j.done)
-	}()
+	go j.compress()
 }
 
 // C: LZ4F_mt_addHistory
@@ -238,10 +243,13 @@ func (m *frameMT) addHistory(content []byte) {
 	m.history = append(m.history[:kept], content...)
 }
 
-// emitOldest waits for the oldest job and passes its blocks to emit.
-func (m *frameMT) emitOldest(emit func([]byte) error) error {
+// emitOldest waits for the oldest job (unless its done value was
+// received) and passes its blocks to emit.
+func (m *frameMT) emitOldest(emit func([]byte) error, received bool) error {
 	j := m.ring[0]
-	<-j.done
+	if !received {
+		<-j.done
+	}
 	copy(m.ring, m.ring[1:])
 	m.ring = m.ring[:len(m.ring)-1]
 	err := j.err
@@ -259,14 +267,16 @@ func (m *frameMT) emitOldest(emit func([]byte) error) error {
 // with wait, every job.
 func (m *frameMT) emitDone(emit func([]byte) error, wait bool) error {
 	for len(m.ring) > 0 {
+		received := false
 		if !wait {
 			select {
 			case <-m.ring[0].done:
+				received = true
 			default:
 				return nil
 			}
 		}
-		if err := m.emitOldest(emit); err != nil {
+		if err := m.emitOldest(emit, received); err != nil {
 			return err
 		}
 	}
@@ -297,7 +307,7 @@ func (m *frameMT) update(src []byte, stable bool, mode blockCompressMode, emit f
 		if j == nil {
 			if len(m.ring) >= m.slots-1 {
 				// all slots busy: emit the oldest job, to free one
-				if err := m.emitOldest(emit); err != nil {
+				if err := m.emitOldest(emit, false); err != nil {
 					return err
 				}
 			}

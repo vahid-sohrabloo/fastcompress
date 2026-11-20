@@ -382,3 +382,66 @@ func TestAllocs(t *testing.T) {
 		}
 	}
 }
+
+// TestDecompressScratch: the output and the errors are Decompress's, the
+// result is a new array of exactly dst and the output (dst itself for no
+// output), the scratch grows to the size that worked but not past
+// ScratchMax, and a larger output continues as Decompress.
+func TestDecompressScratch(t *testing.T) {
+	c := newCompressor(t)
+	for _, f := range formats {
+		var d deflate.Decompressor
+		var scratch []byte
+		for _, n := range []int{0, 1, 1000, 100000, ScratchMax, 3 * ScratchMax} {
+			data := text(n)
+			s := direct(t, c, f, data)
+			for _, dst := range [][]byte{nil, prefix[:len(prefix):len(prefix)]} {
+				out, err := DecompressScratch(&d, f, &scratch, dst, s, DefaultMaxOutput, errLimit)
+				want, werr := Decompress(&d, f, append([]byte(nil), dst...), s, 0, DefaultMaxOutput, errLimit)
+				if err != werr || !bytes.Equal(out, want) || !bytes.Equal(out[:len(dst)], dst) {
+					t.Fatalf("format %d, %d bytes, dst %q: err %v, want %v", f, n, dst, err, werr)
+				}
+				if n == 0 && len(out) > 0 && &out[0] != &dst[0] {
+					t.Fatalf("format %d, empty output: dst not returned", f)
+				}
+				if n > 0 && n <= ScratchMax/2 && cap(out) != len(out) {
+					t.Fatalf("format %d, %d bytes: cap %d, len %d", f, n, cap(out), len(out))
+				}
+				if cap(scratch) > ScratchMax {
+					t.Fatalf("format %d: scratch of %d bytes", f, cap(scratch))
+				}
+			}
+		}
+		// Incompressible input: a stored stream of 4*len(src) > ScratchMax
+		// estimated bytes still decodes in the scratch (attempts are cut to
+		// ScratchMax), and its result is exact.
+		rnd := rand.New(rand.NewPCG(7, 8))
+		for _, n := range []int{300 << 10, 3 * ScratchMax / 4, ScratchMax} {
+			raw := make([]byte, n)
+			for i := range raw {
+				raw[i] = byte(rnd.Uint32())
+			}
+			st := direct(t, c, f, raw)
+			var sc []byte
+			out, err := DecompressScratch(&d, f, &sc, nil, st, DefaultMaxOutput, errLimit)
+			if err != nil || !bytes.Equal(out, raw) || cap(out) != len(out) || cap(sc) > ScratchMax {
+				t.Fatalf("format %d, %d random bytes: err %v, len %d, cap %d, scratch %d", f, n, err, len(out), cap(out), cap(sc))
+			}
+		}
+		// The limit and bad data, as Decompress (dst returned).
+		data := text(5000)
+		s := direct(t, c, f, data)
+		for _, limit := range []int{1, 1024, 4999, 5000} {
+			var sc []byte
+			out, err := DecompressScratch(&d, f, &sc, withPrefix()[:len(prefix):len(prefix)], s, limit, errLimit)
+			_, werr := Decompress(&d, f, withPrefix(), s, 0, limit, errLimit)
+			if err != werr || (err != nil && !bytes.Equal(out, prefix)) || cap(sc) > limit {
+				t.Fatalf("format %d, limit %d: err %v, want %v, scratch %d", f, limit, err, werr, cap(sc))
+			}
+		}
+		bad := append(append([]byte(nil), s[:len(s)/2]...), 0xff, 0xff, 0xff)
+		if _, err := DecompressScratch(&d, f, &scratch, nil, bad, DefaultMaxOutput, errLimit); err == nil {
+			t.Fatalf("format %d: bad data decoded", f)
+		}
+	}
+}

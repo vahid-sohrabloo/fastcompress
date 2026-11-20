@@ -122,14 +122,16 @@ func (c *hcCtx) compressOptimal(win []byte, srcStart int, srcSizePtr *int, dst [
 		a.pa |= b2i(favorDecSpeed) * paFavor
 		a.suff = sufficientLen
 		a.opt = uintptr(unsafe.Pointer(&opt[0]))
-		parse := hcOptimalAsm
-		if favorDecSpeed {
-			parse = hcOptimalFavAsm
-		}
+		// Direct calls, not a func value: &a passed through one escapes
+		// (an allocation per call before Go 1.26).
 		st := 2
 		for st == 2 {
 			a.stop = a.ip + hcAsmChunk
-			st = parse(&a)
+			if favorDecSpeed {
+				st = hcOptimalFavAsm(&a)
+			} else {
+				st = hcOptimalAsm(&a)
+			}
 		}
 		c.nextToUpdate = uint32(a.next)
 		if st != 0 && (st != 1 || limit != fillOutput) {

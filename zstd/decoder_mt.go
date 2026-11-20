@@ -49,7 +49,19 @@ type pipeline struct {
 	wg     sync.WaitGroup  // S2
 	cur    *blockUnit      // S3: the unit s.in holds
 	r      io.Reader       // S1's reader
-	s1done chan struct{}   // closed when S1 returns
+	s1done chan struct{}   // S1 sends one value (cap 1) when it returns
+	// ended: S3 took the unitEnd, after which S1 and S2 return without
+	// waiting on done: stopPipeline then waits for both and keeps the
+	// generation (decStream.spare) for the next pipeline of the stream,
+	// whose channels, framer buffer and goroutine functions it reuses.
+	ended   bool
+	f       framer
+	e       *dctx  // S2's context
+	scratch []byte // S2's literal scratch
+	exec    pipeExec
+	// f.run and p.entropy, bound once so that the go statements do not
+	// allocate.
+	runS1, runS2 func()
 }
 
 // maxReadAhead caps the units queued between S1 and S2: with two compute
@@ -136,27 +148,35 @@ func pipelineMemBound(n int) int {
 
 const intSize = 32 << (^uint(0) >> 63)
 
-// startPipeline starts the pipeline of the stream (S1 and S2).
+// startPipeline starts the pipeline of the stream (S1 and S2), in the
+// generation of the last pipeline that ran to its end if there is one.
 func (d *Decoder) startPipeline() {
 	s := &d.s
-	p := &pipeline{
-		done:   make(chan struct{}),
-		s1done: make(chan struct{}),
-		r:      s.r,
-		units:  make(chan *blockUnit, min(d.o.concurrent, maxReadAhead)),
-		blocks: make(chan *blockUnit),
+	readAhead := min(d.o.concurrent, maxReadAhead)
+	p := s.spare
+	s.spare = nil
+	if p == nil || cap(p.units) != readAhead {
+		p = &pipeline{
+			done:   make(chan struct{}),
+			s1done: make(chan struct{}, 1),
+			units:  make(chan *blockUnit, readAhead),
+			blocks: make(chan *blockUnit),
+		}
+		p.runS1, p.runS2 = p.f.run, p.entropy
 	}
 	if s.edc == nil {
 		s.edc = newDCtx()
 		s.escratch = make([]byte, blockSizeMax)
 	}
-	f := &framer{p: p, r: s.r, dd: s.dc.ddict, dds: s.dc.ddicts}
+	p.r, p.e, p.scratch = s.r, s.edc, s.escratch
+	p.f = framer{p: p, r: s.r, dd: s.dc.ddict, dds: s.dc.ddicts, buf: p.f.buf[:0]}
 	p.wg.Add(1)
-	go f.run()
-	go p.entropy(s.edc, s.escratch)
+	go p.runS1()
+	go p.runS2()
 	s.pipe = p
 	s.in, s.inPos, s.inEnd = nil, 0, 0
-	s.dc.pipe = &pipeExec{}
+	p.exec = pipeExec{blocks: p.exec.blocks[:0]}
+	s.dc.pipe = &p.exec
 }
 
 // stopPipeline stops the stream's pipeline, if it runs: it waits for S2
@@ -168,9 +188,15 @@ func (d *Decoder) stopPipeline() {
 	if p == nil {
 		return
 	}
-	s.lingering = append(s.lingering, lingeringS1{p.r, p.s1done})
-	close(p.done)
-	p.wg.Wait()
+	if p.ended {
+		// S2 passed the end on and S1 sent it: both return now.
+		p.wg.Wait()
+		<-p.s1done
+	} else {
+		s.lingering = append(s.lingering, lingeringS1{p.r, p.s1done})
+		close(p.done)
+		p.wg.Wait()
+	}
 	for n := len(p.units); n > 0; n-- {
 		select {
 		case u := <-p.units:
@@ -189,6 +215,14 @@ func (d *Decoder) stopPipeline() {
 	}
 	s.pipe = nil
 	s.in, s.inPos, s.inEnd = nil, 0, 0
+	if p.ended {
+		// Its goroutines are gone and its channels empty: keep it, without
+		// the references to the stream.
+		clear(p.exec.blocks)
+		p.cur, p.r, p.e, p.scratch, p.ended = nil, nil, nil, nil, false
+		p.f = framer{p: p, buf: p.f.buf[:0]}
+		s.spare = p
+	}
 }
 
 // errPipelineInput is readUnit's error for input left unconsumed before a
@@ -200,13 +234,14 @@ var errPipelineInput = errors.New("zstd: internal error: stream input left befor
 // Read of r.
 type lingeringS1 struct {
 	r    io.Reader
-	done chan struct{} // closed when S1 returns
+	done chan struct{} // receives one value when S1 returns
 }
 
 // waitOldReader waits for the stopped generations' S1s that read r to
 // return, so that two goroutines never call r.Read at once (Reset with the
 // same reader). It does not wait for those of other readers: they linger
-// until their Read returns. It forgets those that have returned.
+// until their Read returns. It forgets those that have returned (done
+// receives one value only).
 func (s *decStream) waitOldReader(r io.Reader) {
 	keep := s.lingering[:0]
 	for _, l := range s.lingering {
@@ -245,6 +280,7 @@ func (s *decStream) readUnit() error {
 	}
 	u := <-p.blocks
 	if u.kind == unitEnd {
+		p.ended = true
 		err, panicked, pv := u.err, u.panicked, u.panicVal
 		putUnit(u)
 		if panicked {
@@ -335,8 +371,9 @@ func (d *dctx) takeEntropy(e *dctx) {
 // entropy is S2: it begins e at each frame and decodes each compressed
 // block. After a block it cannot decode, it hands e (as that block found
 // it) to S3 and passes the rest on undecoded.
-func (p *pipeline) entropy(e *dctx, scratch []byte) {
+func (p *pipeline) entropy() {
 	defer p.wg.Done()
+	e, scratch := p.e, p.scratch
 	synced := false
 	for {
 		var u *blockUnit
@@ -407,7 +444,7 @@ const (
 func (f *framer) run() {
 	sentEnd := false
 	defer func() {
-		defer close(f.p.s1done)
+		defer func() { f.p.s1done <- struct{}{} }()
 		// Go: a panic of the io.Reader's Read (the only code here that is
 		// not the decoder's) is carried to S3, which raises it on the
 		// caller's goroutine, where n == 1 raises it. The one recover() of
@@ -429,7 +466,9 @@ func (f *framer) run() {
 		}
 		f.send(end)
 	}()
-	f.buf = make([]byte, 0, 2*dStreamInSize)
+	if cap(f.buf) != 2*dStreamInSize {
+		f.buf = make([]byte, 0, 2*dStreamInSize)
+	}
 	for {
 		for {
 			u := f.cut()

@@ -204,6 +204,9 @@ type dctx struct {
 	// first (blockSnap holds the state to restore if that fails).
 	tryTight  bool
 	blockSnap *dBlockState
+	// newScratch is decompressNew's output buffer, at most
+	// newScratchMax bytes.
+	newScratch []byte
 	// pipe is set while a stream pipeline feeds the context (S3,
 	// decoder_mt.go): compressed blocks come decoded from S2.
 	pipe *pipeExec

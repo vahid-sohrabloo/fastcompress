@@ -132,3 +132,65 @@ func Decompress(d *deflate.Decompressor, f Format, dst, src []byte, sizeHint, ma
 		}
 	}
 }
+
+// ScratchMax is the largest scratch buffer DecompressScratch keeps.
+const ScratchMax = 1 << 20
+
+// DecompressScratch is Decompress for a dst without spare capacity and an
+// unknown output size, whose result is a new array: the sizes Decompress
+// would try (from max(4*len(src), 1024), or the capacity of *scratch when
+// larger, doubled up to the limit) are tried in *scratch, which grows to
+// the size that works up to ScratchMax bytes; dst and the output are then
+// copied to an array of exactly len(dst)+output bytes, so that the result
+// has no spare capacity to carry. Past ScratchMax it continues as
+// Decompress (decoding into the result's array, from the next size). On
+// error it returns dst and the error Decompress would return.
+func DecompressScratch(d *deflate.Decompressor, f Format, scratch *[]byte, dst, src []byte, maxOutput int, errOutputLimit error) ([]byte, error) {
+	limit := min(maxOutput, math.MaxInt-len(dst))
+	size := max(min(len(src), limit/4)*4, 1024)
+	if len(src) <= (math.MaxInt-1024)/MaxExpansion {
+		size = min(size, MaxExpansion*len(src)+1024)
+	}
+	size = min(max(size, cap(*scratch)), limit)
+	// Scratch attempts never pass ScratchMax: a larger first size or a
+	// doubling that jumps over it is cut to it, and only an output that
+	// does not fit there goes on as Decompress.
+	size = min(size, ScratchMax)
+	for {
+		if cap(*scratch) < size {
+			*scratch = make([]byte, size)
+		}
+		_, nOut, err := decompressEx(d, f, (*scratch)[:size], src)
+		if err == nil {
+			s := (*scratch)[:nOut]
+			if len(s) == 0 {
+				return dst, nil
+			}
+			if len(dst) == 0 {
+				out := make([]byte, len(s)) // (make and copy: not zeroed first)
+				copy(out, s)
+				return out, nil
+			}
+			out := make([]byte, len(dst)+len(s))
+			copy(out, dst)
+			copy(out[len(dst):], s)
+			return out, nil
+		}
+		if err != deflate.ErrInsufficientSpace {
+			return dst, err
+		}
+		if size == limit {
+			return dst, errOutputLimit
+		}
+		next := size * 2
+		if size > limit/2 {
+			next = limit
+		}
+		if size >= ScratchMax {
+			size = next
+			break
+		}
+		size = min(next, ScratchMax)
+	}
+	return Decompress(d, f, dst, src, size, maxOutput, errOutputLimit)
+}

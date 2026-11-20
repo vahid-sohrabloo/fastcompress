@@ -140,6 +140,9 @@ func (c *Compressor) AppendCompress(dst, src []byte) ([]byte, error) {
 type Decompressor struct {
 	d     deflate.Decompressor
 	limit appendbuf.Limit // AppendDecompress output limit; 0 means DefaultMaxOutput
+	// scratch is AppendDecompress's buffer for a result in a new array
+	// (appendbuf.DecompressScratch), at most appendbuf.ScratchMax bytes.
+	scratch []byte
 }
 
 // NewDecompressor returns a new Decompressor.
@@ -193,7 +196,10 @@ func (d *Decompressor) DecompressEx(dst, src []byte) (nIn, nOut int, err error) 
 // both time and memory. The bytes of dst before len(dst) are not modified.
 // On error the returned slice has the length of dst (its capacity may have
 // grown and its spare capacity been written) and the error is ErrBadData or
-// ErrOutputLimit.
+// ErrOutputLimit. Without sizeHint, a dst without spare capacity (such as
+// nil) is not grown: the stream is decoded, with the same sizes, into a
+// buffer the Decompressor keeps (up to 1 MiB), and the result is a new
+// array of exactly the bytes of dst and the output.
 //
 // sizeHint is trusted: that many bytes are allocated before anything is
 // decoded, clamped only by the output limit and by 1032 times len(src)
@@ -207,5 +213,8 @@ func (d *Decompressor) DecompressEx(dst, src []byte) (nIn, nOut int, err error) 
 // there (for example after a header in the same buffer) is overwritten
 // while it is read, giving ErrBadData or wrong output.
 func (d *Decompressor) AppendDecompress(dst, src []byte, sizeHint int) ([]byte, error) {
+	if sizeHint <= 0 && cap(dst) == len(dst) {
+		return appendbuf.DecompressScratch(&d.d, appendbuf.Zlib, &d.scratch, dst, src, d.MaxOutput(), ErrOutputLimit)
+	}
 	return appendbuf.Decompress(&d.d, appendbuf.Zlib, dst, src, sizeHint, d.MaxOutput(), ErrOutputLimit)
 }
