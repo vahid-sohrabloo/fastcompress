@@ -152,7 +152,11 @@ func DecompressScratch(d *deflate.Decompressor, f Format, scratch *[]byte, dst, 
 		size = min(size, MaxExpansion*len(src)+1024)
 	}
 	size = min(max(size, cap(*scratch)), limit)
-	for size <= ScratchMax {
+	// Scratch attempts never pass ScratchMax: a larger first size or a
+	// doubling that jumps over it is cut to it, and only an output that
+	// does not fit there goes on as Decompress.
+	size = min(size, ScratchMax)
+	for {
 		if cap(*scratch) < size {
 			*scratch = make([]byte, size)
 		}
@@ -178,11 +182,15 @@ func DecompressScratch(d *deflate.Decompressor, f Format, scratch *[]byte, dst, 
 		if size == limit {
 			return dst, errOutputLimit
 		}
+		next := size * 2
 		if size > limit/2 {
-			size = limit
-		} else {
-			size *= 2
+			next = limit
 		}
+		if size >= ScratchMax {
+			size = next
+			break
+		}
+		size = min(next, ScratchMax)
 	}
 	return Decompress(d, f, dst, src, size, maxOutput, errOutputLimit)
 }

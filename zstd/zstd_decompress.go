@@ -763,10 +763,15 @@ const newScratchMax = 1 << 20
 func (d *dctx) decompressNew(src []byte) ([]byte, error) {
 	s := d.newScratch[:0]
 	out, err := d.decompressMultiFrame(s, src, nil)
-	if cap(s) > 0 && cap(out) > 0 && &out[:1][0] == &s[:1][0] {
-		if len(out) == 0 {
-			return s[:0:0], err
+	if len(out) == 0 {
+		// No output: keep the reservation for the next call (a fresh
+		// context has none) and hand out no capacity.
+		if cap(s) == 0 && cap(out) > 0 && cap(out) <= newScratchMax {
+			d.newScratch = out[:0]
 		}
+		return out[:0:0], err
+	}
+	if cap(s) > 0 && cap(out) > 0 && &out[:1][0] == &s[:1][0] {
 		r := make([]byte, len(out))
 		copy(r, out)
 		return r, err

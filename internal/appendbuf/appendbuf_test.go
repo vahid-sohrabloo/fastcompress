@@ -412,6 +412,22 @@ func TestDecompressScratch(t *testing.T) {
 				}
 			}
 		}
+		// Incompressible input: a stored stream of 4*len(src) > ScratchMax
+		// estimated bytes still decodes in the scratch (attempts are cut to
+		// ScratchMax), and its result is exact.
+		rnd := rand.New(rand.NewPCG(7, 8))
+		for _, n := range []int{300 << 10, 3 * ScratchMax / 4, ScratchMax} {
+			raw := make([]byte, n)
+			for i := range raw {
+				raw[i] = byte(rnd.Uint32())
+			}
+			st := direct(t, c, f, raw)
+			var sc []byte
+			out, err := DecompressScratch(&d, f, &sc, nil, st, DefaultMaxOutput, errLimit)
+			if err != nil || !bytes.Equal(out, raw) || cap(out) != len(out) || cap(sc) > ScratchMax {
+				t.Fatalf("format %d, %d random bytes: err %v, len %d, cap %d, scratch %d", f, n, err, len(out), cap(out), cap(sc))
+			}
+		}
 		// The limit and bad data, as Decompress (dst returned).
 		data := text(5000)
 		s := direct(t, c, f, data)
