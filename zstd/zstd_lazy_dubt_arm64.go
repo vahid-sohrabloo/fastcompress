@@ -70,21 +70,3 @@ func dubtFindBestMatchAsm(p *btAsmParams, ip int) (bestLength int, offBase uint3
 func lazyBt(p *rowAsmParams, seqs *seqDef, lits *byte, ip, anchor, iend, ilimit, prefixLowest int,
 	rep1, rep2 uint32, depth int) (ipOut, anchorOut, nSeq, nLits int, rep1Out, rep2Out, llType, llPos uint32)
 func btSearch()
-
-// The extDict tree loops have no arm64 assembly yet.
-func insertDUBT1ExtDict(ms *matchState, curr uint32, inputEnd int, nbCompares, btLow uint32) {
-	insertDUBT1ExtDictGeneric(ms, curr, inputEnd, nbCompares, btLow)
-}
-
-func dubtSearchExtDict(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLow, windowLow uint32) (int, uint32, uint32) {
-	return dubtSearchExtDictGeneric(ms, ip, iend, curr, matchIndex, nbCompares, btLow, windowLow)
-}
-
-func insertBt1ExtLoop(ms *matchState, ip, iend int, curr, matchIndex, nbCompares, btLow, windowLow uint32) (int, uint32, bool) {
-	return 0, 0, false
-}
-
-func btWalkExt(matches *[optSize]optMatch, ms *matchState, ip, iLimit int, curr, matchIndex, nbCompares, btLow, matchLow, mnum uint32,
-	bestLength int) (uint32, uint32, bool) {
-	return 0, 0, false
-}

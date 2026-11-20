@@ -39,8 +39,3 @@ func compressBlockDoubleFastAsm(hashLong, hashSmall *uint32, b *byte, seqs *seqD
 func compressBlockDoubleFastAsmStale(hashLong, hashSmall *uint32, b *byte, seqs *seqDef, lits *byte,
 	ip, istart, iend, prefixLowest int, prefixLowestIndex, baseIdx, rep1, rep2 uint32,
 	hShiftL, shiftS, hShiftS, primeS uint64) (anchor, nSeq, nLits int, rep1Out, rep2Out, llType, llPos uint32)
-
-// compressBlockDoubleFastExtDictMls: the extDict loop has no arm64 assembly yet.
-func compressBlockDoubleFastExtDictMls(ms *matchState, ss *seqStore, rep *[repNum]uint32, src []byte, srcIdx uint32, mls uint32) int {
-	return compressBlockDoubleFastExtDictGeneric(ms, ss, rep, src, srcIdx, mls)
-}

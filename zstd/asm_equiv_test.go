@@ -356,7 +356,9 @@ func TestAsmEquivStreamExtDict(t *testing.T) {
 		}
 		src = src[:8<<wlog]
 		for lv := 1; lv <= levels; lv++ {
-			sc := streamCase{level: lv, windowLog: wlog}
+			// Chunks of 3/4 of a window, each flushed: with a window as small as
+			// a block (the level defaults), only partial blocks have an extDict.
+			sc := streamCase{level: lv, windowLog: wlog, chunk: 3 << wlog / 4}
 			var off, on []byte
 			var runs int
 			stream := func() []byte {
@@ -369,7 +371,7 @@ func TestAsmEquivStreamExtDict(t *testing.T) {
 				buf := make([]byte, 0, cStreamOutSize)
 				pos := 0
 				for _, n := range sc.chunks(len(src)) {
-					op := eContinue
+					op := eFlush
 					in := src[pos : pos+n]
 					pos += n
 					if pos == len(src) {
@@ -382,7 +384,7 @@ func TestAsmEquivStreamExtDict(t *testing.T) {
 						}
 						res = append(res, out...)
 						in = in[consumed:]
-						if op == eContinue && len(in) == 0 || op != eContinue && remaining == 0 {
+						if remaining == 0 {
 							break
 						}
 					}
@@ -406,9 +408,121 @@ func TestAsmEquivStreamExtDict(t *testing.T) {
 			if got := creftest.DecodeC(t, on); !bytes.Equal(got, src) {
 				t.Fatalf("%v: C decode mismatch", sc)
 			}
-			if len(cpu.AsmRoutines()) > 0 && runtime.GOARCH == "amd64" && extBlocks > 0 && runs < extBlocks {
+			if extBlocks == 0 {
+				t.Fatalf("%v: no extDict block ran", sc)
+			}
+			if len(cpu.AsmRoutines()) > 0 && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") && runs < extBlocks {
 				t.Fatalf("%v: %d extDict blocks, but the assembly ran only %d times", sc, extBlocks, runs)
 			}
+		}
+	}
+}
+
+// TestAsmEquivStreamExtDictHighIndex streams a wrapping input like
+// TestAsmEquivStreamExtDict, but with the window's indices continuing from
+// just below 2^31, so that they cross it: C corrects indices only at
+// ZSTD_CURRENT_MAX (3500 MiB), so a long stream matches at indices over
+// 2^31. An index the assembly handles as a signed 32-bit value (arm64's
+// MOVW sign-extends, where MOVWU does not) puts a match address 4 GiB too
+// low. The frame must equal that of a stream from index 0, with the
+// assembly off and on, at every level.
+func TestAsmEquivStreamExtDictHighIndex(t *testing.T) {
+	text := readTestdata(t, "dickens-32k.raw")
+	r := rand.New(rand.NewPCG(41, 42))
+	const wlog = 12
+	size := 8 << wlog
+	src := make([]byte, 0, size)
+	for len(src) < size { // not cap(src): an append past it makes cap grow
+		switch r.IntN(4) {
+		case 0:
+			for range 1 + r.IntN(512) {
+				src = append(src, byte(r.Uint32()))
+			}
+		case 1:
+			if len(src) > 1<<wlog {
+				from := len(src) - (1 << wlog) - r.IntN(256) + r.IntN(512)
+				from = max(0, min(from, len(src)-1))
+				n := min(1+r.IntN(2<<wlog), len(src)-from)
+				src = append(src, src[from:from+n]...)
+			}
+		default:
+			chunk := text[r.IntN(len(text)/2):]
+			src = append(src, chunk[:min(len(chunk), 1+r.IntN(4096))]...)
+		}
+	}
+	src = src[:size]
+	levels := 19
+	if testing.Short() {
+		levels = 16
+	}
+	start := uint32(1<<31) - uint32(len(src)/2) // the indices cross 2^31 mid-stream
+	for lv := 1; lv <= levels; lv++ {
+		sc := streamCase{level: lv, windowLog: wlog, chunk: 3 << 10}
+		stream := func(from uint32) []byte {
+			c := newCCtx()
+			c.setLevel(lv)
+			if err := c.setWindowLog(wlog); err != nil {
+				t.Fatal(err)
+			}
+			if from != 0 {
+				// Continue the indices from `from`, as a long-reused
+				// context would (see checkOverflowCorrection).
+				if err := c.initCompressStream2(eContinue, 0, true); err != nil {
+					t.Fatal(err)
+				}
+				ms := &c.blockState.matchState
+				ms.window.nextSrc, ms.window.lowLimit, ms.window.dictLimit = from, from, from
+				ms.window.baseIdx, ms.window.dictBaseIdx = from, from
+				ms.nextToUpdate = from
+			}
+			var res []byte
+			buf := make([]byte, 0, cStreamOutSize)
+			pos := 0
+			for _, n := range sc.chunks(len(src)) {
+				// Flush after every chunk: with a window as small as a block,
+				// only partial blocks have an extDict.
+				op := eFlush
+				in := src[pos : pos+n]
+				pos += n
+				if pos == len(src) {
+					op = eEnd
+				}
+				for {
+					out, consumed, remaining, err := c.compressStream2(buf, in, op)
+					if err != nil {
+						t.Fatalf("%v: %v", sc, err)
+					}
+					res = append(res, out...)
+					in = in[consumed:]
+					if remaining == 0 {
+						break
+					}
+				}
+			}
+			if w := &c.blockState.matchState.window; from != 0 && (w.nextSrc < 1<<31 || w.nbOverflowCorrections != 0) {
+				t.Fatalf("%v: indices ended at %d with %d corrections: the stream did not cross 2^31 as intended", sc, w.nextSrc, w.nbOverflowCorrections)
+			}
+			return res
+		}
+		var want, off, on []byte
+		withAsm(t, false, func() { want = stream(0) })
+		var ext extDictRuns
+		ext.install(t)
+		withAsm(t, false, func() { off = stream(start) })
+		ext.take()
+		withAsm(t, true, func() { on = stream(start) })
+		extBlocks := 0
+		for _, n := range ext.take() {
+			extBlocks += n
+		}
+		if extBlocks == 0 {
+			t.Fatalf("%v: no extDict block ran", sc)
+		}
+		if !bytes.Equal(off, want) {
+			t.Fatalf("%v: indices over 2^31 change the frame (assembly off)%s", sc, firstDiff(off, want))
+		}
+		if !bytes.Equal(on, want) {
+			t.Fatalf("%v: indices over 2^31 change the frame (assembly on)%s", sc, firstDiff(on, want))
 		}
 	}
 }
