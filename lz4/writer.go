@@ -17,7 +17,8 @@ type Writer struct {
 	buf     []byte
 	begun   bool
 	err     error
-	workers int // WithConcurrency, applied over the preferences
+	workers int     // WithConcurrency, applied over the preferences
+	tail    [8]byte // Close's content checksum of a multi-threaded frame
 }
 
 // WriterOption configures a Writer.
@@ -184,10 +185,9 @@ func (z *Writer) Close() error {
 		return z.err
 	}
 	if z.c.mtActive {
-		var tail [8]byte
-		n, err := z.c.mtEnd(tail[:], z.out)
+		n, err := z.c.mtEnd(z.tail[:], z.out)
 		if err == nil {
-			err = z.out(tail[:n])
+			err = z.out(z.tail[:n])
 		}
 		if z.err = err; z.err != nil {
 			return z.err
@@ -203,7 +203,9 @@ func (z *Writer) Close() error {
 	return nil
 }
 
-var errWriterClosed = errorString("lz4: writer closed")
+// errWriterClosed is an error, not an errorString: storing a string type
+// in z.err would allocate on every Close.
+var errWriterClosed error = errorString("lz4: writer closed")
 
 type errorString string
 

@@ -3,6 +3,7 @@ package zstd
 import (
 	"encoding/binary"
 	"math"
+	"math/bits"
 	"sync/atomic"
 
 	"github.com/vahid-sohrabloo/fastcompress/internal/huf"
@@ -745,6 +746,45 @@ func (d *dctx) decompressMultiFrame(dst, src []byte, dd *ddict) ([]byte, error) 
 		return out, e.toError("decompress")
 	}
 	return out, nil
+}
+
+// newScratchMax is the largest output buffer a DecodeAll context keeps
+// for decompressNew (Go only).
+const newScratchMax = 1 << 20
+
+// decompressNew is decompressMultiFrame into a new array (dst without
+// capacity), for an input whose output size the allocation rule cannot
+// reserve exactly (outputSizeUnsure): it decodes in d.newScratch, then
+// copies the output to an array of exactly its size, so that the caller
+// does not get a reservation's spare capacity. An output larger than
+// newScratchMax is the array decompressMultiFrame grows; one up to
+// newScratchMax makes the scratch grow for the next calls. The result
+// and the error are decompressMultiFrame's (Go only).
+func (d *dctx) decompressNew(src []byte) ([]byte, error) {
+	s := d.newScratch[:0]
+	out, err := d.decompressMultiFrame(s, src, nil)
+	if cap(s) > 0 && cap(out) > 0 && &out[:1][0] == &s[:1][0] {
+		if len(out) == 0 {
+			return s[:0:0], err
+		}
+		r := make([]byte, len(out))
+		copy(r, out)
+		return r, err
+	}
+	if n := len(out); n > cap(s) && n <= newScratchMax {
+		d.newScratch = make([]byte, 0, min(1<<bits.Len(uint(n-1)), newScratchMax))
+	}
+	return out, err
+}
+
+// outputSizeUnsure reports whether src starts with a frame whose output
+// size decompressFrames cannot reserve exactly: one without a content
+// size (a frame with one, trusted or up to frameTrustMin, gets exactly
+// that; see the allocation rule).
+func outputSizeUnsure(src []byte) bool {
+	var zfh frameHeader
+	need, e := getFrameHeaderAdvanced(&zfh, src)
+	return e == 0 && need == 0 && zfh.frameType == zstdFrame && zfh.frameContentSize == contentSizeUnknown
 }
 
 // decompressFrames is decompressMultiFrame returning the dErr.

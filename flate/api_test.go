@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -937,6 +938,48 @@ func TestAllocs(t *testing.T) {
 		}
 		if a := testing.AllocsPerRun(10, func() { _, _ = d.Decompress(out[:1], s) }); a != 0 {
 			t.Errorf("level %d: Decompress (error) allocates %.1f", level, a)
+		}
+	}
+}
+
+// TestAppendDecompressExactResult: without a sizeHint, AppendDecompress
+// into a dst without spare capacity (nil, or full) returns a new array of
+// exactly the output, in one allocation of that size once the
+// Decompressor's buffer has grown: not the max(4*len(src), 1024) (or
+// doubled) space it decodes in.
+func TestAppendDecompressExactResult(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts are not meaningful under -race")
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1)) // keep the pools
+	c := newCompressor(t, 6)
+	d := pkg.NewDecompressor()
+	rnd := rand.New(rand.NewPCG(5, 6))
+	text := caseData(t, "text")
+	for _, n := range []int{0, 100, 1000, 64 << 10, 200 << 10} {
+		data := make([]byte, 0, n)
+		for len(data) < n {
+			data = append(data, text[:min(len(text), 512)]...)
+			data = append(data, byte(rnd.Uint32()), byte(rnd.Uint32()))
+		}
+		data = data[:n]
+		s := compress(t, c, data)
+		prefix := []byte("prefix")
+		for _, dst := range [][]byte{nil, prefix[:len(prefix):len(prefix)]} {
+			var out []byte
+			var err error
+			run := func() { out, err = d.AppendDecompress(dst, s, 0) }
+			run()
+			want := 1.0
+			if n == 0 {
+				want = 0 // dst itself
+			}
+			if a := testing.AllocsPerRun(5, run); a != want {
+				t.Errorf("%d bytes, dst %q: %v allocations, want %v", n, dst, a, want)
+			}
+			if err != nil || !bytes.Equal(out[len(dst):], data) || !bytes.Equal(out[:len(dst)], dst) || cap(out) != len(out) {
+				t.Fatalf("%d bytes, dst %q: err %v, len %d, cap %d", n, dst, err, len(out), cap(out))
+			}
 		}
 	}
 }

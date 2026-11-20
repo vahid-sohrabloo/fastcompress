@@ -119,6 +119,7 @@ type mtJob struct {
 	// unknown).
 	fullFrameSize uint64
 	dstBuff       []byte
+	nbSeq         int // the capacity of the job's sequence store (mtCCtx.nbSeq)
 	// dstFlushed and frameChecksumNeeded are used only by the
 	// compressing goroutine.
 	dstFlushed          int
@@ -266,6 +267,7 @@ type mtCCtx struct {
 	cond sync.Cond  // broadcast when a job progresses or ends
 
 	jobs      []mtJob
+	jobRuns   []func() // jobRuns[i] runs jobs[i]: bound once, so go does not allocate
 	jobIDMask uint
 
 	bufPool mtBufferPool
@@ -326,6 +328,11 @@ func (mt *mtCCtx) resize(nbWorkers int) {
 	if nbJobs := uint(nbWorkers + 2); nbJobs > mt.jobIDMask+1 {
 		n := uint(1) << bits.Len(nbJobs)
 		mt.jobs = make([]mtJob, n)
+		mt.jobRuns = make([]func(), n)
+		for i := range mt.jobRuns {
+			job := &mt.jobs[i]
+			mt.jobRuns[i] = func() { mt.runJob(job) }
+		}
 		mt.jobIDMask = n - 1
 	}
 	mt.bufPool.maxBuffers = 2*nbWorkers + 3 // C: BUF_POOL_MAX_NB_BUFFERS
@@ -389,9 +396,9 @@ func (mt *mtCCtx) releaseSeq(rs rawSeqStore) {
 
 // runJob is a worker: it compresses job, then reports its end.
 // C: ZSTDMT_compressionJob (and its _endJob part)
-func (mt *mtCCtx) runJob(job *mtJob, nbSeq int) {
+func (mt *mtCCtx) runJob(job *mtJob) {
 	var c *cctx
-	rawSeqStore := mt.getSeq(nbSeq)
+	rawSeqStore := mt.getSeq(job.nbSeq)
 	lastCBlockSize, err, panicVal := mt.compressJob(job, &c, &rawSeqStore)
 
 	mt.serial.ensureFinished(job.jobID)
@@ -798,7 +805,8 @@ func (mt *mtCCtx) createCompressionJob(srcSize int, endOp endDirective) {
 	select {
 	case mt.slots <- struct{}{}:
 		job.dstBuff = mt.bufPool.get()
-		go mt.runJob(job, mt.nbSeq)
+		job.nbSeq = mt.nbSeq
+		go mt.jobRuns[jobID]()
 		mt.nextJobID++
 		mt.jobReady = false
 	default: // no worker available

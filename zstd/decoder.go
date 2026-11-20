@@ -97,6 +97,9 @@ type decStream struct {
 	escratch []byte
 	// Stopped pipelines' S1s that may still be in a Read (waitOldReader).
 	lingering []lingeringS1
+	// The generation of the last pipeline that ran to its end, reused by
+	// the next (see stopPipeline).
+	spare *pipeline
 }
 
 // errDecoderZero is returned when a Decoder was not created by NewReader.
@@ -195,6 +198,11 @@ func (d *Decoder) DecodeAll(input, dst []byte) ([]byte, error) {
 	}
 	configure(dc, &c.o, c.dicts, limit, d.budget)
 	defer dc.releaseBudget()
+	// Go: a result in a new array gets exactly the output's size (a
+	// 32-bit Decoder's budget and WithDecoderLowmem keep the plain rule).
+	if cap(dst) == 0 && d.budget == nil && !c.o.lowMem && outputSizeUnsure(input) {
+		return dc.decompressNew(input)
+	}
 	return dc.decompressMultiFrame(dst, input, nil)
 }
 
@@ -225,7 +233,7 @@ func (d *Decoder) Reset(r io.Reader) error {
 	d.stopPipeline()
 	s := &d.s
 	s.waitOldReader(r)
-	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0], edc: s.edc, escratch: s.escratch, lingering: s.lingering}
+	*s = decStream{dc: s.dc, r: r, in: s.in, out: s.out, buf: s.buf[:0], edc: s.edc, escratch: s.escratch, lingering: s.lingering, spare: s.spare}
 	if r == nil {
 		s.buf = nil // nor the output decoded from it (WithDecodeBuffersBelow)
 		return nil
