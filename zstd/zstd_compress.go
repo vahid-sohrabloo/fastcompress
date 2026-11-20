@@ -700,6 +700,23 @@ func (c *cctx) compress2(dst, src []byte) ([]byte, error) {
 		return dst, err
 	}
 	n0 := len(dst)
+	if bound := compressBound(len(src)); c.appliedParams.nbWorkers == 0 && cap(dst)-n0 < bound && bound <= maxPooledOut {
+		// dst has no room for the worst case (typically dst == nil).
+		// Growing it by compressBound would allocate about len(src) bytes
+		// for a result a fraction of that, which the caller keeps: garbage
+		// and pinned memory (about 80% more bytes allocated than needed on
+		// restic's blobs). Compress into a pooled scratch buffer and append
+		// only the frame. The output is the same: C's capacity for it is
+		// still compressBound.
+		p := getPooledOut(bound)
+		n, err := c.compressEnd((*p)[:bound], src)
+		c.reset()
+		if err == nil {
+			dst = append(dst, (*p)[:n]...)
+		}
+		putPooledOut(p)
+		return dst, err
+	}
 	dst = slices.Grow(dst, compressBound(len(src)))
 	if c.appliedParams.nbWorkers > 0 {
 		// C: ZSTD_compressStream2(ZSTD_e_end) delegating to zstdmt; the
