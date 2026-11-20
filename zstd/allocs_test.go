@@ -3,6 +3,7 @@ package zstd
 import (
 	"bytes"
 	"io"
+	"math/bits"
 	"runtime/debug"
 	"testing"
 )
@@ -156,6 +157,9 @@ func TestDecodeAllExactResult(t *testing.T) {
 			name  string
 			frame []byte
 		}{{"content size", e.EncodeAll(src, nil)}, {"no content size", stream.Bytes()}} {
+			if c.name == "no content size" && bits.UintSize == 32 {
+				continue // the exact-size path is 64-bit only (32-bit has a memory budget)
+			}
 			var out []byte
 			run := func() {
 				if out, err = d.DecodeAll(c.frame, nil); err != nil {
