@@ -191,23 +191,25 @@ func TestDecodeAllExactResult(t *testing.T) {
 			t.Fatalf("empty frame: %v, len %d, cap %d", err, len(out), cap(out))
 		}
 	}
-	// A fresh decoder keeps the reservation of an empty frame without a
-	// content size: repeated calls do not allocate.
-	// (magic, a descriptor without a content size, window, one empty last raw block)
-	nocs := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00, 0x01, 0x00, 0x00}
-	fresh, err := NewReader(nil, WithDecoderConcurrency(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fresh.Close()
-	if _, err := fresh.DecodeAll(nocs, nil); err != nil {
-		t.Fatal(err)
-	}
-	if a := testing.AllocsPerRun(10, func() {
-		if out, err := fresh.DecodeAll(nocs, nil); err != nil || cap(out) != 0 {
-			t.Fatalf("empty frame: %v, cap %d", err, cap(out))
+	if bits.UintSize == 64 { // (the scratch path is 64-bit only)
+		// A fresh decoder keeps the reservation of an empty frame without a
+		// content size: repeated calls do not allocate.
+		// (magic, a descriptor without a content size, window, one empty last raw block)
+		nocs := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00, 0x01, 0x00, 0x00}
+		fresh, err := NewReader(nil, WithDecoderConcurrency(1))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}); a != 0 {
-		t.Errorf("empty frame on a fresh decoder: %v allocations per call, want 0", a)
+		defer fresh.Close()
+		if _, err := fresh.DecodeAll(nocs, nil); err != nil {
+			t.Fatal(err)
+		}
+		if a := testing.AllocsPerRun(10, func() {
+			if out, err := fresh.DecodeAll(nocs, nil); err != nil || cap(out) != 0 {
+				t.Fatalf("empty frame: %v, cap %d", err, cap(out))
+			}
+		}); a != 0 {
+			t.Errorf("empty frame on a fresh decoder: %v allocations per call, want 0", a)
+		}
 	}
 }
