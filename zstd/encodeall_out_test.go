@@ -2,6 +2,7 @@ package zstd
 
 import (
 	"bytes"
+	"math"
 	"runtime"
 	"sync"
 	"testing"
@@ -57,7 +58,7 @@ func TestEncodeAllPooledOutputAllocs(t *testing.T) {
 		// The best of several rounds: a garbage collection empties the
 		// scratch pool (sync.Pool), and the next call then allocates one
 		// scratch buffer again.
-		perCall := 1 << 40
+		perCall := math.MaxInt
 		const runs = 20
 		for range 5 {
 			var before, after runtime.MemStats
