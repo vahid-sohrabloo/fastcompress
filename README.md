@@ -1,5 +1,9 @@
 # fastcompress
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/vahid-sohrabloo/fastcompress.svg)](https://pkg.go.dev/github.com/vahid-sohrabloo/fastcompress)
+[![CI](https://github.com/vahid-sohrabloo/fastcompress/actions/workflows/ci.yml/badge.svg)](https://github.com/vahid-sohrabloo/fastcompress/actions/workflows/ci.yml)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+
 Pure-Go ports of three C compression libraries, with output byte-identical
 to C and speed at or near C's:
 
@@ -77,6 +81,35 @@ and reject what C accepts and rejects, with C's error class. The few
 deliberate differences are listed per package
 ([zstd](#deliberate-api-differences), [DEFLATE](#deflate-gzip-and-zlib),
 [LZ4](#lz4)).
+
+## Switching from klauspost/compress
+
+For zstd, change the import path; the calls stay the same:
+
+```diff
+-import "github.com/klauspost/compress/zstd"
++import "github.com/vahid-sohrabloo/fastcompress/zstd"
+```
+
+What you may notice:
+
+- **The compressed bytes are C zstd's, not klauspost's.** Sizes and bytes
+  differ at the same level; any zstd decoder reads both. The four `Speed*`
+  levels are C's levels 1, 3, 7 and 11, and `WithEncoderZstdLevel` takes any
+  of C's 1 to 22.
+- **Two encoder options are accepted and do nothing:** `WithLowerEncoderMem`
+  and `WithSingleSegment`. All the other options, and all the decoder
+  options, have an effect.
+- **`WithConcurrentBlocks(true)` runs C's multithreaded compressor.** Its
+  output is the same for any worker count, but it is not the single-threaded
+  output.
+- **The streaming `Writer` compresses in the background**, as klauspost's
+  does, so an error of your `io.Writer` can come from a later `Write`,
+  `ReadFrom`, `Flush` or `Close`.
+- **Only `zstd`, `flate`, `gzip`, `zlib` and `lz4` are here.** klauspost's
+  other packages (such as `s2` and `snappy`) are not ported.
+
+The full list is under [Deliberate API differences](#deliberate-api-differences).
 
 ## Encoder output
 
