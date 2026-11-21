@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"math"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"testing"
+	"weak"
 )
 
 // TestEncodeAllPooledOutput: with a dst that has no room for compressBound
@@ -98,4 +100,41 @@ func TestEncodeAllPooledOutputConcurrent(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// TestEncodeAllLargeScratchWeak: a scratch buffer larger than
+// smallPooledOut is reused by the next call until a garbage collection,
+// which frees it instead of keeping it live (it is held weakly), and is at
+// most 12.5% larger than requested.
+func TestEncodeAllLargeScratchWeak(t *testing.T) {
+	for _, n := range []int{smallPooledOut + 1, 100000, 1 << 20, compressBound(1 << 20), 8<<20 + 12345} {
+		if s := largeOutSize(n); s < n || s > n+n/8 {
+			t.Errorf("largeOutSize(%d) = %d, want %d to %d", n, s, n, n+n/8)
+		}
+	}
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	runtime.GC()
+	n := compressBound(1 << 20)
+	p := getPooledOut(n)
+	if len(*p) < n {
+		t.Fatalf("getPooledOut(%d) gives %d bytes", n, len(*p))
+	}
+	putPooledOut(p)
+	if q := getPooledOut(n - 1000); q != p {
+		t.Errorf("a slightly smaller request does not reuse the idle buffer")
+	} else {
+		putPooledOut(q)
+	}
+	if q := getLargeOut(4 * n); q != nil {
+		t.Errorf("a request for 4x more bytes takes a %d byte buffer", cap(*q))
+	}
+	if q := getLargeOut(n / 4); q != nil {
+		t.Errorf("a request for 4x fewer bytes takes a %d byte buffer", cap(*q))
+	}
+	wp := weak.Make(p)
+	p = nil
+	runtime.GC()
+	if wp.Value() != nil {
+		t.Errorf("an idle scratch buffer survives a collection")
+	}
 }
