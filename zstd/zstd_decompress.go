@@ -1386,6 +1386,17 @@ func (d *dctx) decompressStream(out *outBuffer, in *inBuffer) (hint int, err err
 	return hint, nil
 }
 
+// pendingOutput returns the decoded output decompressStream has yet to
+// flush (zdssFlush), in outBuff. A caller may deliver it itself and set
+// outStart = outEnd: the next call then completes the flush with nothing
+// to copy (Go only: Decoder.WriteTo writes it without copying it out).
+func (d *dctx) pendingOutput() []byte {
+	if d.streamStage != zdssFlush {
+		return nil
+	}
+	return d.outBuff[d.outStart:d.outEnd]
+}
+
 // decompressStreamCode is decompressStream returning the dErr.
 func (d *dctx) decompressStreamCode(out *outBuffer, in *inBuffer) (int, dErr) {
 	if in.pos > len(in.src) {
