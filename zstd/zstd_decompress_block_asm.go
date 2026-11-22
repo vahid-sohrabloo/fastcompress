@@ -37,18 +37,21 @@ type seqAsmArgs struct {
 	matchLength  int         // 176
 	offset       int         // 184
 	pending      int         // 192: 1 when the loop stopped on a sequence it decoded but did not execute
+	ext          *byte       // 200: the extDict (&extDict[0]; nil when empty)
+	extLen       int         // 208: len(extDict)
 }
 
 // sequencesFast runs the assembly fast loop while f.nbSeq > 1, executing
 // with execSequence each sequence the loop decodes but hands back (one that
-// takes execSequenceEnd or the extDict path). It does nothing when the
+// takes execSequenceEnd, or the extDict path when the loop does not take
+// it: always on arm64, see seqAsmExtDict). It does nothing when the
 // assembly is off, or when f fails the loop's preconditions (asmOK).
 func sequencesFast(st *seqState, f *seqFast, extDict []byte) dErr {
 	if !useSeqDecAsm || !f.asmOK() {
 		return 0
 	}
 	for f.nbSeq > 1 {
-		sequence, pending := f.runAsm(st)
+		sequence, pending := f.runAsm(st, extDict)
 		if !pending {
 			break
 		}
@@ -74,7 +77,7 @@ func sequencesFastSplit(st *seqState, f *seqFast, extDict []byte) (sequence seq,
 		return seq{}, false, 0
 	}
 	for f.nbSeq > 1 {
-		sequence, pending := f.runAsm(st)
+		sequence, pending := f.runAsm(st, extDict)
 		if !pending {
 			break
 		}
@@ -107,10 +110,11 @@ func (f *seqFast) asmOK() bool {
 }
 
 // runAsm runs the assembly loop once from st and f (decodeExecSeqsSplitAsm
-// with f.split, else decodeExecSeqsAsm), and stores the state it leaves
-// back into them. It returns the sequence the loop stopped on, if any
-// (pending). Preconditions: sequencesFast's, or sequencesFastSplit's.
-func (f *seqFast) runAsm(st *seqState) (seq, bool) {
+// with f.split, else decodeExecSeqsAsm), with the block's extDict, and
+// stores the state it leaves back into them. It returns the sequence the
+// loop stopped on, if any (pending). Preconditions: sequencesFast's, or
+// sequencesFastSplit's.
+func (f *seqFast) runAsm(st *seqState, extDict []byte) (seq, bool) {
 	src, ptr, container, consumed := st.dStream.Raw()
 	a := seqAsmArgs{
 		bitContainer: container,
@@ -132,6 +136,10 @@ func (f *seqFast) runAsm(st *seqState) (seq, bool) {
 		litEnd:       f.litEnd,
 		prefixStart:  f.prefixStart,
 		nbSeq:        f.nbSeq,
+		extLen:       len(extDict),
+	}
+	if len(extDict) > 0 {
+		a.ext = &extDict[0]
 	}
 	if f.split {
 		decodeExecSeqsSplitAsm(&a)

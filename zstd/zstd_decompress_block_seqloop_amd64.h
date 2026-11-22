@@ -56,6 +56,10 @@
 	MOVQ DX, LITEND(SP)
 	MOVQ ARGS_NBSEQ(AX), DX
 	MOVQ DX, NBSEQ(SP)
+	MOVQ ARGS_EXTLEN(AX), DX
+	MOVQ DX, EXTLEN(SP)
+	ADDQ ARGS_EXT(AX), DX
+	MOVQ DX, EXTEND(SP)      // dictEnd (0 with no extDict: EXTLEN 0 is never used)
 	MOVQ $0, ARGS_PENDING(AX)
 
 loop:
@@ -191,7 +195,7 @@ reload2Done:
 	MOVQ AX, CX
 	SUBQ PREFIX(SP), CX
 	CMPQ DX, CX          // uint(offset) > uint(oLitEnd - prefixStart)
-	JHI  pending
+	JHI  extPath
 
 	// Copy literals: copy16, then wildcopy(op+16, litPtr+16, litLength-16).
 	MOVOU (R12), X0
@@ -219,6 +223,7 @@ litDone:
 	MOVQ AX, R11         // op = oLitEnd
 	ADDQ SI, R12         // litPtr = iLitEnd
 
+matchCopy:
 	// Copy match.
 	MOVQ R11, AX
 	SUBQ DX, AX          // match = oLitEnd - offset
@@ -296,4 +301,121 @@ seqDone:
 	MOVQ OMEND(SP), R11      // op += sequenceLength
 	DECQ NBSEQ(SP)
 	JMP  loop
+
+extPath:
+	// execSequence's "offset beyond prefix" branch: the match starts
+	// d = offset - (oLitEnd - prefixStart) >= 1 bytes before prefixStart,
+	// at match = dictEnd - d in the extDict. Handed back when d >
+	// len(extDict) (C: corruption_detected; also every such offset with no
+	// extDict), and when the extDict overlaps [op, oMatchEnd + 32), the
+	// bytes the sequence may write: else the extDict reads give the same
+	// bytes before or after any write, as C's order (literals, then
+	// ZSTD_memmove) has them.
+	MOVQ DX, BP
+	SUBQ CX, BP          // d
+	CMPQ BP, EXTLEN(SP)
+	JHI  pending
+	MOVQ EXTEND(SP), CX
+	SUBQ BP, CX          // match
+	MOVQ BP, EXTD(SP)
+	MOVQ CX, EXTSRC(SP)
+	CMPQ EXTEND(SP), R11
+	JLS  extLits         // dictEnd <= op
+	MOVQ OMEND(SP), BP
+	ADDQ $32, BP
+	CMPQ CX, BP
+	JCS  pending         // match < oMatchEnd + 32
+
+extLits:
+	// The literals, as at the copy above.
+	MOVOU (R12), X0
+	MOVOU X0, (R11)
+	CMPQ  SI, $16
+	JLS   extLitDone
+	MOVOU 16(R12), X0
+	MOVOU X0, 16(R11)
+	CMPQ  SI, $32
+	JLS   extLitDone
+	LEAQ  32(R11), CX
+	LEAQ  32(R12), BP
+
+extLitLoop:
+	MOVOU (BP), X0
+	MOVOU X0, (CX)
+	MOVOU 16(BP), X0
+	MOVOU X0, 16(CX)
+	ADDQ  $32, CX
+	ADDQ  $32, BP
+	CMPQ  CX, AX
+	JCS   extLitLoop
+
+extLitDone:
+	MOVQ AX, R11         // op = oLitEnd
+	ADDQ SI, R12         // litPtr = iLitEnd
+
+	// ZSTD_memmove(op, match, n), n = min(d, matchLength) >= 1 (matchLength
+	// >= MINMATCH): exactly n bytes read and written (no overlap, see
+	// above), in 16-byte steps and a last step that ends at n, or for n <
+	// 16 two overlapping 8-, 4- or 1-byte steps (and a middle byte for 3).
+	MOVQ    DX, EXTOFF(SP)
+	MOVQ    EXTSRC(SP), CX
+	MOVQ    EXTD(SP), SI
+	CMPQ    DI, SI
+	CMOVQCS DI, SI       // n
+	MOVQ    R11, AX
+	CMPQ    SI, $16
+	JCS     extShort
+
+extLoop:
+	MOVOU (CX), X0
+	MOVOU X0, (AX)
+	ADDQ  $16, CX
+	ADDQ  $16, AX
+	SUBQ  $16, SI
+	CMPQ  SI, $16
+	JCC   extLoop
+	TESTQ SI, SI
+	JEQ   extCopied
+	MOVOU -16(CX)(SI*1), X0
+	MOVOU X0, -16(AX)(SI*1)
+	JMP   extCopied
+
+extShort:
+	CMPQ SI, $8
+	JCS  extShort4
+	MOVQ (CX), DX
+	MOVQ DX, (AX)
+	MOVQ -8(CX)(SI*1), DX
+	MOVQ DX, -8(AX)(SI*1)
+	JMP  extCopied
+
+extShort4:
+	CMPQ SI, $4
+	JCS  extShort1
+	MOVL (CX), DX
+	MOVL DX, (AX)
+	MOVL -4(CX)(SI*1), DX
+	MOVL DX, -4(AX)(SI*1)
+	JMP  extCopied
+
+extShort1:
+	MOVB (CX), DX
+	MOVB DX, (AX)
+	MOVB -1(CX)(SI*1), DX
+	MOVB DX, -1(AX)(SI*1)
+	CMPQ SI, $3
+	JCS  extCopied
+	MOVB 1(CX), DX
+	MOVB DX, 1(AX)
+
+extCopied:
+	MOVQ EXTOFF(SP), DX
+	MOVQ EXTD(SP), CX
+	CMPQ DI, CX
+	JLS  seqDone         // matchLength <= d: the match was all in the extDict
+	// C: span extDict & currentPrefixSegment: op += d, matchLength -= d,
+	// match = prefixStart, which is op - offset: the copy above goes on.
+	ADDQ CX, R11
+	SUBQ CX, DI
+	JMP  matchCopy
 
