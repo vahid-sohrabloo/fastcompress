@@ -3,7 +3,7 @@ module github.com/vahid-sohrabloo/fastcompress/bench/zstd
 go 1.25
 
 require (
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.4
 	github.com/vahid-sohrabloo/fastcompress v0.0.0
 )
 
