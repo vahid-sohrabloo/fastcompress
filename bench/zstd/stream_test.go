@@ -340,7 +340,7 @@ func benchEncode(b *testing.B, lib string, level, conc int, data []byte, chunks 
 	for _, c := range chunks {
 		one(c)
 	}
-	b.ReportMetric(float64(len(data))/float64(total), "ratio")
+	ratio := float64(len(data)) / float64(total)
 	b.SetBytes(int64(len(data)))
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -349,4 +349,5 @@ func benchEncode(b *testing.B, lib string, level, conc int, data []byte, chunks 
 			one(c)
 		}
 	}
+	b.ReportMetric(ratio, "ratio") // after the loop: ResetTimer drops metrics
 }
