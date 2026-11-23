@@ -4,8 +4,8 @@
 [![CI](https://github.com/vahid-sohrabloo/fastcompress/actions/workflows/ci.yml/badge.svg)](https://github.com/vahid-sohrabloo/fastcompress/actions/workflows/ci.yml)
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
 
-Pure-Go ports of three C compression libraries, with output byte-identical
-to C and speed at or near C's:
+Go ports of three C compression libraries (no cgo, no dependencies), with
+output byte-identical to C and speed at or near C's:
 
 | package | port of | API |
 |---|---|---|
@@ -13,8 +13,10 @@ to C and speed at or near C's:
 | `flate`, `gzip`, `zlib` | [libdeflate](https://github.com/ebiggers/libdeflate) v1.26, levels 0 to 12 | the standard library's `compress/*` streams, plus libdeflate's whole-buffer API |
 | `lz4` | [lz4](https://github.com/lz4/lz4) v1.11.1, levels 1 to 12 | C's block, HC and frame API, plus `io.Writer`/`io.Reader` |
 
-No cgo and no dependencies. Hot loops have amd64 and arm64 assembly; every
-other platform (and the `noasm` build tag) runs the same algorithms in Go.
+No cgo and no dependencies. This is not assembly-free: the hot loops are
+written in Go assembly for amd64 and arm64, and every other platform (and the
+`noasm` or `purego` build tags) runs the same algorithms in plain Go, which is
+slower (see [BENCHMARKS.md](BENCHMARKS.md)).
 The decoders are written for untrusted input (see [Safety](#safety)).
 
 ```
