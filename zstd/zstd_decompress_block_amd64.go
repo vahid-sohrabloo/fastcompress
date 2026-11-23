@@ -19,6 +19,10 @@ func init() {
 // assembly (the fast loop and the table builder).
 func decAsmAvailable() bool { return cpu.X86.HasBMI2 }
 
+// seqAsmExtDict reports whether the sequence fast loop executes a match
+// that starts in the extDict itself: decodeExecSeqsAsm and decodeExecSeqsSplitAsm execute it.
+const seqAsmExtDict = true
+
 // decodeExecSeqsAsm is seqFast.runGo (zstd_decompress_block_asm_test.go)
 // in assembly.
 // C: zstd_decompress_block.c:ZSTD_decompressSequences_body (the loop)

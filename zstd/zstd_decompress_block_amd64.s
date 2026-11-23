@@ -38,6 +38,8 @@
 #define ARGS_ML       176
 #define ARGS_OFF      184
 #define ARGS_PENDING  192
+#define ARGS_EXT      200
+#define ARGS_EXTLEN   208
 
 // Frame slots.
 #define TLL      0   // tables (C: dt + 1)
@@ -54,6 +56,11 @@
 #define STML     88
 #define STOF     96
 #define OMEND    104 // oMatchEnd
+#define EXTEND   112 // the extDict: dictEnd (pointer) and len(extDict),
+#define EXTLEN   120
+#define EXTD     128 // and the extDict path's d, match and offset
+#define EXTSRC   136
+#define EXTOFF   144
 
 // Registers: bitContainer R8, bitsConsumed R9, ptr R10, op R11, litPtr R12,
 // the states' cells (C's ZSTD_seqSymbol, loaded whole: nextState bits
@@ -155,8 +162,13 @@
 // pending = 1 and the sequence in litLength/matchLength/offset, decoded
 // but not executed, at execSequence's branches to its slow paths:
 // iLitEnd > litEnd or oMatchEnd > oend - WILDCOPY_OVERLENGTH
-// (execSequenceEnd), or offset > oLitEnd - prefixStart as unsigned
-// (the extDict path, or offset beyond history). Preconditions
+// (execSequenceEnd), or offset > oLitEnd - prefixStart as unsigned when
+// the match does not start in the extDict (ext[:extLen], C's
+// dictEnd - extLen up to dictEnd: offset beyond history) or the extDict
+// overlaps [op, oMatchEnd + 32). A match that starts in the extDict is
+// executed as execSequence's extDict branch does: the literals, then the
+// match's bytes in the extDict copied exactly, then the rest from
+// prefixStart by the copy above. Preconditions
 // (sequencesFast checks the last five, seqFast.asmOK; runAsm passes the
 // rest):
 //   - the bitstream, states and tables are initSeqState's or later ones
@@ -199,14 +211,20 @@
 //     The compare is unsigned: it bounds match only because
 //     prefixStart <= op <= oLitEnd (precondition), so oLitEnd - prefixStart
 //     does not wrap.
-// (7) Frame $112-8: one pointer argument, no results; the slots above.
+// (6e) extDict reads: offset > oLitEnd - prefixStart (unsigned) leaves
+//     d = offset - (oLitEnd - prefixStart) >= 1, and the path runs only with
+//     d <= extLen; it reads n = min(d, matchLength) <= d bytes from
+//     dictEnd - d, all in ext[:extLen] (the 16-, 8-, 4- and 1-byte steps
+//     never pass n), and writes them at oLitEnd, below oMatchEnd (5). The
+//     rest of the match is read from prefixStart = op - offset, as in (6).
+// (7) Frame $152-8: one pointer argument, no results; the slots above.
 //     The argument is read only here (a+0(FP)), where go vet's asmdecl
 //     checks it; the #included body uses registers and frame slots.
 //
 // TABLE INVARIANT: an offset cell with nbAdditionalBits 1 has baseValue 1
 // (OF_base[1]: buildFSETable and buildSeqTableRLE take both from the code,
 // OF_bits[1] == 1). The loop checks it before using prevOffset[offset].
-TEXT ·decodeExecSeqsAsm(SB), NOSPLIT, $112-8
+TEXT ·decodeExecSeqsAsm(SB), NOSPLIT, $152-8
 	MOVQ a+0(FP), AX
 #include "zstd_decompress_block_seqloop_amd64.h"
 
@@ -250,7 +268,7 @@ exit:
 //     copy equals C's (non-overlapping) ZSTD_copy16/ZSTD_wildcopy.
 //     Memory safety does not depend on this: (4) and (5) bound every
 //     access with or without split, and with lits != out.
-TEXT ·decodeExecSeqsSplitAsm(SB), NOSPLIT, $112-8
+TEXT ·decodeExecSeqsSplitAsm(SB), NOSPLIT, $152-8
 	MOVQ a+0(FP), AX
 #define SEQ_SPLIT
 #include "zstd_decompress_block_seqloop_amd64.h"

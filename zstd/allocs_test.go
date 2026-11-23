@@ -92,6 +92,97 @@ func TestPipelinedStreamAllocs(t *testing.T) {
 	}
 }
 
+// TestStreamAllocs: a stream without a pipeline (WithDecoderConcurrency(1),
+// kopia's pooled Decoder) reset to a reader and decoded with WriteTo or
+// Read does not allocate in steady state: frames larger than the window
+// (the round buffer wraps), with and without a content size, several
+// frames in one stream, and small input decoded at Reset (a reader with
+// Bytes, WithDecodeBuffersBelow). WriteTo writes from the stream's window
+// buffer, so it never allocates Read's output buffer either.
+func TestStreamAllocs(t *testing.T) {
+	if raceEnabled {
+		t.Skip("allocation counts differ under the race detector")
+	}
+	src := asyncTestData(5<<20, 4) // over level 3's 2 MiB window
+	e := newTestEncoder(t, WithEncoderConcurrency(1))
+	stream := func(parts ...[]byte) []byte {
+		var b bytes.Buffer
+		for _, p := range parts {
+			e.Reset(&b)
+			if _, err := e.Write(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return b.Bytes()
+	}
+	small := src[:10<<10]
+	for _, c := range []struct {
+		name  string
+		frame []byte
+		want  []byte
+		bytes bool // a reader with Bytes and Len: decoded at Reset
+	}{
+		{"stream", stream(src), src, false},
+		{"fcs", e.EncodeAll(src, nil), src, false},
+		{"multi", stream(src[:1<<20], src[1<<20:3<<20], src[3<<20:]), src, false},
+		{"small", stream(small), small, true},
+	} {
+		d, err := NewReader(nil, WithDecoderConcurrency(1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got bytes.Buffer
+		got.Grow(len(c.want))
+		buf := make([]byte, 64<<10)
+		br := bytes.NewReader(nil)
+		var bb bytes.Buffer
+		// Read only: io.CopyBuffer with WriteTo and ReadFrom hidden.
+		var onlyW io.Writer = struct{ io.Writer }{&got}
+		var onlyR io.Reader = struct{ io.Reader }{d}
+		for _, m := range []string{"WriteTo", "Read"} {
+			run := func() {
+				var r io.Reader = br
+				if c.bytes {
+					bb.Reset()
+					bb.Write(c.frame)
+					r = &bb
+				} else {
+					br.Reset(c.frame)
+				}
+				if err := d.Reset(r); err != nil {
+					t.Fatal(err)
+				}
+				got.Reset()
+				var err error
+				if m == "WriteTo" {
+					_, err = d.WriteTo(&got)
+				} else {
+					_, err = io.CopyBuffer(onlyW, onlyR, buf)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 3 {
+				run()
+			}
+			if m == "WriteTo" && d.s.out != nil {
+				t.Errorf("%s: WriteTo allocated Read's output buffer", c.name)
+			}
+			if a := testing.AllocsPerRun(5, run); a != 0 {
+				t.Errorf("%s, %s: %v allocations per stream, want 0", c.name, m, a)
+			}
+			if !bytes.Equal(got.Bytes(), c.want) {
+				t.Fatalf("%s, %s: wrong output", c.name, m)
+			}
+		}
+		d.Close()
+	}
+}
+
 // TestConcurrentBlocksAllocs: with WithConcurrentBlocks, the zstdmt jobs
 // start their goroutines without allocating (the job functions are bound
 // once; it was one allocation per job), so EncodeAll into a dst with room

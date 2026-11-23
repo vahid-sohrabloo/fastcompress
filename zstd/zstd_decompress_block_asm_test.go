@@ -29,8 +29,11 @@ import (
 // it executes with execSequenceSplitLitBuffer (oend_w = iLitEnd - 32), and
 // also returns the sequence pending at that function's oMatchEnd > oend_w;
 // iLitEnd > litEnd is then C's break.
+// A match that starts in ext, the block's extDict, it executes as the
+// amd64 assembly does (seqAsmExtDict; extInLoop says when), and hands
+// back otherwise.
 // It counts each branch of the assembly it takes in seqArmHits.
-func (f *seqFast) runGo(st *seqState) (seq, bool) {
+func (f *seqFast) runGo(st *seqState, ext []byte) (seq, bool) {
 	for f.nbSeq > 1 {
 		if _, ptr, _, _ := st.dStream.Raw(); ptr < 16 {
 			seqArmHits[armStopPtr].Add(1)
@@ -62,17 +65,20 @@ func (f *seqFast) runGo(st *seqState) (seq, bool) {
 			seqArmHits[armPendSplit].Add(1)
 			return sq, true
 		case uint(sq.offset) > uint(oLitEnd-f.prefixStart):
-			seqArmHits[armPendOffset].Add(1)
-			return sq, true
+			if !f.extInLoop(sq, ext) {
+				return sq, true
+			}
+			countExtArms(sq, sq.offset-(oLitEnd-f.prefixStart))
+		default:
+			countExecArms(sq)
 		}
-		countExecArms(sq)
 		var n int
 		var e dErr
 		if f.split {
 			seqArmHits[armSplitExec].Add(1)
-			n, e = execSequenceSplitLitBuffer(f.out, f.op, f.oend, iLitEnd-wildcopyOverlength, sq, &f.litPtr, f.litEnd, f.prefixStart, nil)
+			n, e = execSequenceSplitLitBuffer(f.out, f.op, f.oend, iLitEnd-wildcopyOverlength, sq, &f.litPtr, f.litEnd, f.prefixStart, ext)
 		} else {
-			n, e = execSequence(f.out, f.op, f.oend, sq, f.lits, &f.litPtr, f.litEnd, f.prefixStart, nil)
+			n, e = execSequence(f.out, f.op, f.oend, sq, f.lits, &f.litPtr, f.litEnd, f.prefixStart, ext)
 		}
 		if e != 0 {
 			panic("execSequence failed on its fast path")
@@ -82,6 +88,66 @@ func (f *seqFast) runGo(st *seqState) (seq, bool) {
 	}
 	seqArmHits[armStopNbSeq].Add(1)
 	return seq{}, false
+}
+
+// extInLoop reports whether the assembly executes sq, whose offset goes
+// past prefixStart, itself (its extDict path), counting the branch that
+// decides: the match starts in ext (d <= len(ext), d the bytes before
+// prefixStart) and ext does not overlap [op, oMatchEnd + 32), the bytes
+// the sequence may write.
+func (f *seqFast) extInLoop(sq seq, ext []byte) bool {
+	oLitEnd := f.op + sq.litLength
+	d := sq.offset - (oLitEnd - f.prefixStart)
+	if !seqAsmExtDict || uint(d) > uint(len(ext)) { // unsigned, as the assembly's (offset may be C's (size_t)-1)
+		seqArmHits[armPendOffset].Add(1)
+		return false
+	}
+	dictEnd := uintptr(unsafe.Pointer(unsafe.SliceData(ext))) + uintptr(len(ext))
+	op := uintptr(unsafe.Pointer(unsafe.SliceData(f.out))) + uintptr(f.op)
+	switch {
+	case dictEnd <= op:
+		seqArmHits[armExtBelow].Add(1)
+	case dictEnd-uintptr(d) >= op+uintptr(sq.litLength+sq.matchLength)+wildcopyOverlength:
+		seqArmHits[armExtAbove].Add(1)
+	default:
+		seqArmHits[armExtOverlap].Add(1)
+		return false
+	}
+	return true
+}
+
+// countExtArms counts the branches of the extDict path the assembly takes
+// for sq, whose match starts d bytes before prefixStart.
+func countExtArms(sq seq, d int) {
+	switch {
+	case sq.litLength <= 16:
+		seqArmHits[armExtLit16].Add(1)
+	case sq.litLength <= 32:
+		seqArmHits[armExtLit32].Add(1)
+	default:
+		seqArmHits[armExtLitLoop].Add(1)
+	}
+	switch n := min(d, sq.matchLength); {
+	case n >= 16:
+		seqArmHits[armExtCopy16].Add(1)
+		if n%16 != 0 {
+			seqArmHits[armExtCopyTail].Add(1)
+		}
+	case n >= 8:
+		seqArmHits[armExtCopy8].Add(1)
+	case n >= 4:
+		seqArmHits[armExtCopy4].Add(1)
+	case n == 3:
+		seqArmHits[armExtCopy3].Add(1)
+	default:
+		seqArmHits[armExtCopy1].Add(1)
+	}
+	if sq.matchLength <= d {
+		seqArmHits[armExtWhole].Add(1)
+		return
+	}
+	seqArmHits[armExtSpan].Add(1)
+	countMatchArms(sq.offset, sq.matchLength-d)
 }
 
 // seqArm is a branch of decodeExecSeqsAsm. runGo counts the ones it takes
@@ -121,6 +187,20 @@ const (
 	armSplitBreak                  // split: iLitEnd > litEnd, C's break to litExtraBuffer
 	armPendSplit                   // split: oMatchEnd > iLitEnd - 32 (execSequenceEndSplitLitBuffer)
 	armSplitExec                   // split: a sequence executed (execSequenceSplitLitBuffer's fast path)
+	armExtBelow                    // extDict path (amd64): dictEnd <= op
+	armExtAbove                    // extDict path: match >= oMatchEnd + 32
+	armExtOverlap                  // extDict path: the extDict overlaps the writes, handed back
+	armExtLit16                    // extDict path: litLength <= 16
+	armExtLit32                    // extDict path: litLength 17..32
+	armExtLitLoop                  // extDict path: litLength > 32
+	armExtCopy16                   // extDict path: n = min(d, matchLength) >= 16, extLoop
+	armExtCopyTail                 // extDict path: n >= 16 not a multiple of 16, the last step
+	armExtCopy8                    // extDict path: n 8..15
+	armExtCopy4                    // extDict path: n 4..7
+	armExtCopy3                    // extDict path: n 3 (the middle byte)
+	armExtCopy1                    // extDict path: n 1..2
+	armExtWhole                    // extDict path: matchLength <= d, all in the extDict
+	armExtSpan                     // extDict path: the rest of the match from prefixStart
 	numSeqArms
 )
 
@@ -132,6 +212,9 @@ var seqArmNames = [numSeqArms]string{
 	"litLength<=16", "litLength 17..32", "litLength>32",
 	"offset<8", "offset 8..15", "offset>=16", "matchLoop", "copy8Loop",
 	"split break iLitEnd>litEnd", "split pending oMatchEnd>iLitEnd-32", "split executed",
+	"ext dictEnd<=op", "ext match>=oMatchEnd+32", "ext overlap", "ext litLength<=16", "ext litLength 17..32",
+	"ext litLength>32", "ext n>=16", "ext n>=16 tail", "ext n 8..15", "ext n 4..7", "ext n 3", "ext n 1..2",
+	"ext whole", "ext span",
 }
 
 var seqArmHits [numSeqArms]atomic.Int64
@@ -154,15 +237,25 @@ var (
 		armOff16, armCopy8Loop, armSplitBreak, armPendSplit, armSplitExec}
 )
 
+// The extDict path's branches (seqAsmExtDict: amd64 only), reached by
+// the corpus (extDict history) and by the synthetic states' extDicts.
+func init() {
+	if seqAsmExtDict {
+		equivArms = append(equivArms, armExtCopy16, armExtCopyTail, armExtCopy3, armExtCopy1, armExtSpan)
+		syntheticArms = append(syntheticArms, armExtBelow, armExtAbove, armExtOverlap, armExtLit16, armExtLit32,
+			armExtLitLoop, armExtCopy8, armExtCopy4, armExtWhole)
+	}
+}
+
 // TestSeqAsmArmLists checks that equivArms and syntheticArms together
-// name every branch.
+// name every branch (without the extDict path's where the loop has none).
 func TestSeqAsmArmLists(t *testing.T) {
 	var seen [numSeqArms]bool
 	for _, a := range append(append([]seqArm(nil), equivArms...), syntheticArms...) {
 		seen[a] = true
 	}
 	for i, ok := range seen {
-		if !ok {
+		if !ok && (seqAsmExtDict || i < int(armExtBelow)) {
 			t.Errorf("branch %q in neither list", seqArmNames[i])
 		}
 	}
@@ -213,6 +306,13 @@ func countExecArms(sq seq) {
 	default:
 		seqArmHits[armLitLoop].Add(1)
 	}
+	countMatchArms(sq.offset, sq.matchLength)
+}
+
+// countMatchArms counts the match copy's branches for offset and
+// matchLength (the match's bytes from prefixStart on).
+func countMatchArms(offset, matchLength int) {
+	sq := seq{offset: offset, matchLength: matchLength}
 	switch {
 	case sq.offset < 8:
 		seqArmHits[armOffLt8].Add(1)
@@ -430,6 +530,7 @@ type seqFastRun struct {
 	st    seqState
 	f     seqFast
 	extra []byte
+	ext   []byte // the run's own extDict, if set (compareSeqFast)
 }
 
 // newSeqFastRun starts a run of the block's sequences seqSrc, with d's
@@ -558,6 +659,10 @@ func sameSeqFastState(t testing.TB, what string, a, g *seqFastRun) {
 // It returns the number of sequences the loops executed.
 func compareSeqFast(t testing.TB, a, g *seqFastRun, extDict []byte) int {
 	t.Helper()
+	aext, gext := extDict, extDict
+	if a.ext != nil || g.ext != nil {
+		aext, gext = a.ext, g.ext
+	}
 	checkOK := func() {
 		if f := a.f; !f.asmOK() {
 			t.Fatalf("sequencesFast preconditions (split %v): oend %d, len(out) %d, litEnd %d, len(lits) %d, op %d, litPtr %d, prefixStart %d",
@@ -572,11 +677,11 @@ func compareSeqFast(t testing.TB, a, g *seqFastRun, extDict []byte) int {
 		var asq seq
 		var ap bool
 		if decAsmAvailable() {
-			asq, ap = a.f.runAsm(&a.st)
+			asq, ap = a.f.runAsm(&a.st, aext)
 		} else {
-			asq, ap = a.f.runGo(&a.st)
+			asq, ap = a.f.runGo(&a.st, aext)
 		}
-		gsq, gp := g.f.runGo(&g.st)
+		gsq, gp := g.f.runGo(&g.st, gext)
 		sameSeqFastState(t, "after the loop", a, g)
 		if ap != gp || asq != gsq {
 			t.Fatalf("asm pending %v %+v, Go pending %v %+v", ap, asq, gp, gsq)
@@ -592,7 +697,7 @@ func compareSeqFast(t testing.TB, a, g *seqFastRun, extDict []byte) int {
 		if !ap {
 			break
 		}
-		ae, ge := a.execPending(asq, extDict), g.execPending(gsq, extDict)
+		ae, ge := a.execPending(asq, aext), g.execPending(gsq, gext)
 		if ae != ge {
 			t.Fatalf("pending sequence: asm err %d, Go err %d", ae, ge)
 		}
@@ -880,6 +985,46 @@ func TestSeqAsmSyntheticStates(t *testing.T) {
 				}
 			}
 		}
+		// The extDict, whose matches the amd64 loop executes: none, a
+		// buffer of its own (against a guard page for the assembly's
+		// runs), out below prefixStart (dictEnd <= op), or a stretch of out
+		// that may overlap the sequences' writes or lie above them.
+		switch iter % 4 {
+		case 1:
+			ext := make([]byte, 1+rng.IntN(1<<16))
+			for i := range ext {
+				ext[i] = byte(rng.Uint32())
+			}
+			for i, r := range runs {
+				r.ext = ext
+				if i%2 == 0 {
+					r.ext = guardmem.After(t, len(ext))
+					if iter&16 != 0 {
+						r.ext = guardmem.Before(t, len(ext))
+					}
+					copy(r.ext, ext)
+				}
+			}
+		case 2:
+			for _, r := range runs {
+				r.ext = r.f.out[:r.f.prefixStart:r.f.prefixStart]
+			}
+		case 3:
+			lo := rng.IntN(len(out))
+			hi := lo + 1 + rng.IntN(len(out)-lo)
+			ps := -1
+			if iter&4 != 0 { // ending just past op, prefixStart near op: overlaps the writes
+				hi = min(len(out), op+1+rng.IntN(4096))
+				lo = rng.IntN(hi)
+				ps = op - rng.IntN(min(op, 16)+1)
+			}
+			for _, r := range runs {
+				r.ext = r.f.out[lo:hi:hi]
+				if ps >= 0 {
+					r.f.prefixStart = ps
+				}
+			}
+		}
 		if isSplit {
 			glue += checkSplitGlue(t, runs[2], runs[3])
 		}
@@ -907,13 +1052,13 @@ func checkSplitGlue(t testing.TB, p, o *seqFastRun) int {
 	var pe dErr
 	withAsm(t, true, func() {
 		on = useSeqDecAsm
-		psq, pbrk, pe = sequencesFastSplit(&p.st, &p.f, nil)
+		psq, pbrk, pe = sequencesFastSplit(&p.st, &p.f, p.ext)
 	})
 	var osq seq
 	var obrk bool
 	var oe dErr
 	for on && o.f.nbSeq > 1 {
-		sq, pending := o.f.runGo(&o.st)
+		sq, pending := o.f.runGo(&o.st, o.ext)
 		if !pending {
 			break
 		}
@@ -921,7 +1066,7 @@ func checkSplitGlue(t testing.TB, p, o *seqFastRun) int {
 			osq, obrk = sq, true
 			break
 		}
-		if oe = o.execPending(sq, nil); oe != 0 {
+		if oe = o.execPending(sq, o.ext); oe != 0 {
 			break
 		}
 	}

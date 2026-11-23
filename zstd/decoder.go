@@ -329,11 +329,19 @@ func (d *Decoder) Read(p []byte) (int, error) {
 // The output is written in chunks of up to ZSTD_DStreamOutSize() bytes;
 // output decoded before an error is written before the error is returned.
 // An error of w is sticky, as the decoder's are.
+//
+// Go: without a pipeline, each chunk is written to w straight from the
+// stream context's window buffer (or from the output decoded at Reset),
+// not copied into an output buffer first; the chunks and the output are
+// the same.
 func (d *Decoder) WriteTo(w io.Writer) (int64, error) {
 	if err := d.check(); err != nil {
 		return 0, err
 	}
 	s := &d.s
+	if s.pipe == nil && !d.o.pipelined() {
+		return d.writeDirect(w)
+	}
 	if s.out == nil {
 		s.out = make([]byte, dStreamOutSize)
 	}
@@ -358,6 +366,106 @@ func (d *Decoder) WriteTo(w io.Writer) (int64, error) {
 		if err != nil {
 			return written, err
 		}
+	}
+}
+
+// writeDirect is WriteTo without a pipeline. The output decoded at Reset
+// (WithDecodeBuffersBelow) is written from s.buf. A stream runs fill's
+// loop with an output buffer of no room: each decompressStream call then
+// stops at its flush stage with the block it decoded in the context's
+// buffer (C's zdssFlush, see pendingOutput), which is written to w from
+// there and marked flushed, and the next call goes on from there.
+func (d *Decoder) writeDirect(w io.Writer) (int64, error) {
+	s := &d.s
+	var written int64
+	if s.buffered {
+		for s.err == nil {
+			p := s.buf[s.bufPos:min(len(s.buf), s.bufPos+dStreamOutSize)]
+			s.bufPos += len(p)
+			if s.bufPos == len(s.buf) {
+				s.endBuffered(d.o.lowMem)
+			}
+			if len(p) > 0 {
+				nw, err := writeChunk(w, p)
+				written += int64(nw)
+				if err != nil {
+					s.err = err
+					return written, err
+				}
+			}
+		}
+		if s.err == io.EOF {
+			return written, nil
+		}
+		return written, s.err
+	}
+	for s.err == nil {
+		if p := s.dc.pendingOutput(); len(p) > 0 {
+			s.dc.outStart = s.dc.outEnd // flushed, whatever w does
+			nw, err := writeChunk(w, p)
+			written += int64(nw)
+			if err != nil {
+				s.err = err
+				return written, err
+			}
+		}
+		if s.needIn {
+			if s.eof {
+				// C: as in fill.
+				s.err = io.EOF
+				if s.last != 0 || s.inPos < s.inEnd {
+					s.err = io.ErrUnexpectedEOF
+				}
+				break
+			}
+			if err := s.readInput(); err != nil {
+				s.err = err
+				break
+			}
+			s.needIn = false
+		}
+		in := inBuffer{src: s.in[:s.inEnd], pos: s.inPos}
+		var out outBuffer
+		hint, e := s.dc.decompressStreamCode(&out, &in)
+		moved := in.pos != s.inPos || len(s.dc.pendingOutput()) > 0
+		s.inPos = in.pos
+		if e != 0 {
+			s.err = e.toError("stream")
+			break
+		}
+		if !moved {
+			s.needIn = true
+			continue
+		}
+		s.last = hint
+		if hint == 0 && d.o.lowMem {
+			s.release()
+		}
+	}
+	if s.err == io.EOF {
+		return written, nil
+	}
+	return written, s.err
+}
+
+// writeChunk writes p to w; a short write is io.ErrShortWrite.
+func writeChunk(w io.Writer, p []byte) (int, error) {
+	nw, err := w.Write(p)
+	if err == nil && nw < len(p) {
+		err = io.ErrShortWrite
+	}
+	return nw, err
+}
+
+// endBuffered sets the sticky error once the output decoded at Reset has
+// been served: its error, else io.EOF.
+func (s *decStream) endBuffered(lowMem bool) {
+	s.err = s.bufErr
+	if s.err == nil {
+		s.err = io.EOF
+	}
+	if lowMem && cap(s.buf) > lowMemBuffers {
+		s.buf = nil
 	}
 }
 
@@ -398,13 +506,7 @@ func (d *Decoder) fill(p []byte) (n int, err error) {
 		n = copy(p, s.buf[s.bufPos:])
 		s.bufPos += n
 		if s.bufPos == len(s.buf) {
-			s.err = s.bufErr
-			if s.err == nil {
-				s.err = io.EOF
-			}
-			if d.o.lowMem && cap(s.buf) > lowMemBuffers {
-				s.buf = nil
-			}
+			s.endBuffered(d.o.lowMem)
 		}
 		return n, s.err
 	}
