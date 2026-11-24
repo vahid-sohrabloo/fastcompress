@@ -140,7 +140,13 @@ func checkSameStream(t testing.TB, what string, singleSegment, dicts, limited bo
 		return exempt
 	}
 	if !sameErr(gerr, rerr) || !bytes.Equal(got, rout) {
-		t.Fatalf("%s (%s): n>1 %d bytes, %v; n=1 without the shortcut %d bytes, %v", what, exempt, len(got), gerr, len(rout), rerr)
+		// The reference reads with 1 byte of room, which still reaches the
+		// shortcut for a frame content size of 0 or 1: the documented
+		// size pair again (the reference is then the shortcut's).
+		if !(errors.Is(gerr, ErrUnexpectedBlockSize) && errors.Is(rerr, ErrFrameSizeExceeded) && bytes.Equal(got, rout)) {
+			t.Fatalf("%s (%s): n>1 %d bytes, %v; n=1 without the shortcut %d bytes, %v", what, exempt, len(got), gerr, len(rout), rerr)
+		}
+		exempt = "size"
 	}
 	return exempt
 }

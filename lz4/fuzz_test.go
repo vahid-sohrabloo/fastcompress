@@ -165,7 +165,10 @@ func FuzzFrameMT(f *testing.F) {
 			w := NewWriter(&buf, WithPreferences(p))
 			pl := plan
 			for off := 0; off < len(src); {
-				n := min(len(src)-off, 1+int(pl&0xff)*601)
+				// (at most about 256 writes: one byte per write and a flush
+				// after each of a 512 KB input is minutes of work, which
+				// the fuzzer takes for a hung worker)
+				n := min(len(src)-off, max(1+int(pl&0xff)*601, len(src)>>8))
 				var err error
 				if pl&0x300 == 0x300 {
 					_, err = w.WriteUncompressed(src[off : off+n])

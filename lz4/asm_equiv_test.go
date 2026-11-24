@@ -152,6 +152,16 @@ func testInput(t testing.TB, name string) []byte {
 	return creftest.LZ4Inputs(t)[name]
 }
 
+// hcFuzzMax is the longest input FuzzHCChainAsmEquiv takes at level: the
+// chain search of the top levels on repetitive data takes seconds on 256 KiB
+// (about 30 compressions per input), which the fuzzer takes for a hung worker.
+func hcFuzzMax(level int) int {
+	if level >= 10 {
+		return 1 << 16
+	}
+	return 1 << 18
+}
+
 // FuzzHCChainAsmEquiv compresses arbitrary input at the HC levels (2 to
 // 12, favorDecSpeed too) with the assembly on and off: one-shot with the
 // bound and with tight capacities (limitedOutput, possibly failing),
@@ -163,7 +173,7 @@ func FuzzHCChainAsmEquiv(f *testing.F) {
 	for _, in := range []string{"text-65547", "text128KiB", "random-70K", "period3-200K", "period7-100K", "zeros-1M"} {
 		b := testInput(f, in)
 		for lv := 0; lv < 11; lv++ {
-			f.Add(uint8(i*11+lv), b[:min(len(b), 200000)])
+			f.Add(uint8(i*11+lv), b[:min(len(b), hcFuzzMax(2+lv))])
 		}
 		i++
 	}
@@ -181,10 +191,10 @@ func FuzzHCChainAsmEquiv(f *testing.F) {
 	dict := testInput(f, "text-65547")[:20000]
 	cdict := NewCDict(dict)
 	f.Fuzz(func(t *testing.T, sel uint8, src []byte) {
-		if len(src) > 1<<18 {
+		level := 2 + int(sel)%11
+		if len(src) > hcFuzzMax(level) {
 			return
 		}
-		level := 2 + int(sel)%11
 		run := func() [][]byte {
 			dst := make([]byte, CompressBound(len(src)))
 			out := [][]byte{append([]byte(nil), dst[:CompressHC(dst, src, level)]...)}
