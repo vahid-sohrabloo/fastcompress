@@ -37,5 +37,8 @@ func stdResetReader(z io.ReadCloser, r io.Reader) error { return z.(stdzlib.Rese
 func singleStream(io.ReadCloser) {}
 
 // wholeComparable reports whether the whole-buffer decoder and the Reader
-// treat m's container alike: always, for this format.
-func wholeComparable([]byte) bool { return true }
+// treat m's container alike: for this format, unless the header asks for a
+// preset dictionary. The whole-buffer decoder (as libdeflate) rejects every
+// FDICT stream; the Reader (as the standard library) compares only the
+// dictionary's Adler-32, so a stream made with an empty dictionary reads.
+func wholeComparable(m []byte) bool { return len(m) < 2 || m[1]&(1<<5) == 0 }
