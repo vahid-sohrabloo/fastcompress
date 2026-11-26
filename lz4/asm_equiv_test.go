@@ -155,11 +155,14 @@ func testInput(t testing.TB, name string) []byte {
 // hcFuzzMax is the longest input FuzzHCChainAsmEquiv takes at level: the
 // chain search of the top levels on repetitive data takes seconds on 256 KiB
 // (about 30 compressions per input), which the fuzzer takes for a hung worker.
+// A 64 KiB input at level 12 also peaks near 450 MB, and a hosted runner's
+// fuzz worker died once on one (exit status 2, no output), so the top levels
+// take 32 KiB and the rest 128 KiB.
 func hcFuzzMax(level int) int {
 	if level >= 10 {
-		return 1 << 16
+		return 1 << 15
 	}
-	return 1 << 18
+	return 1 << 17
 }
 
 // FuzzHCChainAsmEquiv compresses arbitrary input at the HC levels (2 to
