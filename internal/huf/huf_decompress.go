@@ -81,6 +81,22 @@ func rescaleStats(huffWeight []byte, rankVal []uint32, nbSymbols, tableLog, targ
 	return targetTableLog
 }
 
+// set4 is the entry {nbBits, sym} four times over.
+// C: huf_decompress.c:HUF_DEltX1_set4
+func set4(sym byte, nbBits uint16) uint64 {
+	return uint64(uint16(sym)<<8|nbBits) * 0x0001_0001_0001_0001
+}
+
+// store4 stores the four entries of d4. The compiler merges the stores into
+// one of 64 bits where the target allows it (amd64, arm64).
+// C: MEM_write64
+func store4(f *[4]uint16, d4 uint64) {
+	f[0] = uint16(d4)
+	f[1] = uint16(d4 >> 16)
+	f[2] = uint16(d4 >> 32)
+	f[3] = uint16(d4 >> 48)
+}
+
 // ReadDTableX1 reads a Huffman table description from src into dt and
 // returns the number of bytes read. Tables are rescaled up to
 // HUF_DECODER_FAST_TABLELOG when dt allows it. flags is accepted for C
@@ -116,7 +132,7 @@ func ReadDTableX1(dt *DTable, src []byte, flags int) (int, error) {
 
 	// Compute symbols and rankStart given rankVal: symbols holds the
 	// symbols ordered by weight, rankStart the offset of each rank in the
-	// DTable. (C unrolls the symbol loop by 4; same order.)
+	// DTable.
 	{
 		var nextRankStart uint32
 		for n := 0; n < int(tableLog)+1; n++ {
@@ -124,17 +140,26 @@ func ReadDTableX1(dt *DTable, src []byte, flags int) (int, error) {
 			nextRankStart += rankVal[n]
 			rankStart[n] = curr
 		}
-		for n := 0; n < int(nbSymbols); n++ {
-			w := huffWeight[n]
-			symbols[rankStart[w]] = byte(n)
+		n := 0
+		for ; n+4 <= int(nbSymbols); n += 4 {
+			// ReadStats leaves no weight above TableLogMax, so the masks
+			// only spare the bounds checks.
+			for u, w := range [4]byte(huffWeight[n : n+4]) {
+				r := &rankStart[w&0xF]
+				symbols[byte(*r)] = byte(n + u)
+				*r++
+			}
+		}
+		for ; n < int(nbSymbols); n++ {
+			w := huffWeight[n] & 0xF
+			symbols[byte(rankStart[w])] = byte(n)
 			rankStart[w]++
 		}
 	}
 
 	// fill DTable: all entries of each weight in order. That way length is
 	// a constant for each iteration of the outer loop, and the switch picks
-	// an inner loop for it. (C's 4-entry MEM_write64 stores of
-	// HUF_DEltX1_set4 are four uint16 stores here; same entries.)
+	// an inner loop for it.
 	{
 		symbol := int(rankVal[0])
 		rankStart := 0
@@ -155,12 +180,27 @@ func ReadDTableX1(dt *DTable, src []byte, flags int) (int, error) {
 					fill[0], fill[1] = d, d
 					fill = fill[2:]
 				}
-			default: // length is a power of 2, >= 4
+			case 4:
 				for _, sym := range syms {
-					d := uint16(sym)<<8 | nbBits
-					for u := 0; u < length; u += 4 {
-						f := fill[u : u+4 : u+4]
-						f[0], f[1], f[2], f[3] = d, d, d, d
+					store4((*[4]uint16)(fill), set4(sym, nbBits))
+					fill = fill[4:]
+				}
+			case 8:
+				for _, sym := range syms {
+					d4 := set4(sym, nbBits)
+					store4((*[4]uint16)(fill), d4)
+					store4((*[4]uint16)(fill[4:]), d4)
+					fill = fill[8:]
+				}
+			default: // length is a power of 2, >= 16
+				for _, sym := range syms {
+					d4 := set4(sym, nbBits)
+					for u := 0; u < length; u += 16 {
+						f := (*[16]uint16)(fill[u:])
+						store4((*[4]uint16)(f[0:4]), d4)
+						store4((*[4]uint16)(f[4:8]), d4)
+						store4((*[4]uint16)(f[8:12]), d4)
+						store4((*[4]uint16)(f[12:16]), d4)
 					}
 					fill = fill[length:]
 				}
