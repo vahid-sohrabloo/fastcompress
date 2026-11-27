@@ -38,6 +38,12 @@ func decodeExecSeqsAsm(a *seqAsmArgs)
 //go:noescape
 func decodeExecSeqsSplitAsm(a *seqAsmArgs)
 
+// decodeExecSeqsTailAsm is decodeExecSeqsAsm without its ptr >= 16
+// condition: it takes the sequences up to the bitstream's start.
+//
+//go:noescape
+func decodeExecSeqsTailAsm(a *seqAsmArgs)
+
 // useFSETableAsm selects the assembly sequence-table builder (baseline
 // arm64). C has no assembly here either.
 var useFSETableAsm bool

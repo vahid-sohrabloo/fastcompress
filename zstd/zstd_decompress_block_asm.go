@@ -109,8 +109,9 @@ func (f *seqFast) asmOK() bool {
 		f.op <= f.oend && 0 <= f.litPtr && f.litPtr <= f.litEnd && 0 <= f.prefixStart && f.prefixStart <= f.op
 }
 
-// runAsm runs the assembly loop once from st and f (decodeExecSeqsSplitAsm
-// with f.split, else decodeExecSeqsAsm), with the block's extDict, and
+// runAsm runs the assembly loops once from st and f (decodeExecSeqsSplitAsm
+// with f.split, else decodeExecSeqsAsm and then, near the bitstream's start,
+// decodeExecSeqsTailAsm), with the block's extDict, and
 // stores the state it leaves back into them. It returns the sequence the
 // loop stopped on, if any (pending). Preconditions: sequencesFast's, or
 // sequencesFastSplit's.
@@ -144,7 +145,14 @@ func (f *seqFast) runAsm(st *seqState, extDict []byte) (seq, bool) {
 	if f.split {
 		decodeExecSeqsSplitAsm(&a)
 	} else {
-		decodeExecSeqsAsm(&a)
+		if a.ptr >= 16 {
+			decodeExecSeqsAsm(&a)
+		}
+		// The tail loop takes what is left within 16 bytes of the
+		// bitstream's start. It reloads 8 bytes, so it needs that many.
+		if a.pending == 0 && a.nbSeq > 1 && a.ptr < 16 && len(src) >= 8 {
+			decodeExecSeqsTailAsm(&a)
+		}
 	}
 	st.dStream.SetRaw(src, a.ptr, a.bitContainer, uint32(a.bitsConsumed))
 	st.stateLL.state, st.stateML.state, st.stateOffb.state = a.stateLL, a.stateML, a.stateOf

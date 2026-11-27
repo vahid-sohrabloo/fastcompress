@@ -49,7 +49,7 @@
 #define REP2     32
 #define NBSEQ    40
 #define OENDW    48  // pointers: out + oendW, lits + litEnd, out + prefixStart,
-#define LITEND   56  // src + 16
+#define LITEND   56  // src + 16, or &src[0] in the tail loop
 #define PREFIX   64
 #define SRCLIMIT 72
 #define STLL     80  // the states
@@ -119,6 +119,31 @@
 	SUBQ BP, R10; \
 	ANDQ $7, R9; \
 	MOVQ (R10), R8
+
+// RELOAD_TAIL is DStream.Reload for any ptr, with SRCLIMIT = &src[0]: as
+// RELOAD, and when that ptr is below src[0], clamp (a label holding
+// RELOAD_CLAMP(skip)) finishes it. Clobbers BP.
+#define RELOAD_TAIL(skip, clamp) \
+	CMPQ R9, $64; \
+	JHI  skip; \
+	MOVQ R9, BP; \
+	SHRQ $3, BP; \
+	SUBQ BP, R10; \
+	ANDQ $7, R9; \
+	CMPQ R10, SRCLIMIT(SP); \
+	JCS  clamp; \
+	MOVQ (R10), R8
+
+// RELOAD_CLAMP stops RELOAD_TAIL's ptr at src[0]: the BP = &src[0] - ptr bytes
+// it could not move back stay consumed, as in Reload (which moves nothing
+// when ptr is at src[0] already). Clobbers BP.
+#define RELOAD_CLAMP(skip) \
+	MOVQ SRCLIMIT(SP), BP; \
+	SUBQ R10, BP; \
+	ADDQ BP, R10; \
+	LEAQ (R9)(BP*8), R9; \
+	MOVQ (R10), R8; \
+	JMP  skip
 
 // READ_BITS_FAST(n, v, t): v = DStream.ReadBitsFast(n) for n >= 1 (C:
 // BIT_readBitsFast): (container << (bitsConsumed & 63)) >> (-n & 63);
@@ -282,6 +307,37 @@ exit:
 	MOVQ a+0(FP), AX
 	SEQ_EXIT
 	RET
+
+// func decodeExecSeqsTailAsm(a *seqAsmArgs)
+//
+// decodeExecSeqsAsm (the same body, with SEQ_TAIL) for the sequences that
+// start within 16 bytes of the bitstream's start: it has no ptr >= 16
+// condition and runs to the end of the bitstream, as C's loop does with
+// BIT_reloadDStream. Preconditions: as decodeExecSeqsAsm's, and len(src)
+// >= 8 (runAsm checks it).
+//
+// BOUNDS: (2) to (7) of decodeExecSeqsAsm. In place of (1):
+// (1t) Bitstream reads are the 8 bytes at ptr. DStream.Init leaves 0 <= ptr
+//     <= len(src) - 8 for len(src) >= 8 (precondition), and ptr only
+//     decreases. A reload in overflow (bitsConsumed > 64) does nothing; any
+//     other lowers ptr by bitsConsumed >> 3 <= 8 and, if that passes
+//     src[0], RELOAD_CLAMP raises it back to src[0] before the read. So
+//     0 <= ptr <= len(src) - 8 at every read.
+TEXT ·decodeExecSeqsTailAsm(SB), NOSPLIT, $152-8
+	MOVQ a+0(FP), AX
+#define SEQ_TAIL
+#include "zstd_decompress_block_seqloop_amd64.h"
+#undef SEQ_TAIL
+
+pending:
+	MOVQ a+0(FP), AX
+	SEQ_PENDING
+
+exit:
+	MOVQ a+0(FP), AX
+	SEQ_EXIT
+	RET
+
 
 // func buildFSETableAsm(dt *seqSymbol, norm *int16, maxSV1 uint, baseValue *uint32, nbAdd *uint8, tableLog uint, wksp *buildFSETableWksp) bool
 //

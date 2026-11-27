@@ -2,19 +2,24 @@
 // (zstd_decompress_block_amd64.s, which has their BOUNDS and includes this
 // in each TEXT symbol; labels are local to each symbol). With SEQ_SPLIT
 // defined it adds ZSTD_execSequenceSplitLitBuffer's oMatchEnd > oend_w
-// hand-back. Two entries keep decodeExecSeqsAsm's loop exactly as it was:
-// a run-time switch in the shared loop cost 1 to 2% on blocks that never
-// split. On entry AX is the argument a; the including TEXT supplies the
-// pending and exit labels (SEQ_PENDING, SEQ_EXIT). No a+0(FP) here: go
-// vet's asmdecl does not read #included files, so every FP reference stays
-// in the .s, where it checks them.
+// hand-back. Separate entries keep decodeExecSeqsAsm's loop exactly as it
+// was: a run-time switch in the shared loop cost 1 to 2% on blocks that
+// never split. With SEQ_TAIL defined (decodeExecSeqsTailAsm) the loop runs
+// to the end of the bitstream, with reloads that stop at src[0]; the other
+// entries stop at ptr < 16 and reload without that check. On entry AX is
+// the argument a; the including TEXT supplies the pending and exit labels
+// (SEQ_PENDING, SEQ_EXIT). No a+0(FP) here: go vet's asmdecl does not read
+// #included files, so every FP reference stays in the .s, where it checks
+// them.
 
 	MOVQ ARGS_BC(AX), R8
 	MOVQ ARGS_CONSUMED(AX), R9
 	MOVQ ARGS_SRC(AX), CX
 	MOVQ ARGS_PTR(AX), R10
 	ADDQ CX, R10
+#ifndef SEQ_TAIL
 	LEAQ 16(CX), CX
+#endif
 	MOVQ CX, SRCLIMIT(SP)
 
 	MOVQ ARGS_TLL(AX), CX
@@ -63,11 +68,14 @@
 	MOVQ $0, ARGS_PENDING(AX)
 
 loop:
-	// for ; nbSeq > 1; nbSeq-- (the last sequence is Go's), while ptr >= 16.
+	// for ; nbSeq > 1; nbSeq-- (the last sequence is Go's), while ptr >= 16
+	// (not with SEQ_TAIL).
 	CMPQ NBSEQ(SP), $1
 	JLE  exit
+#ifndef SEQ_TAIL
 	CMPQ R10, SRCLIMIT(SP)
 	JCS  exit
+#endif
 
 	// decodeSequence, from the three cells.
 	MOVQ R13, SI
@@ -161,7 +169,11 @@ mlDone:
 	ADDQ    AX, BP
 	CMPQ    BP, $31
 	JCS     reload1Done
+#ifdef SEQ_TAIL
+	RELOAD_TAIL(reload1Done, reload1Clamp)
+#else
 	RELOAD(reload1Done)
+#endif
 
 reload1Done:
 	TESTQ AX, AX
@@ -173,7 +185,11 @@ llDone:
 	UPDATE_STATE(R13, TLL, STLL)
 	UPDATE_STATE(R14, TML, STML)
 	UPDATE_STATE(R15, TOF, STOF)
+#ifdef SEQ_TAIL
+	RELOAD_TAIL(reload2Done, reload2Clamp)
+#else
 	RELOAD(reload2Done)
+#endif
 
 reload2Done:
 	// execSequence: hand back the sequences for its slow paths.
@@ -301,6 +317,14 @@ seqDone:
 	MOVQ OMEND(SP), R11      // op += sequenceLength
 	DECQ NBSEQ(SP)
 	JMP  loop
+
+#ifdef SEQ_TAIL
+reload1Clamp:
+	RELOAD_CLAMP(reload1Done)
+
+reload2Clamp:
+	RELOAD_CLAMP(reload2Done)
+#endif
 
 extPath:
 	// execSequence's "offset beyond prefix" branch: the match starts

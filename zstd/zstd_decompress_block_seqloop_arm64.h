@@ -3,18 +3,24 @@
 // in each TEXT symbol; labels are local to each symbol), as
 // zstd_decompress_block_seqloop_amd64.h: the same branches in the same
 // order, with the same hand-backs. With SEQ_SPLIT defined it adds
-// ZSTD_execSequenceSplitLitBuffer's oMatchEnd > oend_w hand-back. On entry
-// R23 is the argument a; the including TEXT supplies the pending and exit
-// labels (SEQ_PENDING, SEQ_EXIT). No a+0(FP) here: go vet's asmdecl does
-// not read #included files, so every FP reference stays in the .s, where
-// it checks them.
+// ZSTD_execSequenceSplitLitBuffer's oMatchEnd > oend_w hand-back. With
+// SEQ_TAIL defined (decodeExecSeqsTailAsm) the loop runs to the end of the
+// bitstream, with reloads that stop at src[0]; the other entries stop at
+// ptr < 16. On entry R23 is the argument a; the including TEXT supplies the
+// pending and exit labels (SEQ_PENDING, SEQ_EXIT). No a+0(FP) here: go
+// vet's asmdecl does not read #included files, so every FP reference stays
+// in the .s, where it checks them.
 
 	MOVD ARGS_BC(R23), R0
 	MOVD ARGS_CONSUMED(R23), R1
 	MOVD ARGS_SRC(R23), R24
 	MOVD ARGS_PTR(R23), R2
 	ADD  R24, R2, R2
+#ifdef SEQ_TAIL
+	MOVD R24, R22
+#else
 	ADD  $16, R24, R22
+#endif
 
 	MOVD ARGS_TLL(R23), R14
 	MOVD ARGS_STLL(R23), R24
@@ -49,11 +55,14 @@
 	MOVD ZR, ARGS_PENDING(R23)
 
 loop:
-	// for ; nbSeq > 1; nbSeq-- (the last sequence is Go's), while ptr >= 16.
+	// for ; nbSeq > 1; nbSeq-- (the last sequence is Go's), while ptr >= 16
+	// (not with SEQ_TAIL).
 	CMP $1, R17
 	BLE exit
+#ifndef SEQ_TAIL
 	CMP R22, R2
 	BLO exit
+#endif
 
 	// decodeSequence, from the three cells.
 	LSR  $32, R5, R11       // litLength = llDInfo.baseValue
@@ -136,7 +145,11 @@ mlDone:
 	ADD  R23, R25, R25
 	CMP  $31, R25
 	BLO  reload1Done
+#ifdef SEQ_TAIL
+	RELOAD_TAIL(reload1Done, reload1Clamp)
+#else
 	RELOAD(reload1Done)
+#endif
 
 reload1Done:
 	CBZ R23, llDone
@@ -147,7 +160,11 @@ llDone:
 	UPDATE_STATE(R5, R14, STLL)
 	UPDATE_STATE(R6, R15, STML)
 	UPDATE_STATE(R7, R16, STOF)
+#ifdef SEQ_TAIL
+	RELOAD_TAIL(reload2Done, reload2Clamp)
+#else
 	RELOAD(reload2Done)
+#endif
 
 reload2Done:
 	// execSequence: hand back the sequences for its slow paths.
@@ -265,3 +282,11 @@ seqDone:
 	MOVD R24, R3            // op += sequenceLength
 	SUB  $1, R17, R17
 	B    loop
+
+#ifdef SEQ_TAIL
+reload1Clamp:
+	RELOAD_CLAMP(reload1Done)
+
+reload2Clamp:
+	RELOAD_CLAMP(reload2Done)
+#endif
