@@ -56,6 +56,7 @@ func (dt *DTable) Init(maxTableLog uint) {
 
 // rescaleStats increases tableLog to targetTableLog and rescales the
 // stats; a no-op if tableLog > targetTableLog. It returns the new tableLog.
+// len(huffWeight) must cover nbSymbols rounded up to 8.
 // C: huf_decompress.c:HUF_rescaleStats
 func rescaleStats(huffWeight []byte, rankVal []uint32, nbSymbols, tableLog, targetTableLog uint32) uint32 {
 	if tableLog > targetTableLog {
@@ -63,11 +64,17 @@ func rescaleStats(huffWeight []byte, rankVal []uint32, nbSymbols, tableLog, targ
 	}
 	if tableLog < targetTableLog {
 		scale := targetTableLog - tableLog
-		// Increase the weight for all non-zero probability symbols by scale.
-		for s := uint32(0); s < nbSymbols; s++ {
-			if huffWeight[s] != 0 {
-				huffWeight[s] += byte(scale)
-			}
+		// Increase the weight for all non-zero probability symbols by
+		// scale, eight at a time and, as C, without a branch per symbol.
+		// A weight w is at most TableLogMax, so w+0x7F has its high bit
+		// set exactly when w != 0, and neither addition carries into the
+		// next byte. Up to seven bytes past nbSymbols change too; nothing
+		// reads them.
+		for s := uint32(0); s < nbSymbols; s += 8 {
+			b := huffWeight[s : s+8]
+			w := binary.LittleEndian.Uint64(b)
+			nonZero := (w + 0x7f7f7f7f7f7f7f7f) & 0x8080808080808080 >> 7
+			binary.LittleEndian.PutUint64(b, w+nonZero*uint64(scale))
 		}
 		// Update rankVal to reflect the new weights. All weights except 0
 		// get moved to weight + scale. Weights [1, scale] are empty.
