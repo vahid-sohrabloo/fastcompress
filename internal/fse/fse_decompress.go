@@ -135,6 +135,11 @@ func decompressUsingDTable(dst, src []byte, dt *dTable) (int, error) {
 		return 0, ErrCorruptionDetected
 	}
 
+	// The loops below, in assembly where it is on.
+	if n, ran, err := decompressFast(dst, &bitD, state1.state, state2.state, dt.table); ran {
+		return n, err
+	}
+
 	// 4 symbols per loop
 	for ; bitD.Reload() == bitstream.DStreamUnfinished && op < olimit; op += 4 {
 		dst[op] = state1.decodeSymbol(&bitD)
