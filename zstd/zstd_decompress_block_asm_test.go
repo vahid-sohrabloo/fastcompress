@@ -19,9 +19,10 @@ import (
 	"github.com/vahid-sohrabloo/fastcompress/internal/guardmem"
 )
 
-// runGo is decodeExecSeqsAsm in Go, the oracle of the equivalence tests:
-// while f.nbSeq > 1 and the bitstream's ptr >= 16, it decodes a sequence
-// (stopping first, with nothing consumed, on an offset cell with
+// runGo is seqFast.runAsm's loops in Go, the oracle of the equivalence
+// tests: while f.nbSeq > 1 (and, with f.split, the bitstream's ptr >= 16;
+// without, a ptr < 16 needs a bitstream of 8 bytes or more), it decodes a
+// sequence (stopping first, with nothing consumed, on an offset cell with
 // nbAdditionalBits 1 and baseValue != 1) and executes it with execSequence,
 // unless execSequence would take a slow path (execSequenceEnd, or the
 // extDict path or its error): then it returns that sequence, pending.
@@ -35,9 +36,15 @@ import (
 // It counts each branch of the assembly it takes in seqArmHits.
 func (f *seqFast) runGo(st *seqState, ext []byte) (seq, bool) {
 	for f.nbSeq > 1 {
-		if _, ptr, _, _ := st.dStream.Raw(); ptr < 16 {
-			seqArmHits[armStopPtr].Add(1)
-			return seq{}, false
+		src, ptr, _, _ := st.dStream.Raw()
+		if ptr < 16 {
+			if f.split {
+				seqArmHits[armSplitStopPtr].Add(1)
+				return seq{}, false
+			}
+			if len(src) < 8 {
+				return seq{}, false
+			}
 		}
 		if c := &st.stateOffb.table[st.stateOffb.state]; c.nbAdditionalBits == 1 && c.baseValue != 1 {
 			seqArmHits[armStopInvariant].Add(1)
@@ -45,8 +52,16 @@ func (f *seqFast) runGo(st *seqState, ext []byte) (seq, bool) {
 		}
 		countDecodeArms(st)
 		sq := decodeSequence(st, false, false)
-		if _, _, _, consumed := st.dStream.Raw(); consumed > 64 {
+		if ptr < 16 {
+			seqArmHits[armTail].Add(1)
+		}
+		_, after, _, consumed := st.dStream.Raw()
+		if consumed > 64 {
 			seqArmHits[armOverflow].Add(1)
+		}
+		// A reload that wanted to go below src[0], or found ptr there.
+		if after == 0 && consumed >= 8 && consumed <= 64 {
+			seqArmHits[armReloadClamp].Add(1)
 		}
 		oLitEnd := f.op + sq.litLength
 		oMatchEnd := oLitEnd + sq.matchLength
@@ -160,7 +175,9 @@ type seqArm int
 
 const (
 	armStopNbSeq     seqArm = iota // nbSeq <= 1: the last sequence is Go's
-	armStopPtr                     // ptr < 16
+	armTail                        // a sequence decoded from ptr < 16
+	armReloadClamp                 // a reload stopped at src[0]
+	armSplitStopPtr                // split: ptr < 16
 	armStopInvariant               // TABLE INVARIANT broken
 	armPendLit                     // iLitEnd > litEnd (execSequenceEnd)
 	armPendOend                    // oMatchEnd > oend - 32 (execSequenceEnd)
@@ -205,7 +222,7 @@ const (
 )
 
 var seqArmNames = [numSeqArms]string{
-	"stop nbSeq<=1", "stop ptr<16", "stop table invariant",
+	"stop nbSeq<=1", "tail ptr<16", "reload at src[0]", "split stop ptr<16", "stop table invariant",
 	"pending iLitEnd>litEnd", "pending oMatchEnd>oendW", "pending offset>oLitEnd-prefixStart",
 	"offset ofBits>1", "repeat ofBits 0", "repeat ofBits 0 ll0", "repeat offset 1", "repeat offset 2",
 	"repeat offset 3", "reload1", "mlBits 0", "llBits 0", "reload1 skipped", "reload in overflow",
@@ -222,16 +239,15 @@ var seqArmHits [numSeqArms]atomic.Int64
 // equivArms are the branches TestSeqAsmEquiv's valid and corrupted corpus
 // blocks reach, syntheticArms TestSeqAsmSyntheticStates's states;
 // together, every branch (TestSeqAsmArmLists). The corpus does not reach
-// the last sequence before the bitstream's last 16 bytes, a broken table
-// invariant, oend (the blocks have room), a first reload (31 extra bits),
+// the last sequence, a broken table invariant, oend (the blocks have room), a first reload (31 extra bits),
 // overflow, or in split mode the output catching up with the literals
 // (they start at least litBufferExtraSize - 32 bytes ahead); the
 // synthetic block's matches are short.
 var (
-	equivArms = []seqArm{armStopPtr, armPendLit, armPendOffset, armOfNew, armRep0, armRep0LL0,
+	equivArms = []seqArm{armTail, armReloadClamp, armSplitStopPtr, armPendLit, armPendOffset, armOfNew, armRep0, armRep0LL0,
 		armRep1, armRep2, armRep3, armMLBits0, armLLBits0, armReload1Skip, armLit16, armLit32, armLitLoop,
 		armOffLt8, armOff8To15, armOff16, armMatchLoop, armCopy8Loop, armSplitBreak, armSplitExec}
-	syntheticArms = []seqArm{armStopNbSeq, armStopPtr, armStopInvariant, armPendLit, armPendOend,
+	syntheticArms = []seqArm{armStopNbSeq, armTail, armReloadClamp, armStopInvariant, armPendLit, armPendOend,
 		armPendOffset, armOfNew, armRep0, armRep0LL0, armRep1, armRep2, armRep3, armReload1,
 		armMLBits0, armLLBits0, armReload1Skip, armOverflow, armLit16, armLit32, armLitLoop, armOffLt8, armOff8To15,
 		armOff16, armCopy8Loop, armSplitBreak, armPendSplit, armSplitExec}
@@ -520,6 +536,13 @@ func TestSeqAsmGuard(t *testing.T) {
 			if r.f.nbSeq != f.nbSeq || r.f.op != f.op || r.f.litPtr != f.litPtr || ptr2 != ptr || consumed2 != consumed {
 				t.Errorf("%s: split: the loop ran", c.name)
 			}
+		}
+		// A bitstream under 8 bytes has no 8 bytes to reload from.
+		r := newSeqFastRun(t, d, out, hist, dstCap, block[litCSize+hSize:], nbSeq, false, false, false)
+		s, _, container, consumed := r.st.dStream.Raw()
+		r.st.dStream.SetRaw(s[:7], 0, container, consumed)
+		if e := sequencesFast(&r.st, &r.f, nil); e != 0 || r.f.nbSeq != nbSeq {
+			t.Errorf("short bitstream: the loop ran (err %d)", e)
 		}
 	})
 }
